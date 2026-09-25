@@ -1,0 +1,84 @@
+# Everything tare reads, and nothing else.
+#
+# tare never writes: there is no verb here but get, list and watch-free reads,
+# and the one subresource is the API server's service proxy, which is how the
+# tool queries your existing Prometheus without a port-forward.
+#
+# Most people run tare as themselves with a kubeconfig that already has cluster
+# read access, and need none of this. It is here for the other case: a CI job,
+# a shared runner, or an admin who would rather hand out exactly this.
+#
+#   kubectl apply -f deploy/rbac.yaml
+#   kubectl -n kube-system create token tare --duration 1h
+#
+# Check what a token can actually do before trusting a report from it:
+#
+#   kubectl tare check
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tare
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tare-reader
+rules:
+  # The container inventory. Without this there is no report at all.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
+
+  # Querying the cluster's own Prometheus through the API server proxy.
+  # Drop these two if you always pass --prometheus.
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get, list]
+  - apiGroups: [""]
+    resources: [services/proxy]
+    verbs: [get]
+
+  # Controller pod templates. This is the only place a request the author never
+  # wrote is still distinguishable from one Kubernetes copied out of the limit.
+  - apiGroups: [apps]
+    resources: [deployments, replicasets, statefulsets, daemonsets]
+    verbs: [get, list]
+  - apiGroups: [batch]
+    resources: [jobs, cronjobs]
+    verbs: [get, list]
+
+  # Node inventory: the node-count delta and the commitment table, which are
+  # the only figures in the report that correspond to a bill.
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list]
+
+  # Whether a node could actually be drained.
+  - apiGroups: [policy]
+    resources: [poddisruptionbudgets]
+    verbs: [get, list]
+
+  # What else is already managing these workloads. An HPA scaling on CPU
+  # utilisation measures against the request, and a VPA in Auto mode writes the
+  # very fields tare would recommend.
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list]
+  - apiGroups: [autoscaling.k8s.io]
+    resources: [verticalpodautoscalers]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tare-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tare-reader
+subjects:
+  - kind: ServiceAccount
+    name: tare
+    namespace: kube-system

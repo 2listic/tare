@@ -1,0 +1,249 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/mfranzon/tare/internal/discover"
+	"github.com/mfranzon/tare/internal/metrics"
+)
+
+// runCheck answers, before any report is produced, what this cluster can and
+// cannot tell tare.
+//
+// A report already says what it could not see, but only after doing all the
+// work, and only about the signals it got as far as querying. The failures
+// that stop a first run are further down: a token that cannot list pods, an
+// API server proxy that is closed, a Prometheus that scrapes applications and
+// not cAdvisor. Each of those surfaces as a Kubernetes error in the middle of
+// something else, and none of them says what to do next.
+//
+// Every line here names what it costs, because "missing" is not actionable and
+// "no OOMKill evidence, so a memory recommendation cannot be corroborated" is.
+func runCheck(ctx context.Context, out io.Writer, kc *discover.Client, namespaces []string, promURL string, window time.Duration, all bool) error {
+	fmt.Fprintf(out, "kubectl-tare %s\n\n", buildVersion())
+
+	var fatal []string
+
+	fmt.Fprintln(out, "cluster")
+	ver, err := kc.ServerVersion()
+	if err != nil {
+		mark(out, false, "API server", err.Error())
+		return fmt.Errorf("cannot reach the cluster, so nothing below could be checked")
+	}
+	mark(out, true, "API server", ver)
+
+	scope := ""
+	if len(namespaces) > 0 {
+		scope = namespaces[0]
+	}
+	pods, err := kc.CountPods(ctx, namespaces)
+	switch {
+	case err != nil:
+		mark(out, false, "pods visible", err.Error())
+		fatal = append(fatal, "tare cannot list pods, which is the whole inventory")
+	case pods == 0:
+		mark(out, false, "pods visible", "none in "+scopeName(namespaces))
+		fatal = append(fatal, "no pods are visible in "+scopeName(namespaces))
+	default:
+		mark(out, true, "pods visible", fmt.Sprintf("%d in %s", pods, scopeName(namespaces)))
+	}
+
+	fmt.Fprintf(out, "\npermissions (as you, %s)\n", scopeName(namespaces))
+	for _, p := range kc.CheckPermissions(ctx, scope) {
+		switch {
+		case p.Err != nil:
+			mark(out, false, p.String(), "could not be checked: "+p.Err.Error())
+		case p.Allowed:
+			mark(out, true, p.String(), "")
+		default:
+			mark(out, false, p.String(), p.Buys)
+			if p.Required {
+				fatal = append(fatal, "cannot "+p.String())
+			}
+		}
+	}
+
+	fmt.Fprintln(out, "\nmetrics backend")
+	src, describe, err := checkSource(ctx, kc, promURL)
+	if err != nil {
+		mark(out, false, "endpoint", err.Error())
+		fatal = append(fatal, "no reachable Prometheus-compatible endpoint")
+		return summarise(out, fatal, nil)
+	}
+	mark(out, true, "endpoint", describe)
+
+	if err := src.Ping(); err != nil {
+		mark(out, false, "query API", err.Error())
+		fatal = append(fatal, "the endpoint was found but does not answer queries")
+		return summarise(out, fatal, nil)
+	}
+	mark(out, true, "query API", "answers /api/v1/query")
+
+	avail, err := src.AvailableWindow(namespaces, window)
+	switch {
+	case err != nil:
+		mark(out, false, "history", err.Error())
+	case avail == 0:
+		mark(out, false, "history", fmt.Sprintf(
+			"less than an hour. %s was asked for; every finding would be rated low confidence",
+			humanDuration(window)))
+	case avail < window:
+		mark(out, true, "history", fmt.Sprintf("%s (%s asked for, so the window will be shortened)",
+			humanDuration(avail), humanDuration(window)))
+	default:
+		mark(out, true, "history", humanDuration(avail))
+	}
+
+	fmt.Fprintln(out, "\nseries")
+	var degraded []string
+	for _, c := range src.Preflight(namespaces, window) {
+		switch {
+		case c.Err != nil:
+			mark(out, false, c.Metric, c.Err.Error())
+		case c.Series == 0:
+			mark(out, false, c.Metric, "absent: "+c.Buys)
+			if c.Required {
+				fatal = append(fatal, c.Metric+" is not exported by this backend")
+			} else {
+				degraded = append(degraded, c.Metric)
+			}
+		case c.Note != "":
+			mark(out, false, c.Metric, c.Note)
+			degraded = append(degraded, c.Metric)
+		default:
+			mark(out, true, c.Metric, fmt.Sprintf("%d series", c.Series))
+		}
+	}
+
+	if note, ok := checkCoverage(ctx, kc, src, namespaces, all, window); !ok {
+		degraded = append(degraded, "metrics coverage")
+		mark(out, false, "coverage", note)
+	} else {
+		mark(out, true, "coverage", note)
+	}
+
+	return summarise(out, fatal, degraded)
+}
+
+// checkCoverage compares the containers the cluster has with the containers the
+// backend holds series for. It costs one pod list and one instant query, which
+// is worth paying to find out that Prometheus is scraping two namespaces out of
+// forty before a report says nothing about the other thirty-eight.
+func checkCoverage(ctx context.Context, kc *discover.Client, src *metrics.Prom, namespaces []string, all bool, window time.Duration) (string, bool) {
+	containers, err := kc.Containers(ctx, namespaces)
+	if err != nil {
+		return "could not list containers: " + err.Error(), false
+	}
+	covered, err := src.CoveredKeys(namespaces, window)
+	if err != nil {
+		return "could not be measured: " + err.Error(), false
+	}
+
+	missingBy := map[string]int{}
+	var total, have int
+	for _, c := range containers {
+		if !all && discover.SkipNamespace(c.Namespace) {
+			continue
+		}
+		total++
+		if covered[metrics.Key{Namespace: c.Namespace, Pod: c.Pod, Container: c.Name}] {
+			have++
+			continue
+		}
+		missingBy[c.Namespace]++
+	}
+	switch {
+	case total == 0:
+		return "no containers in scope to cover", false
+	case have == total:
+		return fmt.Sprintf("all %d containers in scope have metrics", total), true
+	}
+
+	worst := make([]string, 0, len(missingBy))
+	for ns, n := range missingBy {
+		worst = append(worst, fmt.Sprintf("%s (%d)", ns, n))
+	}
+	sort.Slice(worst, func(i, j int) bool { return worst[i] < worst[j] })
+	if len(worst) > 4 {
+		worst = append(worst[:4], "...")
+	}
+	return fmt.Sprintf("only %d of %d containers in scope have metrics. Missing in %s. "+
+		"Those arrive as NO-DATA rows rather than as recommendations. Usual causes: Prometheus "+
+		"scrapes a subset of namespaces, a kubelet has stopped reporting, or the pods are newer "+
+		"than the first scrape", have, total, strings.Join(worst, ", ")), false
+}
+
+// checkSource resolves the endpoint the same way a report does, so that check
+// and report cannot disagree about where the data would come from.
+func checkSource(ctx context.Context, kc *discover.Client, promURL string) (*metrics.Prom, string, error) {
+	if promURL != "" {
+		p := metrics.NewProm(promURL)
+		p.Ctx = ctx
+		return p, promURL + " (from --prometheus)", nil
+	}
+	candidates, err := kc.FindPrometheus(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(candidates) == 0 {
+		return nil, "", fmt.Errorf("no Prometheus-compatible service found; pass --prometheus http://... " +
+			"or set TARE_PROMETHEUS")
+	}
+	c := candidates[0]
+	p := metrics.New(&metrics.ProxyTransport{
+		Clientset: kc.Clientset(),
+		Namespace: c.Namespace, Service: c.Service, Port: c.Port, Scheme: c.Scheme,
+	})
+	p.Ctx = ctx
+	describe := c.String()
+	if len(candidates) > 1 {
+		describe += fmt.Sprintf(", %d other candidate(s); --prometheus picks a different one", len(candidates)-1)
+	}
+	return p, describe, nil
+}
+
+func mark(w io.Writer, ok bool, label, note string) {
+	sym := "✗"
+	if ok {
+		sym = "✓"
+	}
+	if note == "" {
+		fmt.Fprintf(w, "  %s %s\n", sym, label)
+		return
+	}
+	// The note is the part worth reading, and it is often a sentence. Wrapping
+	// it under the label keeps the column of marks scannable.
+	lines := wrap(note, 74)
+	if len(lines) == 0 {
+		lines = []string{""}
+	}
+	fmt.Fprintf(w, "  %s %-46s %s\n", sym, label, lines[0])
+	for _, l := range lines[1:] {
+		fmt.Fprintf(w, "  %s %-46s %s\n", " ", "", l)
+	}
+}
+
+func summarise(w io.Writer, fatal, degraded []string) error {
+	fmt.Fprintln(w)
+	if len(fatal) > 0 {
+		for _, f := range fatal {
+			fmt.Fprintln(w, "  -", f)
+		}
+		return fmt.Errorf("this cluster cannot produce a report yet: %s", strings.Join(fatal, "; "))
+	}
+	if len(degraded) > 0 {
+		fmt.Fprintf(w, "ready, with gaps: %s\n", strings.Join(degraded, ", "))
+		fmt.Fprintln(w, "each is explained above. Findings that depended on them are downgraded and")
+		fmt.Fprintln(w, "the report says so, rather than reading a missing measurement as a zero.")
+		fmt.Fprintln(w, "Run: kubectl tare report")
+		return nil
+	}
+	fmt.Fprintln(w, "ready: every signal tare uses is present, for every container in scope.")
+	fmt.Fprintln(w, "Run: kubectl tare report")
+	return nil
+}

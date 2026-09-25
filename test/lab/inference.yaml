@@ -1,0 +1,78 @@
+# Inference workloads for tare's GPU findings.
+#
+# Deliberately CPU-only and, for vLLM, deliberately unpullable. tare's claim for
+# this class of workload is that it reads the CONFIGURATION rather than the
+# behaviour, because an inference server's observed GPU memory is set by a
+# startup flag and says nothing about its demand. A pod stuck in
+# ImagePullBackOff is therefore a valid test case and not a broken one: it has a
+# spec, which is all tare needs, and it costs nothing to keep.
+#
+# The vLLM image tag does not exist on purpose. The real one is ~10GB, cannot
+# run without a GPU on this cluster, and would be downloaded for nothing.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: ollama-cpu, namespace: tare-lab}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: ollama-cpu}}
+  template:
+    metadata: {labels: {app: ollama-cpu}}
+    spec:
+      containers:
+      - name: ollama
+        image: ollama/ollama:0.5.4
+        env:
+        - {name: OLLAMA_KEEP_ALIVE, value: "-1"}
+        - {name: OLLAMA_MAX_LOADED_MODELS, value: "3"}
+        - {name: OLLAMA_NUM_PARALLEL, value: "4"}
+        resources:
+          requests: {cpu: 500m, memory: 2Gi}
+          limits: {cpu: "2", memory: 4Gi}
+---
+# A vLLM spec that never starts. Every finding below was produced against this
+# pod while it sat in ImagePullBackOff: the 14.9GiB weight figure, the 90%
+# device reservation, the 8.4M-token KV budget and the host-memory swap space.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: vllm-8b, namespace: tare-lab}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: vllm-8b}}
+  template:
+    metadata: {labels: {app: vllm-8b}}
+    spec:
+      containers:
+      - name: server
+        image: vllm/vllm-openai:spec-only-do-not-pull
+        args:
+        - --model
+        - meta-llama/Llama-3.1-8B-Instruct
+        - --gpu-memory-utilization
+        - "0.9"
+        - --max-model-len
+        - "32768"
+        - --max-num-seqs
+        - "256"
+        - --swap-space
+        - "8"
+        resources:
+          requests: {cpu: "1", memory: 4Gi}
+          limits: {cpu: "4", memory: 8Gi}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: llamacpp-nogpu, namespace: tare-lab}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: llamacpp-nogpu}}
+  template:
+    metadata: {labels: {app: llamacpp-nogpu}}
+    spec:
+      containers:
+      - name: srv
+        image: ghcr.io/ggerganov/llama.cpp:server
+        command: ["/llama-server"]
+        args: ["-m", "/models/qwen2.5-3b-q4.gguf", "--host", "0.0.0.0"]
+        resources:
+          requests: {cpu: 500m, memory: 1Gi}
+          limits: {cpu: "2", memory: 2Gi}

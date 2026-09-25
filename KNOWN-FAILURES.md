@@ -1,0 +1,640 @@
+# Known failures
+
+Every serious defect found in tare so far, in the order they were found.
+
+This file exists because tare's claim is not that it is clever. It is that it
+will not confidently tell you something false. That claim is worth exactly as
+much as the evidence behind it, and the evidence is this list: twenty-nine times
+this tool produced an answer it had no business producing, almost always a clean
+and plausible one, and twenty-nine times it was caught and written down.
+
+Two of them surfaced as an error: a run that timed out on a cluster larger than
+the lab (25), and a denied HPA read that aborted (26). The other twenty-seven did
+not surface at all, which is the whole point.
+
+## The shape
+
+They are all the same defect wearing different clothes: **a measurement that
+returns a reassuring, meaningless number rather than failing.** A missing metric
+read as a comfortable zero. A query that matched nothing. A ratchet applied to
+the wrong resource. A flag declared and never assigned. In each case the report
+looked normal, the numbers were plausible, and a user acting on them would have
+been acting on nothing.
+
+If you are evaluating this tool, the useful question is not whether it has bugs.
+It is whether its bugs are the kind that announce themselves. These were not, so
+assume the next one is not either.
+
+---
+
+## 1. CFS throttle metrics were declared absent
+
+**Looked like:** a fresh test cluster exported no
+`container_cpu_cfs_throttled_periods_total` at all. The conclusion written down
+was "k3s does not export throttle metrics."
+
+**Was actually:** cAdvisor exports them only for containers that have a CPU
+quota. No workload on that cluster had a CPU limit. On a cluster where some do,
+they exist — for 3 of 23 containers, against PSI's 23 of 23.
+
+**Caught by:** re-measuring with a workload that had a limit.
+
+**Consequence if shipped:** throttling would have been dropped from the design
+as unavailable, on a sample of zero.
+
+## 2. A 5-minute rate window averaged away a JVM's startup burst
+
+**Looked like:** a 10m CPU limit recommendation for Tomcat.
+
+**Was actually:** the inner `rate()` window was 5 minutes, and Tomcat's startup
+burst lasts about 20 seconds. Averaged over five minutes it disappears. A Tomcat
+draws **19.7x** more CPU booting than running; the recommendation would have
+throttled every restart into a crash loop.
+
+**Caught by:** disbelieving the number.
+
+**Found a second time** in the PSI peak query, which had the identical defect.
+
+## 3. A threshold sweep that measured nothing
+
+**Looked like:** five of nine thresholds reported as having no effect on any
+outcome, which read as "these knobs do not matter."
+
+**Was actually:** four independent harness faults — no scenario was ever
+starved, no archetype sat near a decision boundary, only replay safety was
+scored, and averaging across archetypes hid single-archetype effects.
+
+**Caught by:** asking what the sweep would look like if it were broken, and
+finding that it would look exactly like that.
+
+## 4. `-o patch` output was rejected by every workload
+
+**Looked like:** correct YAML.
+
+**Was actually:** a partial manifest for `kubectl apply`, which three-way-merges
+a fragment as the *complete* desired state and nulls out the selector and image.
+Server-side dry run rejected all three test workloads.
+
+**Fixed by:** emitting `kubectl patch --type=strategic` commands instead, which
+touch only the named fields. Verified against a live API server.
+
+## 5. The documented invocation silently ignored its own flags
+
+**Looked like:** `kubectl tare report -n prod` ran and printed a report.
+
+**Was actually:** Go's `flag.Parse` stops at the first non-flag argument, so
+every flag after `report` was discarded and the tool reported on the whole
+cluster with defaults. This was the invocation in the README.
+
+## 6. The long-run load generator sent almost no load
+
+**Looked like:** a healthy 14-day stability experiment collecting rows on
+schedule.
+
+**Was actually:** a busybox `wget` loop that burned 5.5x more CPU than the nginx
+it was targeting. The target sat at 1% of its request and its recommendation
+clamped to the CPU floor. A floored recommendation is constant by construction,
+so the experiment's question — "is the recommendation stable over 14 days?" —
+would have answered *yes* without the analyzer ever reading real data.
+
+**Rule learned:** measure the load generator against its target before trusting
+any load-based measurement.
+
+## 7. Both lab cronjobs sat in ImagePullBackOff for four hours
+
+**Looked like:** `history.csv` filling normally.
+
+**Was actually:** `bitnami/kubectl:1.33` had started returning 404 after Bitnami
+retired their Docker Hub catalog. The workload that was supposed to redeploy
+never redeployed, and the limit toggle — the only producer of the limit-trend
+signal — had never fired once.
+
+**Rule learned:** for anything on a clock, exercise every time-dependent path by
+hand and confirm it changed something observable *before* starting the clock.
+
+## 8. Two signal flags were declared, never assigned, and never read
+
+**Looked like:** `PSISeen` and `ThrottleSeen` on every record, serialised as
+`false`, beside a `PSIWaiting` field carrying a real value.
+
+**Was actually:** dead fields. Anyone filtering the long-run record on them
+would have got zero rows out of a full dataset.
+
+## 9. The saturation ratchet clamped the wrong resource
+
+**Looked like:** a JVM using 65MiB of its 512Mi request, recommended at exactly
+512Mi. A measurement.
+
+**Was actually:** the input echoed back. When a verdict was `SATURATED`, all
+four recommendations were clamped to at least their current values regardless of
+*which* resource was starved. The container was CPU-starved on PSI, so its
+memory recommendation froze at its own request. Symmetric in the other
+direction: an OOMKill froze the CPU recommendation.
+
+**Caught by:** noticing `recMem == memReq` exactly, for ten consecutive hourly
+snapshots.
+
+**Fixed by:** splitting the ratchet per resource, plus `reconcileFloors`, which
+clears a `CPUFloored`/`MemFloored` flag whose value was later raised — those
+flags were stale too, and the analysis script was labelling a live series as
+pinned to the floor.
+
+## 10. A 7-day window on a cluster holding 18 hours of data
+
+**Looked like:** a normal report.
+
+**Was actually:** tare's early-window queries carry `offset window-1h`. On a
+young cluster that offset matches no series at all, so `MemEarly` and
+`MemLimitEarly` were zero for every container in every snapshot. Leak detection
+and limit-trend inference are both guarded on those being non-zero, so **both
+were inert for an entire experiment** while every report looked ordinary. At a
+12h window the leaking workload is detected immediately.
+
+## 11. The lab's limit toggle replaced the pod it was measuring
+
+**Looked like:** a workload whose memory limit changed on schedule, producing
+the limit-trend signal.
+
+**Was actually:** changing a limit on a Deployment rolls the pod, and tare keys
+observations by pod name, so the replacement had no early observation and
+`MemLimitEarly` was zero by construction. The workload existed solely to produce
+that signal and could never have produced it.
+
+**Fixed by:** resizing the pod in place through the `pods/resize` subresource.
+
+**Worth knowing:** on any cluster without in-place resize, a memory limit change
+always replaces the pod, so limit-trend ceiling inference may be unreachable in
+production too.
+
+## 12. Trend values took the last pod instead of the worst
+
+**Looked like:** correct per-workload aggregation.
+
+**Was actually:** `MemEarly` and `MemLate` were assigned rather than maxed inside
+the loop over a workload's pods, unlike every other field three lines above. A
+two-replica workload reported whichever replica came last, so a leaking replica
+beside a freshly-rolled one reported `OK`.
+
+**Caught by:** reverting the fix and watching the new regression test go red. It
+would otherwise have passed for free.
+
+## 13. Saturation was decided on peak pressure, against a threshold documented as sustained
+
+**Looked like:** a container correctly identified as starved.
+
+**Was actually:** `max_over_time` over the window, so a single stalled minute
+marked a container `SATURATED` for as long as the window was wide — and a peak
+over a widening window never decreases, so verdicts drift one way over a
+fortnight. A JVM stalling 1.7% of minutes on GC while using 1.5% of its request
+was called starved, and defect 9's ratchet then pinned its recommendation to its
+own request.
+
+**The obvious fix was wrong.** Switching the verdict to the window mean dropped
+the simulator from 36/36 to 25/36, because a genuinely starved spiky workload
+has a mean below the threshold too. No pressure statistic separates the two
+cases. The discriminator is **utilisation**: a container cannot be starved of
+CPU it never asked for. A new `MinSaturationUtil` restores 36/36.
+
+**The part worth more than the fix:** the simulator scores 36/36 with that
+threshold *disabled*, because every simulated stall comes from the container's
+own demand meeting its own allocation — pressure and utilisation always move
+together there. On real hardware they come apart. No amount of simulator work
+would have found this.
+
+## 14. CFS throttling had the identical peak defect
+
+Reported at 5.9% throttled; sustained figure was 0.17%.
+
+## 15. The report's pressure column showed only the peak
+
+`psi 0.031` and `throttle 5.9%` read as current state. Now `psi 0.0005/0.031`,
+mean and peak.
+
+## 16. The new sustained signals were not gated on their own availability
+
+**Was actually:** defect 8, re-introduced inside the fix for defect 13. A
+cluster where the sustained queries failed would have printed `psi 0.0000/0.031`
+— the most reassuring number on the row, for a value nobody measured.
+
+**Caught by:** grepping for declared-but-never-read signals, because defect 8
+had happened before.
+
+## 17. Restart counts were the pod's lifetime total, not restarts in the window
+
+`restartCount` is cumulative and resets only when the pod is replaced, so a
+month-old pod reported every restart it had ever had against a 7-day window.
+
+## 18. A trend signal was marked available when only half of it was measured
+
+**Looked like:** a leaking container reported `WASTE`, confidence `medium`, with
+a 674MiB recommendation, no caveats, and nothing listed as missing.
+
+**Was actually:** each trend needs two queries, an early window and a late one.
+Signal availability is marked per returned series, so the late query alone was
+enough to mark `memory-trend` present while the early query matched nothing and
+`MemEarly` was zero. Leak detection is guarded on `MemEarly > 0`, so it silently
+never ran, and the "unbounded memory growth cannot be detected" caveat never
+printed.
+
+**Trigger:** the container's pod had been replaced mid-experiment, and the early
+query's offset always points back before the replacement.
+
+**Caught by:** a routine status check on a running experiment, 28 snapshots after
+it started failing.
+
+## 19. An OOMKill destroyed the evidence that it was a leak
+
+**Looked like:** the lab's slow-leaker, which OOMKills about every 41 hours,
+reported `SATURATED` with "memory must not be reduced" and a memory
+recommendation 2.3x its request. Nothing was said about growth. Across 88
+snapshots it was never once reported `LEAKING`.
+
+**Was actually:** `MemEarly` and `MemLate` are keyed by (namespace, pod,
+container), not by container id, so the pair spans every incarnation between
+them. The OOMKill resets the working set, so late/early measures where the
+window edges fell in the restart cycle rather than anything about the workload:
+the same container, the same window, the same four kills reads as **4.1x growth
+or 0.38x shrinkage** depending on the hour it is sampled. Below the 1.5x ratio
+the LEAKING branch does not fire, control falls through to the OOMKilled branch,
+and the operator is told to raise memory - the one action that never helps a
+leak and buys it a few more hours.
+
+**Caught by:** writing the sawtooth out as two observations that differ only in
+sampling phase, and asserting the verdict was the same. It was not.
+
+**Fixed by:** withholding the trend **one-sidedly**. A ratio above the threshold
+still fires LEAKING, because a restart cannot manufacture that much growth and
+the cost of believing it is a withheld recommendation. A ratio below it is
+discarded when the container was OOMKilled, because that is the direction that
+reads as a clean bill of health on the one verdict an operator acts on by adding
+memory. The report then says the restarts reset the working set and that growth
+cannot be ruled out.
+
+**The first attempt at the fix was worse than the bug.** Suppressing the trend
+on *any* restart is symmetric, tidy, and silenced the simulator's leaky-service
+- the one workload the leak test exists for, which OOMKills once and then reads
+25x. `p95/max` looked like a way to tell a sawtooth from a container pinned at
+its limit, and is not: leaky-service sits at 0.918 and the honest
+variable-mem-jvm at 0.605. The asymmetry is the whole fix.
+
+**Consequence if shipped:** every cyclically-leaking container in the fleet
+reported as merely undersized, with a confident larger number attached.
+
+## 20. A right-sizer that silently added limits nobody asked for
+
+**Looked like:** `no-limits-api`, a workload declaring requests and no limits —
+the shape most charts ship and most style guides recommend — reported `WASTE`
+with `CPU lim unset>3156m` and `MEM lim unset>451Mi`. Two evidence lines, both
+about usage. Nothing about the limits.
+
+**Was actually:** proposing a limit where the manifest sets none is a
+behavioural change, not a resize. A CPU limit throttles at quota even when the
+node is idle, which is precisely why the omission is usually deliberate. A
+memory limit is worse in kind: the container becomes OOMKillable at that cap
+rather than evicted under node pressure, so the failure mode changes from
+"rescheduled elsewhere" to "killed in place". The reader is looking at a report
+about reclaiming waste and is not watching that direction.
+
+**Caught by:** giving the simulator a *declaration* shape axis and looking at
+what each shape was told. The `Guaranteed` row two lines below in the same
+report already refuses to split requests from limits and says why, which is what
+made the silence on this row visible.
+
+**Fixed by:** stating it. The numbers are kept — a reader who wants limits
+should have them — and each carries what applying it changes.
+
+**Why neither instrument could see it:** every simulated container was rendered
+Burstable with both requests and limits set, because that is what the allocation
+model expresses, and the simulator never populated `Authored` at all — so every
+finding derived from the *manifest* rather than the running pod was unreachable
+from the catalogue, including the one that says a pod is BestEffort. The lab's
+own workloads all declare both. This is the same root cause as the `IDLE`
+defect the live cluster found: **the population of behaviours is not the
+population of declarations**, and only the second finds verdict bugs.
+
+---
+
+## 21. A DaemonSet's reservation was multiplied by the size of the cluster
+
+**Looked like:** nothing at all. The node-count delta on the lab cluster was
+checked by hand against the real allocatable capacity and agreed, because on
+that cluster the answer is decided by pinning rather than by capacity.
+
+**Was actually:** the replay charged every DaemonSet **pod** to every node.
+One DaemonSet on a three-node cluster was charged three times to each of the
+three nodes; on a thirty-node cluster, thirty times. A node-exporter asking for
+100m reserved 3 cores of imaginary overhead per node at that size, and the
+replay concluded the cluster had no room to consolidate. The same loop charged
+a DaemonSet with a `nodeSelector` to nodes it can never be scheduled onto, so a
+GPU device plugin asking for 5 cores made every CPU node in the fleet look
+nearly full.
+
+**Caught by:** the third of the live observation that the declaration shapes
+could not carry. `nodeSelector` changes packing rather than verdicts, so it
+needed a packing test rather than an analyzer one, and writing the first such
+test meant writing down what a DaemonSet costs a node - which is one copy, on
+the nodes it selects.
+
+**Fixed by:** charging per DaemonSet rather than per DaemonSet pod, taking the
+largest pod of the set, and charging only the nodes the set runs on: the union
+of what its `nodeSelector` matches and where its pods are observed. The union
+matters - a node whose labels were not read matches no selector at all, and
+trusting the selector alone would hand out capacity an agent is demonstrably
+occupying, which is the expensive direction.
+
+**Why it stayed invisible:** the error is *pessimistic*. It understates free
+capacity, so it can only ever shrink the reported saving, and a saving that
+comes out too small reads as the caution this tool advertises. The existing
+DaemonSet test passed throughout - its numbers happened to give the same node
+count under both models, which is defect 3 wearing different clothes: a check
+that comes back green while measuring nothing.
+
+---
+
+## 22. The replay would not pack onto the nodes it had already conceded
+
+**Looked like:** a plausible lower bound. Pinned pods hold their node, and the
+report says so with counts.
+
+**Was actually:** first-fit-decreasing walked the nodes largest-free-first, so a
+node held by a pinned pod - a node that can never be freed, and whose remaining
+space is therefore the only space in the cluster that costs nothing to use - was
+tried last. The replay would keep a second node alive rather than put a movable
+pod in the room it had already paid for. The pin list is deliberately broad, so
+on a real cluster this is not an edge case: the k3s lab pins six pods by
+`nodeSelector` alone.
+
+**Caught by:** writing the lab's own shape as a test - two infrastructure pods
+pinned to the server node, ordinary workloads on the agents - and getting two
+nodes back where one was demonstrably enough.
+
+**Fixed by:** ordering the bins with the already-conceded nodes first. Both
+orderings produce a packing that fits, so this is a stronger claim rather than a
+looser one: the number is still one the model can demonstrate, and it is now the
+smaller of the two it could demonstrate.
+
+---
+
+## 23. A dead node was still a live destination, and its phantom pods were cargo
+
+**Looked like:** `nodes: 3 running, 3 needed for today's requests, 3 needed
+after these recommendations`, with a per-node commitment table giving CPU and
+memory percentages for all three, and 53 pods in the replay.
+
+**Was actually:** two of the three nodes had been unreachable since 08:03 UTC
+and the report was produced at 09:25. The API server keeps every pod object a
+vanished kubelet last owned, so `kubectl get pods` - and tare - went on listing
+seventeen pods as `Running` on machines that had stopped answering an hour and a
+half earlier. tare read `Schedulable` as `!spec.unschedulable` and nothing else,
+so a dead node was a valid destination with full allocatable capacity, and the
+phantom pods were movable cargo to be folded onto it or off it.
+
+**Caught by:** applying `shapes.yaml` to the lab cluster and noticing that the
+new DaemonSet reported `DESIRED 1` on a three-node cluster, and that all four
+new pods had landed on the same node.
+
+**Fixed by:** reading the Ready condition. A node that is not Ready is not a
+destination and is named in the report with the reason; every pod on one is held
+where it is, with a pin reason that says the pod may not be running at all. The
+same run now says `18 ... its node has stopped reporting` and names both nodes.
+
+**The detail that makes this the usual shape:** when a kubelet stops reporting,
+the Ready condition goes to **Unknown**, not False. Every natural way to write
+the check - `!= False`, or a bool that defaults to false only on an explicit
+False - reads Unknown as healthy. `isReady` therefore requires an explicit True,
+and the test asserts all three values plus a node reporting no conditions at all.
+
+---
+
+## 24. Node taints were collected from the first version and read by nothing
+
+**Looked like:** a replay that moved pods onto the largest node available.
+
+**Was actually:** `discover.Node.Taints` was populated on every node and used by
+no code path in the repository. The pod side of the same rule was implemented -
+a pod that tolerates a taint is pinned, because it may sit where others cannot
+follow - which is what made the node side look handled. It was not: a node
+carrying `dedicated=gpu:NoSchedule` was offered as free space to pods that
+tolerate nothing, and since bins are tried largest-first, a big tainted node was
+tried **first**. The promised consolidation is one the scheduler refuses
+outright.
+
+**Caught by:** looking for what else the node inventory knows and does not use,
+immediately after defect 23 showed that one such field had been costing
+correctness.
+
+**Fixed by:** `Node.BlockingTaint`, next to the toleration logic it mirrors. A
+NoSchedule or NoExecute taint that is not one of the kubelet's own
+not-ready/unreachable taints makes the node a non-destination, named in the
+report. PreferNoSchedule is a preference and does not.
+
+---
+
+## 25. Every pod cost an API call, and the lab cluster was too small to notice
+
+**Looked like:** nothing. Every run on the k3d lab cluster finished in seconds.
+
+**Was actually:** `ownerOf` fetched a ReplicaSet per pod to find the Deployment
+above it, uncached, and `Pods` did it a second time for the packing replay.
+client-go's default client-side rate limiter is 5 requests per second, and the
+run was capped at three minutes. A cluster of 900 pods therefore spent its
+entire budget inside the client's own rate limiter and died with `context
+deadline exceeded` before it ever queried Prometheus - and 900 pods is a small
+cluster. The lab has thirty, which is why thirty runs over nine days all passed.
+
+**Caught by:** asking what the tool would do on a cluster nobody here owns,
+rather than on the one it was written against.
+
+**Fixed by:** `workloadIndex`, which lists each controller kind once per
+namespace scope and is shared between the sizing pass and the replay, plus
+QPS/Burst raised to 50/100 on the rest config. API calls no longer scale with
+pod count at all, and a test asserts it: ten pods and a thousand pods must cost
+the same number of calls.
+
+---
+
+## 26. Three denied reads, handled three different ways, none of them right
+
+**Looked like:** a report, or no report, depending on which read was denied.
+
+**Was actually:** a denied HPA list aborted the whole run with a Kubernetes
+error. A denied PDB list was skipped silently, which overstates the node-count
+saving, because a budget allowing no disruption is exactly what makes a node
+undrainable. A denied VPA list was indistinguishable from the common case of the
+CRD not being installed, so a cluster where a VPA was already writing these
+fields read as a cluster with no VPA - two controllers writing one field, and
+nothing said so. The first failure is loud and harmless; the other two are the
+project's usual shape.
+
+**Caught by:** running the tool against its own cluster with a token that could
+list pods and nothing else, which is what a first evaluation inside a company
+actually looks like.
+
+**Fixed by:** all three degrade and all three say what was lost, in the report
+header, in every output format. A VPA read refused with Forbidden is reported; a
+missing CRD stays silent, because that one really is nothing.
+
+---
+
+## 27. A container with no measurements was not a container with no data
+
+**Looked like:** a report covering a cluster where half the containers had no
+metrics at all, with nothing in the header to say so.
+
+**Was actually:** the observation map is keyed by container and filled by
+fifteen queries, two of which come from kube-state-metrics and exist for every
+container in the cluster whether or not anything ever scraped its cgroup. A
+container whose kubelet had stopped reporting therefore arrived with an
+observation attached and nothing in it. The per-container verdict was safe - a
+zero sample count forces `NO-DATA` - but nothing counted how many of those there
+were, so a Prometheus scraping two namespaces out of forty produced a report
+that looked complete and described a twentieth of the cluster.
+
+**Caught by:** `kubectl tare check` disagreeing with `kubectl tare report` about
+how much of the same cluster was covered, on the first cluster both were run
+against.
+
+**Fixed by:** a coverage line in the header of every format, counting containers
+with zero memory samples rather than containers with no map entry, and the same
+measurement in `check`. On the lab cluster it immediately read "metrics cover 50
+of 66 containers", which was true and had never been said.
+
+---
+
+## 28. A mistyped namespace was reported as a cluster with no metrics
+
+**Looked like:** `kubectl tare report -n prod-1` on a cluster whose namespace is
+`prod1`, printing `0 containers`, `nodes: 0 running`, and nine lines of
+`signals unavailable on this cluster: cpu-usage: not exported by this cluster`.
+Exit code 0.
+
+**Was actually:** listing pods in a namespace that was never created returns an
+empty list rather than an error, so `discover.Containers` came back with nothing
+and every downstream signal probe matched nothing. The report then attributed
+the emptiness to the cluster. Sixty seconds earlier the same binary against the
+same cluster had reported all nine signals present and three nodes, so the
+output was not merely useless: it told the operator to go and fix a metrics
+pipeline that was working.
+
+**Caught by:** a UX review running the documented surfaces against the lab
+cluster, typing a namespace that did not exist.
+
+**Fixed by:** `discover.MissingNamespaces`, called before any measurement is
+taken, which gets each requested namespace and errors naming the ones that do
+not exist. A Get that fails for any other reason is **not** treated as missing,
+because the common case is a namespace-scoped user who may not read cluster
+resources, and refusing them a report is worse than the typo this guards
+against. `-n "a, b"` is trimmed, so the space a person types does not become a
+namespace that does not exist.
+
+---
+
+## 29. A misspelled --verdict filtered everything away and exited 0
+
+**Looked like:** `kubectl tare report --verdict SATURATD` printing a column
+header, no rows, and exit 0 - byte-identical to a cluster with nothing
+saturated on it.
+
+**Was actually:** `filterVerdicts` built its keep-set from whatever strings the
+user typed and compared them against the findings. A name matching no verdict
+matched no finding. The one output an operator reads as "you are fine" was also
+the output for "you spelled it wrong", and nothing distinguished them.
+
+**Caught by:** the same review, in the same session as 28.
+
+**Fixed by:** `checkVerdicts`, run before any cluster call so a typo costs
+nothing and `--demo` is held to the same spelling. The accepted set is
+`analyze.ReportOrder()` rather than a list written at the call site, so a
+verdict added later cannot become unselectable - the same reason that function
+exists at all. The `--verdict` help text was also advertising eight verdicts
+when there are nine; `NO-DATA` was missing.
+
+---
+
+## 30. `-o tui` against a real cluster printed the table
+
+**Looked like:** a working interactive browser, because every time anyone
+opened it, it was with `--demo`.
+
+**Was actually:** the live-cluster path sent `patch`, `json` and `html` to
+`emit` by name and let everything else fall through to `emit(rep, "table")`.
+`-o tui` on a real cluster printed the table and exited 0. The demo path called
+`emit` with the requested format, so the only place anyone looked, it worked.
+
+**Caught by:** adding `-o wide` on 2026-09-23. The new format would have fallen
+through the same way.
+
+**Fixed by:** every run goes to `emit` with the requested format, except a
+`diff` with the default format. Same lesson as 5: a code path exercised only in
+demo mode is not exercised.
+
+---
+
+## Open, and not yet solved
+
+**The kubelet can lie about PSI. Mitigated 2026-09-20, not eliminated.**
+Kubernetes issue #136333: on hosts without kernel PSI support, the kubelet
+emitted **all-zero** `container_pressure_*` series for every container, purely
+because the feature gate was enabled. No error, no absent metric — a flat zero
+that reads as "no pressure" rather than "no data". tare marks a signal available
+when the query returns a series, and a zero-valued series is still a series, so
+on such a cluster it would print `psi 0.0000/0.0000`, report nothing missing,
+and call every container `WASTE` with high confidence.
+
+The cluster-level negative control described here is now implemented
+(`flagDeadPressure`, `internal/metrics/prometheus.go`): if every container
+drawing at least 50m reports **exactly** zero pressure across the whole window,
+and there are at least three such containers, the pressure values are withheld
+and the report header says why. It tests the digit rather than a threshold, so a
+cluster genuinely at 1e-9 still passes.
+
+Two things it does not fix. **The population thresholds are not derived** — 50m
+and three containers are chosen so the control errs toward silence, and what
+limits the damage is the direction of the error: firing wrongly removes a
+saturation signal, which pushes findings to `Unverified` and confidence to
+`Low`, so a mistake makes the tool more cautious and never less. Failing to fire
+is the expensive direction and the thresholds do not protect it. **A partially
+dead instrument still passes**: one node without kernel support in an otherwise
+healthy cluster leaves the fleet-wide test false, and the containers on that
+node are read as calm. The control is per-cluster because the observation is
+per-cluster; making it per-node needs the node label carried through the
+pressure queries, which has not been verified against a real Prometheus.
+
+**The memory trend is still keyed by pod, not by container id.** Defect 19 is
+contained, not cured: a container that OOMKills inside the window has no usable
+trend at all, so tare can say "growth cannot be ruled out" and nothing more. The
+measurement that would settle it is a within-incarnation trend, which needs the
+query keyed by container id and has not been verified against a real
+Prometheus. Until then a cyclic leaker and a container that is simply too small
+are indistinguishable here, and the report says so rather than picking one.
+
+**A container whose metrics stopped mid-window is sized from stale data.** The
+window is wide on purpose, so a kubelet that stopped reporting five days ago
+still leaves a fortnight of history behind it, and nothing in the report says
+the data is old. Confidence falls, because the sample count falls, but that is
+an accident of the same arithmetic rather than a statement about staleness. The
+measurement that would settle it is the timestamp of the last sample per
+container, which is one more query and has not been added.
+
+**The memory floor is undefended.** `MinMemBytes` is 16Mi. Comparable floors
+elsewhere are 100MiB and 250MB, an order of magnitude higher. On a typical
+report the floor decides more rows than any evidence logic does, and 16Mi has no
+published derivation. Nor do the others, but tare is the tool claiming it does
+not produce numbers it cannot justify.
+
+---
+
+## What this list changed about how tare is built
+
+- **When a check comes back clean, ask what it would look like if the instrument
+  were broken.** Several tests in this repository passed for the wrong reason
+  until they were deliberately made to discriminate.
+- **Prefer a negative control to a green result.** A fake server, a
+  counterfactual assertion, or a deliberately reverted fix that must turn the
+  test red.
+- **A missing measurement is not a zero.** Every signal is tracked separately
+  from its value, and the report states what it could not see rather than
+  printing the comfortable number.
+- **For anything that runs on a clock, exercise every time-dependent path by
+  hand first** and confirm each one changed something observable. Defects 6 and
+  7 were both found that way, and each would otherwise have cost fourteen days.

@@ -1,0 +1,80 @@
+apiVersion: v1
+kind: Namespace
+metadata: {name: tare-lab}
+---
+# Saturation case: spins forever, capped at 100m. Drives CPU PSI hard.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: cpu-hog, namespace: tare-lab}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: cpu-hog}}
+  template:
+    metadata: {labels: {app: cpu-hog}}
+    spec:
+      containers:
+      - name: hog
+        image: busybox:1.36
+        command: ["sh","-c","while :; do :; done"]
+        resources:
+          requests: {cpu: 50m, memory: 16Mi}
+          limits:   {cpu: 100m, memory: 32Mi}
+---
+# Runtime ceiling case: -Xmx256m under a 1Gi limit. The tool must refuse to
+# recommend below 256m and surface the flag as the finding instead.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: tomcat-lowxmx, namespace: tare-lab}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: tomcat-lowxmx}}
+  template:
+    metadata: {labels: {app: tomcat-lowxmx}}
+    spec:
+      containers:
+      - name: tomcat
+        image: tomcat:10-jre21
+        env:
+        - name: JAVA_OPTS
+          value: "-Xmx256m -XX:MaxRAMPercentage=25.0"
+        ports: [{containerPort: 8080}]
+        resources:
+          requests: {cpu: 200m, memory: 512Mi}
+          limits:   {cpu: 1000m, memory: 1Gi}
+---
+# Waste case: idle nginx hoarding 1000m CPU and 1Gi memory.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: overprovisioned, namespace: tare-lab}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: overprovisioned}}
+  template:
+    metadata: {labels: {app: overprovisioned}}
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.27-alpine
+        ports: [{containerPort: 80}]
+        resources:
+          requests: {cpu: 1000m, memory: 1Gi}
+          limits:   {cpu: 2000m, memory: 2Gi}
+---
+# QoS case: requests equal limits, so the pod is Guaranteed. Any recommendation
+# must keep them equal or it silently demotes the pod to Burstable and, on
+# clusters with in-place resize, is rejected outright.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: guaranteed-app, namespace: tare-lab}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: guaranteed-app}}
+  template:
+    metadata: {labels: {app: guaranteed-app}}
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.27-alpine
+        resources:
+          requests: {cpu: 500m, memory: 512Mi}
+          limits:   {cpu: 500m, memory: 512Mi}

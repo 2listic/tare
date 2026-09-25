@@ -1,0 +1,103 @@
+# The declaration shapes the lab was missing.
+#
+# tare-lab's original nine workloads all declare both requests and limits,
+# because that is what an allocation model naturally expresses. Real clusters
+# are not like that, and the gap is not cosmetic: the IDLE verdict shipped
+# telling operators to delete node-exporter, kube-state-metrics and two Grafana
+# sidecars, because a container with no requests has nothing to be idle against.
+# A second defect (KNOWN-FAILURES #20) came from the same hole - tare proposed
+# ADDING limits to a workload that deliberately had none, without saying so.
+#
+# The population of behaviours is not the population of declarations. These
+# workloads carry no new behaviour at all; only new manifests.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-agent
+  namespace: tare-lab
+spec:
+  selector:
+    matchLabels: {app: node-agent}
+  template:
+    metadata:
+      labels: {app: node-agent}
+    spec:
+      # No resources block at all: BestEffort, the shape most infrastructure
+      # DaemonSets ship with.
+      containers:
+        - name: agent
+          image: busybox:1.36
+          command: ["sh", "-c", "while :; do awk 'BEGIN{for(i=0;i<40000;i++)x+=i}'; sleep 5; done"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metrics-app
+  namespace: tare-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: metrics-app}
+  template:
+    metadata:
+      labels: {app: metrics-app}
+    spec:
+      containers:
+        # Two containers in one pod, declared differently. No single-container
+        # workload reaches the code that folds several containers into one pod.
+        - name: app
+          image: busybox:1.36
+          command: ["sh", "-c", "while :; do awk 'BEGIN{for(i=0;i<900000;i++)x+=i}'; sleep 2; done"]
+          resources:
+            requests: {cpu: 200m, memory: 192Mi}
+            limits: {cpu: 600m, memory: 384Mi}
+        - name: config-reloader
+          image: busybox:1.36
+          command: ["sh", "-c", "while :; do sleep 30; done"]
+          # No resources: the sidecar shape that produced the IDLE defect.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: no-limits-api
+  namespace: tare-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: no-limits-api}
+  template:
+    metadata:
+      labels: {app: no-limits-api}
+    spec:
+      containers:
+        - name: api
+          image: busybox:1.36
+          command: ["sh", "-c", "while :; do awk 'BEGIN{for(i=0;i<600000;i++)x+=i}'; sleep 3; done"]
+          # Requests only. cAdvisor exports CFS throttle counters solely for
+          # containers with a CPU quota, so this shape has no throttle signal
+          # at all and leans entirely on PSI.
+          resources:
+            requests: {cpu: 150m, memory: 128Mi}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: guaranteed-cache
+  namespace: tare-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: guaranteed-cache}
+  template:
+    metadata:
+      labels: {app: guaranteed-cache}
+    spec:
+      containers:
+        - name: cache
+          image: busybox:1.36
+          command: ["sh", "-c", "while :; do awk 'BEGIN{for(i=0;i<300000;i++)x+=i}'; sleep 4; done"]
+          # request == limit on both resources: Guaranteed. Changing one field
+          # without the other silently demotes it to Burstable.
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: 100m, memory: 256Mi}

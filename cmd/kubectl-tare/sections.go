@@ -1,0 +1,332 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
+	"text/tabwriter"
+
+	"github.com/mfranzon/tare/internal/analyze"
+	"github.com/mfranzon/tare/internal/packing"
+)
+
+// The terminal report is a sequence of tables and nothing else.
+//
+// It used to be a table wrapped in prose: a header sentence, a paragraph of
+// summary, and under -v a bulleted essay per container. All of it was true and
+// none of it could be piped anywhere. Everything a run establishes is now a
+// row, under a "# section=" marker, so a reader sees columns and awk sees
+// fields. The sentences are not gone - they are the part that stops somebody
+// applying a number they should not - they moved behind --explain.
+//
+// Rules a consumer can rely on:
+//   - a line starting with '#' is a section marker or a comment, never data
+//   - the first line of a section is its column header
+//   - columns are separated by two or more spaces
+//   - a field with no value is "-", never blank
+//   - every hint, warning and progress note goes to stderr, so stdout is data
+
+var sectionOpen bool
+
+func section(name string, cols ...string) *tabwriter.Writer {
+	if sectionOpen {
+		fmt.Println()
+	}
+	sectionOpen = true
+	fmt.Printf("# section=%s\n", name)
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, strings.Join(cols, "\t"))
+	return w
+}
+
+func row(w *tabwriter.Writer, cells ...string) {
+	for i, c := range cells {
+		if c == "" {
+			cells[i] = "-"
+		}
+	}
+	fmt.Fprintln(w, strings.Join(cells, "\t"))
+}
+
+// printMeta says what this run was, which is the first thing a reader of a
+// pasted report needs and the first thing a script filing one needs.
+func printMeta(r *report) {
+	w := section("meta", "KEY", "VALUE")
+	row(w, "source", r.Source)
+	row(w, "window", r.Window)
+	row(w, "containers", strconv.Itoa(len(r.Findings)))
+	row(w, "demo", strconv.FormatBool(r.Demo))
+	row(w, "redacted", strconv.FormatBool(r.Redacted))
+	if r.Coverage != "" {
+		row(w, "coverage", r.Coverage)
+	}
+	w.Flush()
+}
+
+// printSignalGaps is the degraded-report block. A signal that is absent is not
+// a signal that is zero, and a format that drops this turns a partial run into
+// a confident one.
+func printSignalGaps(gaps []analyze.SignalGap) {
+	if len(gaps) == 0 {
+		return
+	}
+	w := section("signals", "SIGNAL", "STATUS", "DETAIL")
+	for _, g := range gaps {
+		row(w, string(g.Signal), g.Status, g.Detail)
+	}
+	w.Flush()
+	fmt.Println("# findings that depended on these are downgraded, not silently assumed")
+}
+
+func printFindings(fs []analyze.Finding) {
+	// Every column but the workload name has a bounded width, so the workload
+	// column gets whatever the terminal has left. Unbounded, one
+	// StatefulSet/prometheus-kps-kube-prometheus-stack-prometheus wraps every
+	// row in the report into two unreadable ones.
+	fixed := len("VERDICT") + len("CONF") + len("CONTAINER") + len("PRESSURE") + len("PODS")
+	for _, f := range fs {
+		n := len(f.Verdict) + len(f.Confidence) + len(f.Container) + len(pressureCell(f)) +
+			max(len("PODS"), len(strconv.Itoa(f.Pods)))
+		if n > fixed {
+			fixed = n
+		}
+	}
+	cells := len("CPU_REQ>REC") + len("CPU_LIM>REC") + len("MEM_REQ>REC") + len("MEM_LIM>REC")
+	for _, f := range fs {
+		if n := len(cpuCell(f)) + len(limitCell(f)) + len(memCell(f)) + len(memLimitCell(f)); n > cells {
+			cells = n
+		}
+	}
+	nameWidth := termWidth() - fixed - cells - 2*9
+	if nameWidth < 24 {
+		nameWidth = 24
+	}
+
+	w := section("findings",
+		"VERDICT", "CONF", "NAMESPACE/WORKLOAD", "CONTAINER",
+		"CPU_REQ>REC", "CPU_LIM>REC", "MEM_REQ>REC", "MEM_LIM>REC", "PODS", "PRESSURE")
+	for _, f := range fs {
+		row(w, string(f.Verdict), string(f.Confidence),
+			shortWorkload(f.Namespace, f.Workload, nameWidth), f.Container,
+			cpuCell(f), limitCell(f), memCell(f), memLimitCell(f),
+			strconv.Itoa(f.Pods), pressureCell(f))
+	}
+	w.Flush()
+}
+
+// printEvidence is one row per piece of evidence: the code is the stable part,
+// the numbers are what it was decided on. `grep OOMKILLED` now answers a
+// question that used to need a human to read a paragraph.
+func printEvidence(fs []analyze.Finding) {
+	w := section("evidence",
+		"NAMESPACE", "WORKLOAD", "CONTAINER", "CODE", "OBSERVED", "AGAINST", "UNIT", "SUBJECT")
+	rows := 0
+	for _, f := range fs {
+		for _, r := range f.Reasons {
+			row(w, f.Namespace, f.Workload, f.Container, string(r.Code),
+				evidenceValue(r.Observed, r.Unit), evidenceValue(r.Against, r.Unit),
+				string(r.Unit), r.Subject)
+			rows++
+		}
+		// A signal that was not measured for THIS container is evidence about
+		// the finding in exactly the way a measurement is, so it is a row and
+		// not a footnote.
+		for _, m := range f.Missing {
+			row(w, f.Namespace, f.Workload, f.Container, "SIGNAL_NOT_MEASURED", "", "", "", string(m))
+			rows++
+		}
+		for _, c := range f.Ceilings {
+			code := "CEILING"
+			if c.Unresolved {
+				code = "CEILING_UNRESOLVED"
+			}
+			row(w, f.Namespace, f.Workload, f.Container, code, "", "", "", string(c.Kind))
+			rows++
+		}
+	}
+	if rows == 0 {
+		row(w, "", "", "", "NO_EVIDENCE", "", "", "", "")
+	}
+	w.Flush()
+}
+
+// evidenceValue renders a measurement for a terminal. The raw float is in the
+// JSON output; here the unit column says how to read a figure a person can
+// take in at a glance. A zero means the reason had no comparand, not that
+// something measured zero - a measured zero belongs in a reason that says so.
+func evidenceValue(v float64, u analyze.Unit) string {
+	if v == 0 {
+		return "-"
+	}
+	switch u {
+	case analyze.Bytes:
+		return human(int64(v))
+	case analyze.Millicores:
+		return fmt.Sprintf("%.0fm", v)
+	case analyze.CoreCount:
+		return fmt.Sprintf("%.2f", v)
+	case analyze.Percent:
+		return fmt.Sprintf("%.1f%%", v)
+	case analyze.Count:
+		return fmt.Sprintf("%.0f", v)
+	case analyze.Ratio, analyze.SecPerSec:
+		return fmt.Sprintf("%.4g", v)
+	}
+	return fmt.Sprintf("%g", v)
+}
+
+// printTotals is the summary as key-value rows. The keys carry their unit, so
+// reclaimable.cpu_millicores is not a number whose scale has to be guessed
+// from the sentence that used to surround it.
+func printTotals(fs []analyze.Finding) {
+	s := totalSavings(fs)
+	counts := map[analyze.Verdict]int{}
+	for _, f := range fs {
+		counts[f.Verdict]++
+	}
+
+	w := section("totals", "KEY", "VALUE", "HUMAN")
+	row(w, "containers.total", strconv.Itoa(len(fs)), "")
+	for _, v := range analyze.ReportOrder() {
+		if counts[v] > 0 {
+			row(w, "verdict."+string(v), strconv.Itoa(counts[v]), "")
+		}
+	}
+	row(w, "reclaimable.containers", strconv.Itoa(s.workloads), "")
+	row(w, "reclaimable.cpu_millicores", strconv.FormatInt(s.cpuMillicores, 10), humanCPU(s.cpuMillicores))
+	row(w, "reclaimable.mem_bytes", strconv.FormatInt(s.memBytes, 10), humanMem(s.memBytes))
+	// A container that needs MORE than it has is not a rounding error in the
+	// total, it is the finding that matters most, so it is never folded in.
+	row(w, "addback.containers", strconv.Itoa(s.addWorkloads), "")
+	row(w, "addback.cpu_millicores", strconv.FormatInt(s.addCPUMillicores, 10), humanCPU(s.addCPUMillicores))
+	row(w, "addback.mem_bytes", strconv.FormatInt(s.addMemBytes, 10), humanMem(s.addMemBytes))
+	w.Flush()
+}
+
+// A zero total is a total, not an unset field: human() renders 0 bytes as
+// "unset", which is right for a request nobody wrote and wrong for a sum.
+func humanCPU(m int64) string {
+	if m == 0 {
+		return ""
+	}
+	return cores(m)
+}
+
+func humanMem(b int64) string {
+	if b == 0 {
+		return ""
+	}
+	return human(b)
+}
+
+// printNodes reports the only savings figure that corresponds to an invoice.
+// Reclaimed millicores are the input to it, never a substitute: on a fixed node
+// pool, freeing half the cluster's requests changes no bill at all.
+func printNodes(r *report) {
+	w := section("nodes", "KEY", "VALUE", "DETAIL")
+	if r.NodeNote != "" {
+		row(w, "nodes.computed", "false", r.NodeNote)
+		w.Flush()
+		return
+	}
+	p := r.Nodes
+	if !p.Trustworthy {
+		row(w, "nodes.computed", "false", p.SelfCheck)
+		w.Flush()
+		return
+	}
+	row(w, "nodes.computed", "true", "")
+	row(w, "nodes.running", strconv.Itoa(p.NodesRunning), "")
+	row(w, "nodes.needed_now", strconv.Itoa(p.NodesPackedNow), "")
+	row(w, "nodes.needed_after", strconv.Itoa(p.NodesPackedRecommended), "")
+	// The two savings are reported apart because only one of them is tare's.
+	// Folding the cluster's existing slack into the headline would be taking
+	// credit for nodes a consolidation pass frees without changing a request.
+	row(w, "nodes.from_consolidation", strconv.Itoa(p.FromConsolidation()), "already free without resizing anything")
+	row(w, "nodes.from_resizing", strconv.Itoa(p.FromResizing()), strings.Join(p.Removable, ", "))
+	if p.Pinned > 0 {
+		row(w, "nodes.pinned_pods", strconv.Itoa(p.Pinned), "held their node, so nodes.from_resizing is a LOWER bound")
+		row(w, "nodes.movable_pods", strconv.Itoa(p.Movable), "")
+	}
+	if p.ExcludedNode > 0 {
+		row(w, "nodes.excluded_cordoned", strconv.Itoa(p.ExcludedNode), "")
+	}
+	row(w, "nodes.unusable", strconv.Itoa(len(p.Unusable)), strings.Join(p.Unusable, "; "))
+	w.Flush()
+
+	if p.Pinned > 0 {
+		w := section("node_pins", "PODS", "REASON")
+		reasons := make([]string, 0, len(p.PinReasons))
+		for reason := range p.PinReasons {
+			reasons = append(reasons, reason)
+		}
+		sort.Slice(reasons, func(i, j int) bool {
+			if p.PinReasons[reasons[i]] != p.PinReasons[reasons[j]] {
+				return p.PinReasons[reasons[i]] > p.PinReasons[reasons[j]]
+			}
+			return reasons[i] < reasons[j]
+		})
+		for _, reason := range reasons {
+			row(w, strconv.Itoa(p.PinReasons[reason]), reason)
+		}
+		w.Flush()
+	}
+}
+
+// printDrainBlockers reports the budgets that make a drain impossible. A
+// cluster can have three nodes' worth of slack and free none of them.
+func printDrainBlockers(why []string) {
+	if len(why) == 0 {
+		return
+	}
+	w := section("drain_blockers", "BLOCKER")
+	for _, b := range why {
+		row(w, b)
+	}
+	w.Flush()
+}
+
+// printCommitment shows what each node has promised against what it has.
+//
+// The NOTE column is codes rather than sentences: a node is either
+// MEM_OVERCOMMIT or it is not, and a paragraph in a table cell is the thing
+// this report was rewritten to stop doing. --explain spells them out.
+func printCommitment(cs []packing.Commitment) {
+	if len(cs) == 0 {
+		return
+	}
+	w := section("commitment", "NODE", "PODS", "CPU_REQ_PCT", "CPU_LIM_PCT", "MEM_REQ_PCT", "MEM_LIM_PCT", "NOTE")
+	for _, c := range cs {
+		row(w, c.Node, strconv.Itoa(c.Pods),
+			fmt.Sprintf("%.0f", c.ReqCPUFrac()*100), fmt.Sprintf("%.0f", c.CPURatio()*100),
+			fmt.Sprintf("%.0f", c.ReqMemFrac()*100), fmt.Sprintf("%.0f", c.MemRatio()*100),
+			strings.Join(commitmentCodes(c), ","))
+	}
+	w.Flush()
+}
+
+func commitmentCodes(c packing.Commitment) []string {
+	var out []string
+	if !c.Schedulable {
+		out = append(out, "CORDONED")
+	}
+	switch {
+	case c.MemRatio() > 1:
+		// Memory overcommit has no graceful degradation: the kernel picks a
+		// process and kills it.
+		out = append(out, "MEM_OVERCOMMIT")
+	case c.CPURatio() > 4:
+		out = append(out, "CPU_OVERCOMMIT_HEAVY")
+	case c.CPURatio() > 2:
+		out = append(out, "CPU_OVERCOMMIT")
+	}
+	if c.UnlimitedCPU > 0 {
+		out = append(out, fmt.Sprintf("UNLIMITED_CPU_PODS=%d", c.UnlimitedCPU))
+	}
+	if c.UnlimitedMem > 0 {
+		out = append(out, fmt.Sprintf("UNLIMITED_MEM_PODS=%d", c.UnlimitedMem))
+	}
+	return out
+}

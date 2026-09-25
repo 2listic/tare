@@ -1,0 +1,78 @@
+# Workloads for the cluster-commitment findings.
+#
+# These exist because the two most useful things tare can tell the owner of a
+# FIXED node pool are invisible in a per-container sizing table, and neither
+# can be produced by the simulator:
+#
+#   1. A manifest that sets a limit and omits the request does not cap a burst.
+#      Kubernetes copies the limit into the request, so the workload reserves
+#      the whole thing and becomes Guaranteed. Verified against a live API
+#      server: the Deployment's pod template keeps the omission, the pod it
+#      creates does not, and only comparing the two can tell them apart.
+#
+#   2. A node can be under-requested and over-limited at once. The scheduler
+#      reads only the requests, so it keeps filling a node whose pods may
+#      collectively demand several times what it has.
+---
+# Case 1: limits only. The author believes they capped this at 2 cores and 1Gi.
+# They reserved it.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: limit-only, namespace: tare-lab}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: limit-only}}
+  template:
+    metadata: {labels: {app: limit-only}}
+    spec:
+      containers:
+      - name: c
+        image: nginx:1.27-alpine
+        resources:
+          limits: {cpu: "2", memory: 1Gi}
+---
+# Case 2: BestEffort. No requests, no limits: invisible to the scheduler and
+# first out of the door under node pressure.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: besteffort, namespace: tare-lab}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: besteffort}}
+  template:
+    metadata: {labels: {app: besteffort}}
+    spec:
+      containers:
+      - name: c
+        image: nginx:1.27-alpine
+---
+# Case 3: the overcommit shape. Tiny requests, enormous limits, several
+# replicas. The scheduler sees a nearly empty node; the node is promised away
+# many times over. This is the row the commitment table exists to print.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: overcommitter, namespace: tare-lab}
+spec:
+  replicas: 4
+  selector: {matchLabels: {app: overcommitter}}
+  template:
+    metadata: {labels: {app: overcommitter}}
+    spec:
+      containers:
+      - name: c
+        image: nginx:1.27-alpine
+        resources:
+          requests: {cpu: 10m, memory: 16Mi}
+          limits: {cpu: "14", memory: 6Gi}
+---
+# Case 4: a disruption budget that permits nothing. This is the trap that makes
+# a node-count saving unachievable: tare can prove two nodes' worth of slack
+# exists and the cluster will still refuse every drain that would free them.
+# minAvailable equal to the replica count is far more common in the wild than
+# maxUnavailable: 0 and reads as prudent rather than as a permanent block.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: {name: overcommitter-pdb, namespace: tare-lab}
+spec:
+  minAvailable: 4
+  selector: {matchLabels: {app: overcommitter}}

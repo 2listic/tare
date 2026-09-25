@@ -1,0 +1,314 @@
+# Long-run workloads: everything here changes over time.
+#
+# The original lab is static (coefficient of variation ~0.01), so a two-week run
+# on it produces day 1 repeated fourteen times. These exercise the signals that
+# only a long run can reach: daily periodicity, confidence growth, the memory
+# trend windows, restart handling, OOM history, and limit-trend detection.
+apiVersion: v1
+kind: Namespace
+metadata: {name: tare-lab}
+---
+# The target of the diurnal load. Its CPU follows the request rate.
+#
+# gzip is the point: serving a static file is almost free (~0.05ms/req), so the
+# old busybox client burned 5.5x more CPU than the nginx it was "loading" and
+# diurnal-web sat at 3m against a 300m request - indistinguishable from
+# `overprovisioned`, and floored at MinCPUMillicores by the analyzer. Compressing
+# a 159KB payload per request costs ~2.5ms of nginx CPU, which inverts the ratio
+# to 2.2x in nginx's favour at every rate measured (50/s: 103m vs 46m,
+# 100/s: 184m vs 83m, 200/s: 285m vs 123m).
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: diurnal-web-conf, namespace: tare-lab}
+data:
+  default.conf: |
+    server {
+      listen 80;
+      gzip on;
+      gzip_comp_level 6;
+      gzip_min_length 256;
+      gzip_types text/plain application/json;
+      gzip_proxied any;
+      access_log off;
+      location / { root /www; index payload.txt; }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: diurnal-web, namespace: tare-lab}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: diurnal-web}}
+  template:
+    metadata: {labels: {app: diurnal-web}}
+    spec:
+      volumes:
+      - name: www
+        emptyDir: {}
+      - name: conf
+        configMap: {name: diurnal-web-conf}
+      initContainers:
+      - name: gen-payload
+        image: busybox:1.36
+        command: ["sh", "-c"]
+        args:
+        - |
+          : > /www/payload.txt
+          i=0
+          while [ $i -lt 2000 ]; do
+            echo "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor $i" >> /www/payload.txt
+            i=$((i+1))
+          done
+        volumeMounts: [{name: www, mountPath: /www}]
+      containers:
+      - name: nginx
+        image: nginx:1.27-alpine
+        ports: [{containerPort: 80}]
+        volumeMounts:
+        - {name: www, mountPath: /www}
+        - {name: conf, mountPath: /etc/nginx/conf.d}
+        resources:
+          requests: {cpu: 200m, memory: 256Mi}
+          limits:   {cpu: 1000m, memory: 512Mi}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: diurnal-web, namespace: tare-lab}
+spec:
+  selector: {app: diurnal-web}
+  ports: [{port: 80, targetPort: 80}]
+---
+# Request rate follows a daily sine peaking at 14:00 UTC, so both this container
+# and its target show real periodicity. Confidence should only reach high once
+# the window covers whole cycles.
+#
+# curl, not busybox wget: wget opens a fresh connection per request, which
+# exhausts ephemeral ports under sustained load ("Cannot assign requested
+# address") and silently drops most requests while -q hides the errors.
+# curl holds one keep-alive connection per process and --rate throttles it
+# precisely. Two processes at R each keep both well under the ~250/s ceiling a
+# single sequential curl can sustain.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: load-generator, namespace: tare-lab}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: load-generator}}
+  template:
+    metadata: {labels: {app: load-generator}}
+    spec:
+      containers:
+      - name: gen
+        image: curlimages/curl:8.22.0
+        command: ["sh", "-c"]
+        args:
+        - |
+          while true; do
+            H=$(date -u +%H)
+            R=$(awk -v h="$H" 'BEGIN{printf "%d", 10 + 95*(0.5+0.5*sin(2*3.14159265*(h-8)/24))}')
+            echo "$(date -u +%FT%TZ) rate=${R}/s x2 procs"
+            for p in 1 2; do
+              curl -s -o /dev/null --compressed --rate ${R}/s \
+                "http://diurnal-web/?[1-$((R*600))]" &
+            done
+            wait
+          done
+        resources:
+          requests: {cpu: 200m, memory: 64Mi}
+          limits:   {cpu: 1000m, memory: 128Mi}
+---
+# Grows about 24MiB per hour into tmpfs, so the growth counts as container
+# memory. Under a 1Gi limit it OOMKills roughly every 40 hours, which exercises
+# leak detection, OOM history and restart handling together.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: slow-leaker, namespace: tare-lab}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: slow-leaker}}
+  template:
+    metadata: {labels: {app: slow-leaker}}
+    spec:
+      containers:
+      - name: leaker
+        image: busybox:1.36
+        command: ["sh", "-c"]
+        args:
+        - |
+          # The leak has to be anonymous memory held by this process, not files
+          # in a tmpfs. A memory-backed emptyDir is pod-scoped: its pages
+          # survive a container restart, so the first OOMKill left the cgroup
+          # still full and every restart after it was killed inside runc init,
+          # before this script existed to delete anything. 34 restarts, no OOM
+          # event recorded against the container, and a crash loop it could
+          # never leave. Anonymous memory dies with the process, so the OOMKill
+          # actually resets it and the ~40h cycle repeats as intended.
+          #
+          # A new variable each iteration rather than appending to one: append
+          # copies the whole accumulated string, which spikes to twice the leak
+          # and would OOM at half the intended size. 2MB per 300s is 24MiB/h.
+          i=0
+          while true; do
+            eval "v$i=\$(head -c 2000000 /dev/zero | tr \"\\0\" x)"
+            i=$((i+1))
+            sleep 300
+          done
+        resources:
+          requests: {cpu: 20m, memory: 256Mi}
+          limits:   {cpu: 100m, memory: 1Gi}
+---
+# Redeployed every six hours by the cronjob below: its memory baseline keeps
+# resetting, which a leak detector must not mistake for growth.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: churn-app, namespace: tare-lab}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: churn-app}}
+  template:
+    metadata: {labels: {app: churn-app}}
+    spec:
+      containers:
+      - name: app
+        image: nginx:1.27-alpine
+        resources:
+          requests: {cpu: 150m, memory: 192Mi}
+          limits:   {cpu: 500m, memory: 384Mi}
+---
+# Its memory limit is toggled every two days, which is the only way to exercise
+# limit-trend detection: a plateau that does not follow a moving limit is the
+# strongest evidence of a fixed runtime ceiling.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: resize-target, namespace: tare-lab}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: resize-target}}
+  template:
+    metadata: {labels: {app: resize-target}}
+    spec:
+      containers:
+      - name: app
+        # A real, long-lived JVM with a fixed heap. The fixed heap is the point:
+        # when the limit below is toggled, the working set must NOT follow it,
+        # which is the strongest available evidence of a runtime ceiling.
+        image: tomcat:10-jre21
+        env:
+        - name: JAVA_OPTS
+          value: "-Xmx200m"
+        resources:
+          requests: {cpu: 100m, memory: 512Mi}
+          limits:   {cpu: 500m, memory: 1Gi}
+        # Pinned rather than left to the cluster default, because the whole
+        # value of this workload depends on the container surviving the
+        # two-daily limit toggle. A restart resets the pod name, and tare's
+        # early-window queries are keyed by pod, so a restart silently returns
+        # MemLimitEarly to zero and limit-trend inference to measuring nothing.
+        resizePolicy:
+        - {resourceName: memory, restartPolicy: NotRequired}
+        - {resourceName: cpu, restartPolicy: NotRequired}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: lab-ops, namespace: tare-lab}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: lab-ops, namespace: tare-lab}
+rules:
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get", "list", "patch"]
+# The limit toggle resizes the pod in place rather than rolling the Deployment,
+# so that tare's early-window observation survives the change. That needs the
+# pod itself and the resize subresource; without both the toggle fails and the
+# limit-trend signal is never produced.
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "patch"]
+- apiGroups: [""]
+  resources: ["pods/resize"]
+  verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: lab-ops, namespace: tare-lab}
+subjects: [{kind: ServiceAccount, name: lab-ops, namespace: tare-lab}]
+roleRef: {kind: Role, name: lab-ops, apiGroup: rbac.authorization.k8s.io}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata: {name: redeploy-churn-app, namespace: tare-lab}
+spec:
+  schedule: "0 */6 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: lab-ops
+          restartPolicy: Never
+          containers:
+          - name: kubectl
+            # NOT bitnami/kubectl: Bitnami retired their free Docker Hub
+            # catalog and the tag 404s, which left both cronjobs in
+            # ImagePullBackOff for four hours without anything failing loudly.
+            # churn-app never redeployed and the resize toggle never fired.
+            image: alpine/k8s:1.33.1
+            command: ["sh", "-c"]
+            args:
+            - kubectl -n tare-lab patch deployment churn-app --type=strategic
+              -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"tare.dev/restarted-at\":\"$(date -u +%FT%TZ)\"}}}}}"
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata: {name: toggle-resize-limit, namespace: tare-lab}
+spec:
+  schedule: "0 3 */2 * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: lab-ops
+          restartPolicy: Never
+          containers:
+          - name: kubectl
+            # NOT bitnami/kubectl: Bitnami retired their free Docker Hub
+            # catalog and the tag 404s, which left both cronjobs in
+            # ImagePullBackOff for four hours without anything failing loudly.
+            # churn-app never redeployed and the resize toggle never fired.
+            image: alpine/k8s:1.33.1
+            command: ["sh", "-c"]
+            args:
+            - |
+              set -e
+              # Patch the POD in place, not the Deployment.
+              #
+              # Patching the Deployment rolls the pod, and tare's early-window
+              # queries are keyed by pod name: the replacement has no
+              # observation at `offset window-1h`, so MemLimitEarly comes back
+              # zero and limit-trend ceiling inference can never fire. The
+              # toggle would run forever, change the limit every two days, and
+              # measure nothing. The whole point of this workload is a limit
+              # that moves while the plateau stays put, and that is only
+              # observable if the container survives the change.
+              POD=$(kubectl -n tare-lab get pod -l app=resize-target \
+                -o jsonpath='{.items[0].metadata.name}')
+              CUR=$(kubectl -n tare-lab get pod "$POD" \
+                -o jsonpath='{.spec.containers[0].resources.limits.memory}')
+              if [ "$CUR" = "1Gi" ]; then NEW=512Mi; else NEW=1Gi; fi
+              echo "memory limit $CUR -> $NEW on $POD (in place)"
+              kubectl -n tare-lab patch pod "$POD" --subresource resize --type=strategic \
+                -p "{\"spec\":{\"containers\":[{\"name\":\"app\",\"resources\":{\"limits\":{\"memory\":\"$NEW\"},\"requests\":{\"memory\":\"512Mi\"}}}]}}"
+              # Confirm the container did not restart: a restart here means the
+              # resize was rejected and fell back to a replacement, which
+              # silently returns this workload to measuring nothing.
+              sleep 5
+              RC=$(kubectl -n tare-lab get pod "$POD" -o jsonpath='{.status.containerStatuses[0].restartCount}')
+              echo "restartCount=$RC"
+              [ "$RC" = "0" ] || { echo "RESIZE CAUSED A RESTART - limit-trend is dead"; exit 1; }
