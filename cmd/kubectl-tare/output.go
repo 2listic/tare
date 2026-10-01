@@ -24,12 +24,34 @@ type savings struct {
 	addCPUMillicores int64
 	addMemBytes      int64
 	addWorkloads     int
+
+	// IDLE containers are counted apart and never summed into the reduction.
+	// Their own evidence says IDLE_NOT_RULED_OUT, so folding their requests
+	// into the headline put a number there the report told the reader not to
+	// act on. The larger saving there is deletion, not resizing.
+	idleCPUMillicores int64
+	idleMemBytes      int64
+	idleWorkloads     int
+
+	// memUnknown counts containers whose memory tare does not know
+	// (MemCensored). They contribute nothing to either direction, and a total
+	// that silently left them out would read as "nothing needs more memory".
+	memUnknown int
 }
 
 func totalSavings(fs []analyze.Finding) savings {
 	var s savings
 	for _, f := range fs {
 		c, m := reclaimable(f)
+		if f.MemCensored {
+			s.memUnknown++
+		}
+		if f.Verdict == analyze.Idle {
+			s.idleWorkloads++
+			s.idleCPUMillicores += max(c, 0)
+			s.idleMemBytes += max(m, 0)
+			continue
+		}
 		if c > 0 || m > 0 {
 			s.workloads++
 		}
@@ -201,15 +223,22 @@ func printPatches(fs []analyze.Finding) {
 
 		var containers []map[string]any
 		for _, f := range byWorkload[k] {
-			res := map[string]any{
-				"requests": map[string]string{
-					"cpu": quantityCPU(f.RecCPU), "memory": quantityMem(f.RecMem),
-				},
+			// A strategic merge patch touches only the fields it names, so a
+			// memory tare does not know is left out rather than written back.
+			req := map[string]string{"cpu": quantityCPU(f.RecCPU)}
+			lim := map[string]string{}
+			if f.RecCPULimit > 0 {
+				lim["cpu"] = quantityCPU(f.RecCPULimit)
 			}
-			if f.RecCPULimit > 0 || f.RecMemLimit > 0 {
-				res["limits"] = map[string]string{
-					"cpu": quantityCPU(f.RecCPULimit), "memory": quantityMem(f.RecMemLimit),
+			if !f.MemCensored {
+				req["memory"] = quantityMem(f.RecMem)
+				if f.RecCPULimit > 0 || f.RecMemLimit > 0 {
+					lim["cpu"], lim["memory"] = quantityCPU(f.RecCPULimit), quantityMem(f.RecMemLimit)
 				}
+			}
+			res := map[string]any{"requests": req}
+			if len(lim) > 0 {
+				res["limits"] = lim
 			}
 			containers = append(containers, map[string]any{
 				"name": f.Container, "resources": res,

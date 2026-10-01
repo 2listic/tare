@@ -75,16 +75,13 @@ kubectl tare report --by-savings --top 20
 ```
 
 **What they get:** the twenty containers holding the most unused capacity, and a
-total stated in the unit that matters:
+total that keeps both directions apart:
 
 ```
-1 SATURATED, 9 WASTE, 7 OK
-reclaimable across 10 containers: 2.1 cores CPU, 2.7Gi memory
-to be added back across 4 containers: 396m CPU, 438Mi memory
-1 container(s) are starved and need MORE, not less: fix those first
+17 containers over 2w: requests lowered on 10 (-2100m CPU, -2.7Gi mem), raised on 4 (+396m CPU, +438Mi mem)
 ```
 
-Both directions are reported, because a capacity plan built on the reclaimable
+Both directions are reported, because a capacity plan built on the lowered
 figure alone is short by whatever the starved containers are owed.
 
 **Why bare metal suits tare specifically:** PSI, the saturation signal the

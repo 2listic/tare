@@ -177,84 +177,117 @@ func evidenceValue(v float64, u analyze.Unit) string {
 	return fmt.Sprintf("%g", v)
 }
 
-// printTotals is the summary as key-value rows. The keys carry their unit, so
-// reclaimable.cpu_millicores is not a number whose scale has to be guessed
-// from the sentence that used to surround it.
-func printTotals(fs []analyze.Finding) {
-	s := totalSavings(fs)
+// printVerdicts counts containers per verdict. It used to share the totals
+// section as verdict.* keys, beside rows in a different unit.
+func printVerdicts(fs []analyze.Finding) {
 	counts := map[analyze.Verdict]int{}
 	for _, f := range fs {
 		counts[f.Verdict]++
 	}
-
-	w := section("totals", "KEY", "VALUE", "HUMAN")
-	row(w, "containers.total", strconv.Itoa(len(fs)), "")
+	w := section("verdicts", "VERDICT", "CONTAINERS")
 	for _, v := range analyze.ReportOrder() {
 		if counts[v] > 0 {
-			row(w, "verdict."+string(v), strconv.Itoa(counts[v]), "")
+			row(w, string(v), strconv.Itoa(counts[v]))
 		}
 	}
-	row(w, "reclaimable.containers", strconv.Itoa(s.workloads), "")
-	row(w, "reclaimable.cpu_millicores", strconv.FormatInt(s.cpuMillicores, 10), humanCPU(s.cpuMillicores))
-	row(w, "reclaimable.mem_bytes", strconv.FormatInt(s.memBytes, 10), humanMem(s.memBytes))
-	// A container that needs MORE than it has is not a rounding error in the
-	// total, it is the finding that matters most, so it is never folded in.
-	row(w, "addback.containers", strconv.Itoa(s.addWorkloads), "")
-	row(w, "addback.cpu_millicores", strconv.FormatInt(s.addCPUMillicores, 10), humanCPU(s.addCPUMillicores))
-	row(w, "addback.mem_bytes", strconv.FormatInt(s.addMemBytes, 10), humanMem(s.addMemBytes))
+	row(w, "ALL", strconv.Itoa(len(fs)))
 	w.Flush()
 }
 
-// A zero total is a total, not an unset field: human() renders 0 bytes as
-// "unset", which is right for a request nobody wrote and wrong for a sum.
-func humanCPU(m int64) string {
-	if m == 0 {
-		return ""
+// printTotals is the change to requests, one row per direction. A request is
+// a scheduling reservation: none of these figures is usage and none is money.
+// The bill moves when a node goes away, which is the nodes section.
+//
+// It replaces reclaimable.* / addback.* key-value rows, where a container
+// count sat in the same list as two amounts, the amounts came twice (raw and
+// "human"), and neither word said what was being counted.
+func printTotals(fs []analyze.Finding) {
+	s := totalSavings(fs)
+	w := section("totals", "CHANGE", "CONTAINERS", "CPU_REQUESTS", "MEM_REQUESTS", "NOTE")
+	row(w, "lower", strconv.Itoa(s.workloads), cpuDelta(-s.cpuMillicores), memDelta(-s.memBytes), "")
+	// A container that needs MORE than it has is not a rounding error in the
+	// total, it is the finding that matters most, so it is never folded in.
+	row(w, "raise", strconv.Itoa(s.addWorkloads), cpuDelta(s.addCPUMillicores), memDelta(s.addMemBytes), "")
+	if s.idleWorkloads > 0 {
+		row(w, "idle", strconv.Itoa(s.idleWorkloads), cpuDelta(-s.idleCPUMillicores), memDelta(-s.idleMemBytes),
+			"not_in_lower:"+string(analyze.IdleCaveat))
 	}
-	return cores(m)
+	if s.memUnknown > 0 {
+		row(w, "unknown", strconv.Itoa(s.memUnknown), "-", "?", string(analyze.MemDemandCensored))
+	}
+	w.Flush()
 }
 
-func humanMem(b int64) string {
-	if b == 0 {
-		return ""
+// cpuDelta and memDelta sign a change so its direction is in the cell, in the
+// units the findings table already uses. A zero change is "0": it is a sum, not
+// an unset field.
+func cpuDelta(m int64) string {
+	if m == 0 {
+		return "0"
 	}
-	return human(b)
+	return fmt.Sprintf("%+dm", m)
+}
+
+func memDelta(b int64) string {
+	switch {
+	case b == 0:
+		return "0"
+	case b < 0:
+		return "-" + human(-b)
+	}
+	return "+" + human(b)
 }
 
 // printNodes reports the only savings figure that corresponds to an invoice.
 // Reclaimed millicores are the input to it, never a substitute: on a fixed node
 // pool, freeing half the cluster's requests changes no bill at all.
+//
+// One row per stage of the replay, so the arithmetic is on the page: FREED is
+// the difference from the row above, and CREDIT says whose saving it is. The
+// two savings are kept apart because only one of them is tare's; folding the
+// cluster's existing slack into it would be taking credit for nodes a
+// consolidation pass frees without changing a request.
+//
+// EMPTY_NODES is what is empty at that stage, not what that stage freed. The
+// two passes are packed independently, so which nodes end up empty is not a
+// set one can subtract; the first version printed every empty node beside the
+// resizing count and so named consolidation nodes as tare's.
 func printNodes(r *report) {
-	w := section("nodes", "KEY", "VALUE", "DETAIL")
-	if r.NodeNote != "" {
-		row(w, "nodes.computed", "false", r.NodeNote)
+	w := section("nodes", "STAGE", "NODES", "FREED", "CREDIT", "EMPTY_NODES")
+	note := r.NodeNote
+	if note == "" && !r.Nodes.Trustworthy {
+		note = r.Nodes.SelfCheck
+	}
+	if note != "" {
+		row(w, "not_computed", "-", "-", "-", "-")
 		w.Flush()
+		fmt.Printf("# not computed: %s\n", note)
 		return
 	}
 	p := r.Nodes
-	if !p.Trustworthy {
-		row(w, "nodes.computed", "false", p.SelfCheck)
-		w.Flush()
-		return
-	}
-	row(w, "nodes.computed", "true", "")
-	row(w, "nodes.running", strconv.Itoa(p.NodesRunning), "")
-	row(w, "nodes.needed_now", strconv.Itoa(p.NodesPackedNow), "")
-	row(w, "nodes.needed_after", strconv.Itoa(p.NodesPackedRecommended), "")
-	// The two savings are reported apart because only one of them is tare's.
-	// Folding the cluster's existing slack into the headline would be taking
-	// credit for nodes a consolidation pass frees without changing a request.
-	row(w, "nodes.from_consolidation", strconv.Itoa(p.FromConsolidation()), "already free without resizing anything")
-	row(w, "nodes.from_resizing", strconv.Itoa(p.FromResizing()), strings.Join(p.Removable, ", "))
+	freed := strconv.Itoa(p.FromResizing())
 	if p.Pinned > 0 {
-		row(w, "nodes.pinned_pods", strconv.Itoa(p.Pinned), "held their node, so nodes.from_resizing is a LOWER bound")
-		row(w, "nodes.movable_pods", strconv.Itoa(p.Movable), "")
+		freed = ">=" + freed // pinned pods held their nodes: see node_caveats
 	}
-	if p.ExcludedNode > 0 {
-		row(w, "nodes.excluded_cordoned", strconv.Itoa(p.ExcludedNode), "")
-	}
-	row(w, "nodes.unusable", strconv.Itoa(len(p.Unusable)), strings.Join(p.Unusable, "; "))
+	row(w, "running", strconv.Itoa(p.NodesRunning), "-", "-", "-")
+	row(w, "packed_today", strconv.Itoa(p.NodesPackedNow), strconv.Itoa(p.FromConsolidation()), "cluster_slack", strings.Join(p.EmptyToday, ", "))
+	row(w, "packed_after", strconv.Itoa(p.NodesPackedRecommended), freed, "tare", strings.Join(p.Removable, ", "))
 	w.Flush()
+
+	if p.Pinned > 0 || p.ExcludedNode > 0 || len(p.Unusable) > 0 {
+		w := section("node_caveats", "CAVEAT", "COUNT", "DETAIL")
+		if p.Pinned > 0 {
+			row(w, "pinned_pods", strconv.Itoa(p.Pinned),
+				fmt.Sprintf("of %d pods held their node, so tare's FREED is a lower bound; reasons in node_pins", p.Pinned+p.Movable))
+		}
+		if p.ExcludedNode > 0 {
+			row(w, "cordoned_nodes", strconv.Itoa(p.ExcludedNode), "excluded as destinations")
+		}
+		if len(p.Unusable) > 0 {
+			row(w, "unusable_nodes", strconv.Itoa(len(p.Unusable)), strings.Join(p.Unusable, "; "))
+		}
+		w.Flush()
+	}
 
 	if p.Pinned > 0 {
 		w := section("node_pins", "PODS", "REASON")

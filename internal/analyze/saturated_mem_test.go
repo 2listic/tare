@@ -238,3 +238,72 @@ func TestSuppressedPressureIsExplained(t *testing.T) {
 		t.Errorf("a suppressed pressure reading must be explained; reasons were: %v", f.Reasons)
 	}
 }
+
+// oomAtLimit is a container killed at a 16Mi limit whose recorded peak sits
+// below it, which is what an OOMKill looks like to a 15-30s scrape: the climb
+// to the limit and the kill both happen between samples.
+func oomAtLimit(qos string) ([]discover.Container, map[metrics.Key]*metrics.Observation) {
+	cs, obs := resizeTarget()
+	cs[0].MemRequest, cs[0].MemLimit, cs[0].QoS = 16*mib, 16*mib, qos
+	if qos == "Guaranteed" {
+		cs[0].CPURequest = cs[0].CPULimit
+	}
+	for _, o := range obs {
+		o.PSIWaitingMax = 0
+		o.MemWorkingSet, o.MemP95 = 12*mib, 10*mib
+		o.MemEarly, o.MemLate = 10*mib, 10*mib
+		o.MemLimitEarly, o.MemLimitLate = 16*mib, 16*mib
+		o.OOMEvents = 2
+	}
+	return cs, obs
+}
+
+// TestOOMKilledMemoryIsCensoredNotHeld: a container killed at its limit was
+// never observed above it, so its peak is a lower bound on demand and nothing
+// more. The ratchet used to hold the request and raise the limit by the 25%
+// headroom, which printed "16Mi" (reads as "16Mi is right") and shipped a
+// limit bump nothing measured. For a Guaranteed pod the QoS hold then pulled
+// the request up to the bumped limit. tare must say it does not know instead.
+func TestOOMKilledMemoryIsCensoredNotHeld(t *testing.T) {
+	for _, qos := range []string{"Burstable", "Guaranteed"} {
+		t.Run(qos, func(t *testing.T) {
+			cs, obs := oomAtLimit(qos)
+			f := analyze.Run(cs, obs, 14*24*time.Hour, analyze.DefaultThresholds())[0]
+			if f.Verdict != analyze.Saturated {
+				t.Fatalf("precondition: expected SATURATED, got %s", f.Verdict)
+			}
+			if !f.MemCensored {
+				t.Error("MemCensored is false for a container killed at its limit with no measured peak above it")
+			}
+			if f.RecMem != 16*mib || f.RecMemLimit != 16*mib {
+				t.Errorf("memory rec = %.0fMi request / %.0fMi limit, want both held at 16Mi: "+
+					"any other number is invented", float64(f.RecMem)/mib, float64(f.RecMemLimit)/mib)
+			}
+			var found bool
+			for _, r := range f.Reasons {
+				found = found || r.Code == analyze.MemDemandCensored
+			}
+			if !found {
+				t.Errorf("no %s reason; the reader has no way to know the memory figure is not an answer", analyze.MemDemandCensored)
+			}
+		})
+	}
+}
+
+// A peak observed above the request is a measured raise even after a kill,
+// so it must still raise memory and the row must not be marked as unknown.
+func TestOOMKilledWithMeasuredRaiseIsNotCensored(t *testing.T) {
+	cs, obs := oomAtLimit("Burstable")
+	cs[0].MemLimit = 64 * mib
+	for _, o := range obs {
+		o.MemWorkingSet = 40 * mib // above the 16Mi request, below the 64Mi limit
+		o.MemLimitEarly, o.MemLimitLate = 64*mib, 64*mib
+	}
+	f := analyze.Run(cs, obs, 14*24*time.Hour, analyze.DefaultThresholds())[0]
+	if f.MemCensored {
+		t.Error("a raise derived from a measured peak was marked censored")
+	}
+	if f.RecMem <= 16*mib {
+		t.Errorf("RecMem = %.0fMi, want the measured raise", float64(f.RecMem)/mib)
+	}
+}

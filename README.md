@@ -78,12 +78,12 @@ it. Sizing from observed usage alone cannot get there, however the floor is set.
 $ kubectl tare report
 # section=findings
 VERDICT    CONF    NAMESPACE  WORKLOAD     CONTAINER  PODS  CPU        MEM          WHY
-SATURATED  medium  prod       checkout     api        6     50m→115m   16Mi         OOMKILLED,CPU_PRESSURE
+SATURATED  medium  prod       checkout     api        6     50m→115m   16Mi→?       OOMKILLED,CPU_PRESSURE,+1
 IDLE       high    prod       legacy-sync  worker     1     500m→10m   256Mi→16Mi   IDLE_NO_WORK,IDLE_NOT_RULED_OUT
 WASTE      medium  prod       static       nginx      12    1000m→10m  1.0Gi→16Mi   -
 WASTE      medium  prod       catalog      tomcat     4     200m→10m   512Mi→384Mi  CPU_SIZED_FOR_STARTUP,MEM_RAISED_BY_CEILING
 
-35 containers over 2w: reclaim 1.2 cores, 876Mi; add back 65m, 0; nodes 12, freed >=2
+35 containers over 2w: nodes freed >=2 of 12; requests lowered on 2 (-12640m CPU, -12.3Gi mem), raised on 1 (+390m CPU, 0 mem); memory unknown on 1 (OOMKilled); 1 IDLE not counted
 warning  SIGNAL_NOT_MEASURED  cfs-throttle: 3 of 35 containers
 warning  PODS_PINNED          38 pods held their node, so freed is a lower bound
 not listed: 31 OK (--verdict OK)
@@ -205,36 +205,37 @@ currency figure, a withheld recommendation renders as **withheld** rather than
 as a blank or a zero, and the signals the run could not see sit at the top of
 the page rather than in a tooltip.
 
-Every run's summary line ends with the number that corresponds to a bill: nodes freed. Reclaimed millicores
-are not that number: a request is a scheduling reservation, and lowering one
-changes nothing you pay until a node goes away. `-o wide` shows how it was
-reached:
+Every run's summary line starts with the number that corresponds to a bill:
+nodes freed. The request changes come after it and are never called savings: a
+request is a scheduling reservation, and lowering one changes nothing you pay
+until a node goes away. `-o wide` shows how both were reached. The figures below
+are the ones the table above adds up to:
 
 ```
+# section=verdicts
+VERDICT    CONTAINERS
+SATURATED  1
+IDLE       1
+WASTE      2
+OK         31
+ALL        35
+
 # section=totals
-KEY                         VALUE      HUMAN
-containers.total            4          -
-verdict.SATURATED           1          -
-verdict.IDLE                1          -
-verdict.WASTE               2          -
-reclaimable.containers      3          -
-reclaimable.cpu_millicores  1180       1.2 cores
-reclaimable.mem_bytes       918552576  876Mi
-addback.containers          1          -
-addback.cpu_millicores      65         65m
-addback.mem_bytes           0          -
+CHANGE   CONTAINERS  CPU_REQUESTS  MEM_REQUESTS  NOTE
+lower    2           -12640m       -12.3Gi       -
+raise    1           +390m         0             -
+idle     1           -490m         -240Mi        not_in_lower:IDLE_NOT_RULED_OUT
+unknown  1           -             ?             MEM_DEMAND_CENSORED
 
 # section=nodes
-KEY                       VALUE  DETAIL
-nodes.computed            true   -
-nodes.running             12     -
-nodes.needed_now          11     -
-nodes.needed_after        9      -
-nodes.from_consolidation  1      already free without resizing anything
-nodes.from_resizing       2      ip-10-0-3-41, ip-10-0-5-12
-nodes.pinned_pods         38     held their node, so nodes.from_resizing is a LOWER bound
-nodes.movable_pods        176    -
-nodes.unusable            0      -
+STAGE         NODES  FREED  CREDIT         EMPTY_NODES
+running       12     -      -              -
+packed_today  11     1      cluster_slack  ip-10-0-7-2
+packed_after  9      >=2    tare           ip-10-0-3-41, ip-10-0-5-12, ip-10-0-7-2
+
+# section=node_caveats
+CAVEAT       COUNT  DETAIL
+pinned_pods  38     of 214 pods held their node, so tare's FREED is a lower bound; reasons in node_pins
 
 # section=node_pins
 PODS  REASON
@@ -242,6 +243,22 @@ PODS  REASON
 11    has affinity or anti-affinity rules
 6     requests an extended resource such as a GPU
 ```
+
+`totals` is the change to requests, multiplied by pod count, signed: `lower` is
+what the recommendations take away, `raise` is what the starved containers need
+added, and the two are never netted. `idle` is kept out of `lower` because its
+own evidence says `IDLE_NOT_RULED_OUT`; the node replay leaves it at its current
+requests for the same reason. `unknown` counts containers whose memory tare
+cannot size: `16Mi→?` above is `checkout`, OOMKilled at its limit. Usage above
+the limit that killed a container is never observed, so its peak is a lower
+bound on demand and not a measurement of it. tare says so, prints `?`, and
+`-o patch` leaves that container's memory alone rather than invent a step.
+
+`nodes` is the replay, one row per stage. `FREED` is the drop from the row
+above and `CREDIT` says whose saving it is. `EMPTY_NODES` is what is empty at
+that stage, so the `packed_after` list includes the node repacking alone frees:
+the two passes are packed independently, and which pass emptied which node is
+not something the replay can say.
 
 tare reports nodes, not currency: only you know what your nodes cost.
 

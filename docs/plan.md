@@ -113,7 +113,7 @@ restarting a pod.
 | SLI source | eBPF auto-instrumentation (Beyla/Cilium) default, BYO PromQL escape hatch, mesh/OTel adapters. **v0.3, not v0.1** |
 | Loop shape | Asymmetric: down by at most 20% per step with long observation, **up instantly and uncapped** |
 | Trip wires | Deploy detected then freeze and re-baseline; OOMKill or restart increase; SLO burn or p99 regression; throttle threshold |
-| Memory | Reduce only on positive headroom evidence; **refuse to recommend below a detected runtime ceiling** (`-Xmx`, `GOMEMLIMIT`, `--max-old-space-size`) and surface the flag as the finding |
+| Memory | Reduce only on positive headroom evidence; **refuse to recommend below a detected runtime ceiling** (`-Xmx`, `GOMEMLIMIT`, `--max-old-space-size`) and surface the flag as the finding. **2026-10-01:** after an OOMKill that no measurement sizes, memory is reported as unknown (`MEM_DEMAND_CENSORED`, `16Mi→?`) and left alone, not held at its current value with a 25% limit bump; see KNOWN-FAILURES 33 |
 | Scope defaults | Observe and recommend cluster-wide; actuate only on labelled workloads; dry-run on install |
 | Stack | Pure Go, one binary, no ML runtime |
 | Interfaces | kubectl plugin (read), CRD (policy), PR bot (write) |

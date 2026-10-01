@@ -56,6 +56,9 @@ func redactReport(r *report) {
 	for _, n := range r.Nodes.Removable {
 		add(n)
 	}
+	for _, n := range r.Nodes.EmptyToday {
+		add(n)
+	}
 
 	rep := func(s string) string {
 		if s == "" {
@@ -89,6 +92,7 @@ func redactReport(r *report) {
 		r.Commitment[i].Node = rep(r.Commitment[i].Node)
 	}
 	r.Nodes.Removable = repEach(rep, r.Nodes.Removable)
+	r.Nodes.EmptyToday = repEach(rep, r.Nodes.EmptyToday)
 	r.Nodes.Unusable = repEach(rep, r.Nodes.Unusable)
 	r.Nodes.SelfCheck = rep(r.Nodes.SelfCheck)
 	r.DrainBlockers = repEach(rep, r.DrainBlockers)

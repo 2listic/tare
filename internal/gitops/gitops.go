@@ -74,10 +74,12 @@ func Plan(fs []analyze.Finding) ([]Change, []Skipped) {
 		if f.RecCPULimit > 0 {
 			c.CPULimit = ptr(f.RecCPULimit)
 		}
-		if f.RecMem > 0 {
+		// A censored memory is unknown, not "keep this value": leave the
+		// manifest's own fields alone rather than rewrite them.
+		if f.RecMem > 0 && !f.MemCensored {
 			c.MemRequest = ptr(f.RecMem)
 		}
-		if f.RecMemLimit > 0 {
+		if f.RecMemLimit > 0 && !f.MemCensored {
 			c.MemLimit = ptr(f.RecMemLimit)
 		}
 		// A Guaranteed pod must keep requests equal to limits; the analyzer has

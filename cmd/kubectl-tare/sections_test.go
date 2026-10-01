@@ -68,8 +68,9 @@ func packedReport() *report {
 	r.NodeNote = ""
 	r.Nodes = packing.Result{
 		Trustworthy: true, NodesRunning: 12, NodesPackedNow: 11, NodesPackedRecommended: 9,
-		Removable: []string{"ip-10-0-3-41", "ip-10-0-5-12"},
-		Pinned:    38, Movable: 176,
+		EmptyToday: []string{"ip-10-0-7-2"},
+		Removable:  []string{"ip-10-0-3-41", "ip-10-0-5-12", "ip-10-0-7-2"},
+		Pinned:     38, Movable: 176,
 		PinReasons: map[string]int{
 			"has a PersistentVolumeClaim, which may bind it to a zone or a node": 21,
 			"has affinity or anti-affinity rules":                                11,
@@ -106,7 +107,7 @@ func TestEverySectionIsAWellFormedTable(t *testing.T) {
 		want []string
 	}{
 		{"demo", sampleReport(), []string{"meta", "signals", "findings", "evidence", "totals", "nodes", "commitment"}},
-		{"packed", packedReport(), []string{"nodes", "node_pins", "drain_blockers", "commitment"}},
+		{"packed", packedReport(), []string{"verdicts", "totals", "nodes", "node_caveats", "node_pins", "drain_blockers", "commitment"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) { checkTableShape(t, renderFormat(t, tc.r, "wide", false), tc.want) })
 	}
@@ -345,5 +346,60 @@ func TestCompactEmptyHasNoRows(t *testing.T) {
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	if len(lines) != 2 {
 		t.Errorf("empty findings printed %d lines, want section marker and header only:\n%s", len(lines), out)
+	}
+}
+
+// The first node section printed every node empty after the recommendations
+// beside the count tare freed, so a node that repacking alone empties was
+// named as tare's saving. Each stage lists what is empty at that stage, and
+// the node the cluster's own slack frees is on the cluster_slack row.
+func TestNodesSectionCreditsEachStage(t *testing.T) {
+	out := renderTable(t, packedReport(), false)
+	rows := map[string]string{}
+	for _, line := range strings.Split(out, "\n") {
+		if f := strings.Fields(line); len(f) > 0 {
+			rows[f[0]] = line
+		}
+	}
+	today, after := rows["packed_today"], rows["packed_after"]
+	if !strings.Contains(today, "cluster_slack") || !strings.Contains(today, "ip-10-0-7-2") {
+		t.Errorf("the consolidation node is not on the cluster_slack row: %q", today)
+	}
+	if strings.Contains(today, "ip-10-0-3-41") {
+		t.Errorf("a node only the recommendations empty is on the cluster_slack row: %q", today)
+	}
+	if !strings.Contains(after, " >=2 ") || !strings.Contains(after, "tare") {
+		t.Errorf("tare's row should carry FREED >=2 (pinned pods make it a lower bound): %q", after)
+	}
+	for _, gone := range []string{"nodes.from_resizing", "reclaimable.", "addback.", "HUMAN"} {
+		if strings.Contains(out, gone) {
+			t.Errorf("the old key %q is still printed", gone)
+		}
+	}
+}
+
+// Held values beside OOMKILLED read as an answer. Every view that prints a
+// memory recommendation has to print "?" for one tare does not know.
+func TestCensoredMemoryRendersAsUnknown(t *testing.T) {
+	r := sampleReport()
+	r.Findings[0].MemCensored = true
+	r.Findings[0].Reasons = append(r.Findings[0].Reasons, analyze.Reason{Code: analyze.MemDemandCensored})
+	compact, stderr := renderCompact(t, r)
+	if !strings.Contains(compact, "16Mi→?") {
+		t.Errorf("the compact row does not show the memory as unknown:\n%s", compact)
+	}
+	if !strings.Contains(stderr, "memory unknown on 1") {
+		t.Errorf("the summary does not count the unknown memory:\n%s", stderr)
+	}
+	wide := renderTable(t, r, false)
+	if !strings.Contains(wide, "16Mi>?") || !strings.Contains(wide, "MEM_DEMAND_CENSORED") {
+		t.Errorf("the wide findings row does not show the memory as unknown, or the code is missing:\n%s", wide)
+	}
+	if !regexp.MustCompile(`(?m)^unknown +1 +- +\? +MEM_DEMAND_CENSORED`).MatchString(wide) {
+		t.Errorf("totals has no unknown row:\n%s", wide)
+	}
+	v := buildHTMLView(r)
+	if !strings.HasSuffix(v.Rows[0].Mem, "?") || !strings.HasSuffix(v.Rows[0].MemLimit, "?") {
+		t.Errorf("HTML shows %q / %q, want both unknown", v.Rows[0].Mem, v.Rows[0].MemLimit)
 	}
 }

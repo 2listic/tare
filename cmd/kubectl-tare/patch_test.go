@@ -71,6 +71,25 @@ func TestSavingsReportsBothDirections(t *testing.T) {
 	}
 }
 
+// --explain always said IDLE was "not folded into" the reduction; the sum
+// folded it in anyway. In the demo that was 1990m of a 20.2-core headline
+// resting on a container whose own row says IDLE_NOT_RULED_OUT.
+func TestIdleIsNotSummedIntoTheReduction(t *testing.T) {
+	fs := []analyze.Finding{
+		{Verdict: analyze.Waste, Pods: 1, CPURequest: 200, RecCPU: 100, MemRequest: 1 << 28, RecMem: 1 << 27},
+		{Verdict: analyze.Idle, Pods: 2, CPURequest: 500, RecCPU: 10, MemRequest: 1 << 28, RecMem: 1 << 24},
+	}
+	s := totalSavings(fs)
+	if s.cpuMillicores != 100 || s.workloads != 1 {
+		t.Errorf("reduction = %dm over %d containers, want 100m over 1: IDLE must not be in it",
+			s.cpuMillicores, s.workloads)
+	}
+	if s.idleWorkloads != 1 || s.idleCPUMillicores != 980 {
+		t.Errorf("idle = %dm over %d, want 980m over 1, counted apart so it stays visible",
+			s.idleCPUMillicores, s.idleWorkloads)
+	}
+}
+
 // A long workload name must not wrap the row. The tail is what distinguishes
 // prometheus-kps-...-prometheus from prometheus-kps-...-operator, so it must
 // survive truncation.
@@ -84,5 +103,26 @@ func TestShortWorkloadKeepsTheTail(t *testing.T) {
 	}
 	if full := shortWorkload("ns", "Deployment/api", 40); full != "ns/deploy/api" {
 		t.Errorf("shortWorkload = %q, want ns/deploy/api when it fits", full)
+	}
+}
+
+// A memory tare does not know must not come back as a value to apply. The
+// patch used to write the ratchet's numbers, which for an OOMKilled container
+// was a 25% limit bump nothing measured.
+func TestPatchLeavesCensoredMemoryAlone(t *testing.T) {
+	fs := []analyze.Finding{{
+		Namespace: "prod", Workload: "Deployment/checkout", Container: "api", Verdict: analyze.Saturated,
+		Pods: 1, CPURequest: 50, CPULimit: 100, MemRequest: 16 << 20, MemLimit: 16 << 20,
+		RecCPU: 115, RecCPULimit: 125, RecMem: 16 << 20, RecMemLimit: 16 << 20, MemCensored: true,
+	}}
+	out := capture(t, func() { printPatches(fs) })
+	if strings.Contains(out, "memory") {
+		t.Errorf("the patch names memory for a container whose memory tare does not know:\n%s", out)
+	}
+	if !strings.Contains(out, `"cpu":"115m"`) {
+		t.Errorf("the CPU change was lost with the memory:\n%s", out)
+	}
+	if s := totalSavings(fs); s.memUnknown != 1 {
+		t.Errorf("memUnknown = %d, want 1: the total must say a container's memory is unknown", s.memUnknown)
 	}
 }

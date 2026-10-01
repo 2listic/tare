@@ -41,3 +41,16 @@ func TestSizerIgnoresUnknownWorkloads(t *testing.T) {
 		t.Error("a workload with no findings has no recommendation to apply")
 	}
 }
+
+// IDLE is excluded from the totals because its idleness is not ruled out. The
+// replay used to apply it anyway, so the node count rested on the very saving
+// the totals refused to claim.
+func TestSizerKeepsIdleWorkloadsAsTheyAre(t *testing.T) {
+	size := sizerFor([]analyze.Finding{
+		{Namespace: "web", Workload: "Deployment/sync", Container: "worker", Verdict: analyze.Idle,
+			CPURequest: 500, RecCPU: 10, MemRequest: 256 << 20, RecMem: 16 << 20},
+	})
+	if _, _, ok := size(discover.Pod{Namespace: "web", Workload: "Deployment/sync"}); ok {
+		t.Error("an IDLE workload must keep its current requests in the replay")
+	}
+}

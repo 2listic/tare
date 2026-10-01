@@ -64,19 +64,30 @@ func printCompact(r *report) {
 }
 
 // printSummary is one line, so the answer is the first thing after the table.
+// Nodes lead because they are the only figure that maps to a bill; request
+// changes follow, signed, and never called "reclaimed": a lowered request
+// frees nothing anyone pays for until a node goes away.
 func printSummary(r *report) {
 	s := totalSavings(r.Findings)
 	window := r.WindowUsed
 	if window == "" {
 		window = r.Window
 	}
-	line := fmt.Sprintf("%d containers over %s: reclaim %s, %s", len(r.Findings), window,
-		coresCell(s.cpuMillicores), memTotalCell(s.memBytes))
-	if s.addWorkloads > 0 {
-		line += fmt.Sprintf("; add back %s, %s", coresCell(s.addCPUMillicores), memTotalCell(s.addMemBytes))
-	}
+	line := fmt.Sprintf("%d containers over %s:", len(r.Findings), window)
 	if nodes, freed := nodeCells(r); nodes != "" {
-		line += fmt.Sprintf("; nodes %s, freed %s", nodes, freed)
+		line += fmt.Sprintf(" nodes freed %s of %s;", freed, nodes)
+	}
+	line += fmt.Sprintf(" requests lowered on %d (%s CPU, %s mem)",
+		s.workloads, cpuDelta(-s.cpuMillicores), memDelta(-s.memBytes))
+	if s.addWorkloads > 0 {
+		line += fmt.Sprintf(", raised on %d (%s CPU, %s mem)",
+			s.addWorkloads, cpuDelta(s.addCPUMillicores), memDelta(s.addMemBytes))
+	}
+	if s.memUnknown > 0 {
+		line += fmt.Sprintf("; memory unknown on %d (OOMKilled)", s.memUnknown)
+	}
+	if s.idleWorkloads > 0 {
+		line += fmt.Sprintf("; %d IDLE not counted", s.idleWorkloads)
 	}
 	fmt.Fprintln(diag, line)
 }
@@ -94,20 +105,6 @@ func nodeCells(r *report) (running, freed string) {
 		freed = ">=" + freed // pinned pods held their nodes: a lower bound
 	}
 	return strconv.Itoa(p.NodesRunning), freed
-}
-
-func coresCell(m int64) string {
-	if m == 0 {
-		return "0"
-	}
-	return cores(m)
-}
-
-func memTotalCell(b int64) string {
-	if b == 0 {
-		return "0"
-	}
-	return human(b)
 }
 
 // printWarnings collects everything that makes the rest of the report less
@@ -265,7 +262,7 @@ func printCompactFindings(fs []analyze.Finding, bySavings bool) {
 	for _, f := range fs {
 		row(w, string(f.Verdict), string(f.Confidence), f.Namespace,
 			workloadCell(f.Workload, nameWidth), f.Container, strconv.Itoa(f.Pods),
-			changeCell(f.CPURequest, f.RecCPU, milli), changeCell(f.MemRequest, f.RecMem, human),
+			changeCell(f.CPURequest, f.RecCPU, milli), memChangeCell(f),
 			whyCell(f))
 	}
 	// No placeholder row when nothing matched: a "NONE" row is a data row to
@@ -277,6 +274,15 @@ func printCompactFindings(fs []analyze.Finding, bySavings bool) {
 // changeCell shows the request and where it should go. No recommendation, or
 // one equal to the current value, is the current value alone: in both cases
 // the reader should change nothing.
+// memChangeCell is "16Mi→?" for a memory tare does not know. Printed as an
+// unchanged "16Mi" beside OOMKILLED, it read as an answer.
+func memChangeCell(f analyze.Finding) string {
+	if f.MemCensored {
+		return human(f.MemRequest) + "→?"
+	}
+	return changeCell(f.MemRequest, f.RecMem, human)
+}
+
 func changeCell(cur, rec int64, f func(int64) string) string {
 	if rec == 0 || rec == cur {
 		return f(cur)

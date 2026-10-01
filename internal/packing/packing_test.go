@@ -75,6 +75,11 @@ func TestConsolidationSavingIsNotCreditedToResizing(t *testing.T) {
 	if r.FromResizing() != 0 {
 		t.Errorf("halving two pods that already share one node frees no further node, got %d", r.FromResizing())
 	}
+	// The count was right and the names were not: Removable held n2 while
+	// FromResizing was 0, and the report printed it as a node tare freed.
+	if len(r.EmptyToday) != 1 {
+		t.Errorf("EmptyToday = %v, want the one node repacking alone empties", r.EmptyToday)
+	}
 }
 
 func TestResizingFreesANode(t *testing.T) {

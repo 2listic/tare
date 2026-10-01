@@ -58,7 +58,7 @@ func explainTotals(fs []analyze.Finding) {
 	if n := counts[analyze.Idle]; n > 0 {
 		out = append(out, fmt.Sprintf(
 			"%d container(s) did no measurable work all window. The larger saving there is deletion, "+
-				"not resizing, which is why it is not folded into reclaimable.*.", n))
+				"not resizing, which is why it is counted apart from the lower row in totals.", n))
 	}
 	if len(out) == 0 {
 		return

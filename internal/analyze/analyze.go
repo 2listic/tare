@@ -311,6 +311,14 @@ type Finding struct {
 	// degradation, so the limit sits at the request plus a headroom fraction
 	// rather than at a peak: the gap only buys time before an OOMKill.
 	RecMemLimit int64
+	// MemCensored records that the container was OOMKilled and no measurement
+	// raised its memory, so tare does not know what it needs: usage above the
+	// limit that killed it is never observed, and the recorded peak is a lower
+	// bound on demand. RecMem and RecMemLimit then hold the current values so
+	// every numeric consumer leaves memory alone, and renderers must print the
+	// recommendation as unknown, never as those values: an unchanged "16Mi"
+	// beside OOMKILLED reads as "16Mi is right", which is the input echoed back.
+	MemCensored bool
 
 	// Constraints are the workload facts that shaped the recommendation.
 	Constraints discover.Constraints
@@ -693,6 +701,24 @@ func decide(f *Finding, window time.Duration, th Thresholds) {
 		if memStarved {
 			f.RecMem = max(recMem, f.MemRequest)
 			f.RecMemLimit = max(int64(float64(f.RecMem)*(1+th.MemLimitHeadroom)), f.MemLimit)
+			// Nothing measured asked for more, so the ratchet decided this, and
+			// the ratchet's 25% limit headroom is not evidence of anything: it
+			// was shipping as a limit bump, and for a Guaranteed pod the QoS
+			// hold then pulled the request up to it. Hold both and say why.
+			if f.OOMKilled && recMem <= f.MemRequest {
+				f.MemCensored = true
+				f.RecMem, f.RecMemLimit = f.MemRequest, f.MemLimit
+				killedAt := "the point it was killed at"
+				if f.MemLimit > 0 {
+					killedAt = "the " + humanBytes(f.MemLimit) + " limit that killed it"
+				}
+				f.Reasons = append(f.Reasons, measured(MemDemandCensored, f.MemUsageMax, float64(f.MemLimit), Bytes, fmt.Sprintf(
+					"OOMKilled, and usage above %s is never observed: the %s peak is a lower bound on "+
+						"what it needs, not a measurement of it. tare does not know how much memory this "+
+						"container needs, so it proposes no memory change; raise it by a step you choose and "+
+						"re-run once the new size has a window of its own.",
+					killedAt, humanBytes(int64(f.MemUsageMax)))))
+			}
 		}
 		// The floor flags were set from usage alone; a ratcheted value is no
 		// longer the floor, and leaving them set makes a real recommendation

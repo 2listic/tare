@@ -77,6 +77,7 @@ type htmlSavings struct {
 	AddWorkloads     int
 	AddCPUMillicores int64
 	AddMemBytes      int64
+	IdleWorkloads    int
 }
 
 type htmlCount struct {
@@ -93,6 +94,7 @@ func buildHTMLView(r *report) htmlView {
 	v.Savings = htmlSavings{
 		Workloads: t.workloads, CPUMillicores: t.cpuMillicores, MemBytes: t.memBytes,
 		AddWorkloads: t.addWorkloads, AddCPUMillicores: t.addCPUMillicores, AddMemBytes: t.addMemBytes,
+		IdleWorkloads: t.idleWorkloads,
 	}
 
 	counts := map[analyze.Verdict]int{}
@@ -128,8 +130,8 @@ func buildHTMLView(r *report) htmlView {
 			Container:  f.Container,
 			CPU:        arrow(milli(f.CPURequest), milliRec(f.RecCPU)),
 			CPULimit:   arrow(milli(f.CPULimit), milliRec(f.RecCPULimit)),
-			Mem:        arrow(human(f.MemRequest), humanRec(f.RecMem)),
-			MemLimit:   arrow(human(f.MemLimit), humanRec(f.RecMemLimit)),
+			Mem:        arrow(human(f.MemRequest), memRec(f)),
+			MemLimit:   arrow(human(f.MemLimit), memLimitRec(f)),
 			Pressure:   pressureCell(f),
 			Samples:    f.Samples,
 			// A row with no recommendation at all is the tool declining to
@@ -156,6 +158,23 @@ func milliRec(m int64) string {
 		return "withheld"
 	}
 	return fmt.Sprintf("%dm", m)
+}
+
+// memRec and memLimitRec are the recommended memory as a reader should see
+// it: "?" when tare does not know, because the held values underneath are
+// there for the patch to leave alone, not to be read as an answer.
+func memRec(f analyze.Finding) string {
+	if f.MemCensored {
+		return "?"
+	}
+	return humanRec(f.RecMem)
+}
+
+func memLimitRec(f analyze.Finding) string {
+	if f.MemCensored {
+		return "?"
+	}
+	return humanRec(f.RecMemLimit)
 }
 
 func humanRec(b int64) string {
@@ -297,10 +316,11 @@ footer { margin-top: 36px; color: var(--dim); font-size: 12px; border-top: 1px s
 </div>
 
 <div class="totals">
-  {{if .Savings.Workloads}}<div>reclaimable across {{.Savings.Workloads}} containers:
+  {{if .Savings.Workloads}}<div>requests lowered on {{.Savings.Workloads}} containers:
     <span class="mono">{{cores .Savings.CPUMillicores}} CPU, {{human .Savings.MemBytes}} memory</span></div>{{end}}
-  {{if .Savings.AddWorkloads}}<div class="warn">to be added back across {{.Savings.AddWorkloads}} containers:
+  {{if .Savings.AddWorkloads}}<div class="warn">requests raised on {{.Savings.AddWorkloads}} containers:
     <span class="mono">{{cores .Savings.AddCPUMillicores}} CPU, {{human .Savings.AddMemBytes}} memory</span></div>{{end}}
+  {{if .Savings.IdleWorkloads}}<div>{{.Savings.IdleWorkloads}} IDLE containers are not counted above: their idleness is not ruled out.</div>{{end}}
 </div>
 
 <div class="hint">Click any row for the evidence behind it. Column headers sort.</div>

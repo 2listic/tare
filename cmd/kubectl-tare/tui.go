@@ -101,7 +101,7 @@ func newTUIModel(r *report) *tuiModel {
 			name:       tuiName(f),
 			search:     strings.ToLower(fmt.Sprintf("%s/%s [%s]", f.Namespace, f.Workload, f.Container)),
 			cpu:        arrow(milli(f.CPURequest), milliRec(f.RecCPU)),
-			mem:        arrow(human(f.MemRequest), humanRec(f.RecMem)),
+			mem:        arrow(human(f.MemRequest), memRec(f)),
 			pressure:   pressureCell(f),
 			withheld:   f.RecCPU == 0 && f.RecMem == 0,
 			detail:     tuiDetail(f),
@@ -139,13 +139,13 @@ func tuiSummary(fs []analyze.Finding) string {
 	s := totalSavings(fs)
 	out := strings.Join(parts, ", ")
 	if s.workloads > 0 {
-		out += fmt.Sprintf("  ·  reclaimable %s, %s", cores(s.cpuMillicores), human(s.memBytes))
+		out += fmt.Sprintf("  ·  requests lowered %s CPU, %s mem", cpuDelta(-s.cpuMillicores), memDelta(-s.memBytes))
 	}
 	// The add-back figure is never folded into the reclaim figure. Summing only
 	// the positive side is how the headline once came out optimistic by exactly
 	// the amount the reader most needed to see.
 	if s.addWorkloads > 0 {
-		out += fmt.Sprintf("  ·  to add back %s, %s", cores(s.addCPUMillicores), human(s.addMemBytes))
+		out += fmt.Sprintf("  ·  raised %s CPU, %s mem", cpuDelta(s.addCPUMillicores), memDelta(s.addMemBytes))
 	}
 	return out
 }

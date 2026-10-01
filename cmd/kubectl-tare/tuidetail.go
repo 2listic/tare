@@ -32,9 +32,9 @@ func tuiDetail(f analyze.Finding) []string {
 		{"cpu request", milli(f.CPURequest), milliRec(f.RecCPU),
 			cpuUse(f.CPUUsageP95, metrics.SigCPUUsage), cpuUse(f.CPUUsageMax, metrics.SigCPUPeak)},
 		{"cpu limit", milli(f.CPULimit), milliRec(f.RecCPULimit), "", ""},
-		{"mem request", human(f.MemRequest), humanRec(f.RecMem),
+		{"mem request", human(f.MemRequest), memRec(f),
 			memUse(f.MemP95, metrics.SigMemP95), memUse(f.MemUsageMax, metrics.SigMemory)},
-		{"mem limit", human(f.MemLimit), humanRec(f.RecMemLimit), "", ""},
+		{"mem limit", human(f.MemLimit), memLimitRec(f), "", ""},
 	}
 	out := alignColumns(rows)
 

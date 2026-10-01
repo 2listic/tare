@@ -37,10 +37,17 @@ type Result struct {
 	// NodesPackedRecommended is what the recommendations would fit onto.
 	NodesPackedRecommended int
 
-	// Removable names the nodes left empty after packing the recommendations.
+	// Removable names every node left empty after packing the
+	// recommendations, INCLUDING the ones repacking today's requests already
+	// empties. It is not the list of nodes tare freed and must never be
+	// printed beside FromResizing as if it were: that credited the cluster's
+	// own slack to the recommendations. EmptyToday is the other half.
 	// Named rather than counted, because "3 nodes" invites the reader to
 	// check, and the check is the point.
 	Removable []string
+	// EmptyToday names the nodes left empty by repacking today's requests,
+	// before any recommendation is applied.
+	EmptyToday []string
 
 	// Pinned counts pods held on their current node, with the reasons and how
 	// many pods each accounted for. A replay that pinned most of the cluster
@@ -118,6 +125,7 @@ func Replay(inv discover.Inventory, pods []discover.Pod, size Sizer) Result {
 	r.ExcludedNode = rec.excluded
 	r.Unusable = rec.unusable
 	r.Removable = rec.empty
+	r.EmptyToday = now.empty
 	r.Trustworthy = true
 	r.SelfCheck = fmt.Sprintf(
 		"self-check passed: every one of %d pods fits the node it is running on, so the capacity model agrees with the scheduler",

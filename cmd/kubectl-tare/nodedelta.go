@@ -16,7 +16,9 @@ import (
 // if every one of its containers has a recommendation. Summing a partial set
 // would hand the packer a pod smaller than anything that could exist, and the
 // node count that fell out of it would be fiction. A workload with any
-// container the analyzer declined to size keeps its current requests.
+// container the analyzer declined to size keeps its current requests, and so
+// does an IDLE one: the totals leave it out because idleness is not ruled out,
+// and a node count built on it would count the same unconfirmed saving twice.
 func sizerFor(fs []analyze.Finding) packing.Sizer {
 	type agg struct {
 		cpu, mem int64
@@ -30,7 +32,7 @@ func sizerFor(fs []analyze.Finding) packing.Sizer {
 			a = &agg{usable: true}
 			byWorkload[key] = a
 		}
-		if f.RecCPU <= 0 || f.RecMem <= 0 {
+		if f.RecCPU <= 0 || f.RecMem <= 0 || f.Verdict == analyze.Idle {
 			a.usable = false
 			continue
 		}
@@ -68,11 +70,21 @@ func nodeLines(r packing.Result) []string {
 	}
 	switch d := r.FromResizing(); {
 	case d > 0:
-		pf("  %d node(s) come from these recommendations: %s", d, strings.Join(r.Removable, ", "))
+		pf("  %d node(s) come from these recommendations.", d)
 	case d < 0:
 		pf("  these recommendations need %d MORE node(s): the starved containers in this report want more than the reclaimed containers give back", -d)
 	default:
 		pf("  0 nodes come from these recommendations. The requests get smaller and the bill does not: a request is a reservation, and the invoice moves when a node goes away.")
+	}
+	// Which nodes are empty, per pass, and not which pass emptied which node:
+	// the passes are packed independently, so the sets do not subtract. Listing
+	// every empty node under "come from these recommendations" once named the
+	// cluster's own slack as tare's saving.
+	if len(r.EmptyToday) > 0 {
+		pf("  empty after repacking today's requests: %s", strings.Join(r.EmptyToday, ", "))
+	}
+	if len(r.Removable) > 0 {
+		pf("  empty after applying these recommendations: %s", strings.Join(r.Removable, ", "))
 	}
 
 	if r.Pinned > 0 {

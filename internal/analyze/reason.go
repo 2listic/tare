@@ -42,6 +42,9 @@ const (
 	CeilingBlocked   Code = "CEILING_UNRESOLVED"
 	UnschedulableCPU Code = "UNSCHEDULABLE_CPU"
 	UnschedulableMem Code = "UNSCHEDULABLE_MEM"
+	// MemDemandCensored: OOMKilled, and nothing measured says how much more it
+	// needs, so memory is left as it is rather than given a number.
+	MemDemandCensored Code = "MEM_DEMAND_CENSORED"
 
 	// What the run could not see.
 	NoSaturationSignal Code = "NO_SATURATION_SIGNAL"

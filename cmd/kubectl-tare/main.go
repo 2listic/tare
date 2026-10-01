@@ -374,6 +374,7 @@ func emit(r *report, format string, verbose bool) error {
 		printSignalGaps(r.Missing)
 		printFindings(r.Findings)
 		printEvidence(r.Findings)
+		printVerdicts(r.Findings)
 		printTotals(r.Findings)
 		printNodes(r)
 		printDrainBlockers(r.DrainBlockers)
@@ -498,6 +499,9 @@ func limitCell(f analyze.Finding) string {
 }
 
 func memCell(f analyze.Finding) string {
+	if f.MemCensored {
+		return fmt.Sprintf("%s>?", human(f.MemRequest))
+	}
 	if f.RecMem == 0 {
 		return fmt.Sprintf("%s>-", human(f.MemRequest))
 	}
@@ -509,6 +513,9 @@ func memCell(f analyze.Finding) string {
 // difference is spelled out, and conflating them is how a throttled container
 // gets reported as comfortable.
 func memLimitCell(f analyze.Finding) string {
+	if f.MemCensored {
+		return fmt.Sprintf("%s>?", human(f.MemLimit))
+	}
 	if f.RecMemLimit == 0 {
 		return fmt.Sprintf("%s>-", human(f.MemLimit))
 	}

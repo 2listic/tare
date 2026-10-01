@@ -568,6 +568,75 @@ through the same way.
 `diff` with the default format. Same lesson as 5: a code path exercised only in
 demo mode is not exercised.
 
+## 31. The nodes section named the cluster's own slack as tare's saving
+
+**Looked like:** `nodes.from_resizing  2  ip-10-0-3-41, ip-10-0-5-12`, a count
+with the nodes that make it up.
+
+**Was actually:** the list was every node empty after packing the
+recommendations, including the ones repacking today's requests already empties.
+On the consolidation test fixture it printed `nodes.from_resizing  0  n2`: zero
+nodes credited to tare, one node named as tare's. `--explain` and the HTML
+report said the same through `nodeLines`. The counts were tested and correct;
+nothing tested the names beside them, and the one test that did
+(`TestResizingFreesANode`) had zero consolidation, so the two lists coincided.
+
+**Caught by:** a review from someone who had never seen the tool, asking what
+the section meant (2026-09-30). The confusion was the signal.
+
+**Fixed by:** `packing.Result.EmptyToday`, and a nodes section with one row
+per replay stage whose names are what is empty at that stage, not what that
+stage freed. The two passes are packed independently, so the sets do not
+subtract and the report no longer pretends they do.
+
+## 32. IDLE was summed into the headline its own evidence said not to act on
+
+**Looked like:** `reclaim 20.2 cores` on the demo.
+
+**Was actually:** 1990m of it was `dormant-sidecar`, whose row says
+`IDLE_NOT_RULED_OUT`. `--explain` stated that IDLE "is not folded into
+reclaimable.*"; `totalSavings` folded it in, and the node replay applied the
+same IDLE recommendations. The sentence and the sum disagreed and nothing
+compared them.
+
+**Caught by:** the same review, while reconciling the headline with the rows.
+
+**Fixed by:** IDLE counted apart (`idle` row in `totals`, `N IDLE not counted`
+in the summary) and left at its current requests in the replay.
+
+**Also found:** the README's example output could not have come from the tool.
+Its totals said 4 containers beside a summary of 35, and `1.2 cores` for rows
+that sum to 12.6. Hand-written example output is a claim no test checks; the
+current example is reconciled against its own findings table.
+
+## 33. An OOMKilled container's memory printed as if it were the answer
+
+**Looked like:** `SATURATED  checkout  16Mi  OOMKILLED`, memory unchanged.
+
+**Was actually:** a ratchet, not a measurement. Usage above the limit that
+killed a container is never observed, and a 15-30s scrape usually misses the
+climb to it, so the peak × 1.15 almost never exceeds the request and
+`max(peak, request)` returns the request. The row read as "16Mi is right" for
+the one container known to be too small. Under it, the limit was set to
+`max(request × 1.25, limit)`: a 25% bump nothing measured, shipped by
+`-o patch`. For a Guaranteed pod the QoS hold then pulled the request up to the
+bumped limit, so the "held" memory was in fact raised 25%. Same shape as 9: the
+input echoed back as a recommendation.
+
+**Caught by:** the 2026-09-30 review, asking why the crashed container was the
+only one with no memory recommendation.
+
+**Fixed by:** `Finding.MemCensored` and `MEM_DEMAND_CENSORED`. Request and
+limit hold their current values so every numeric consumer leaves memory alone;
+every renderer prints `?`; `-o patch` and `diff` omit the memory fields; the
+totals count it as `unknown`. A peak observed above the request is still a
+measured raise and is not censored.
+
+**Still open:** the threshold sweep is byte-identical with and without the fix.
+No simulator archetype reaches this path, because the simulator observes the
+working set at the limit when it kills, which a real scrape does not. Like
+`PlateauHeadroom`, the case is pinned by unit tests only.
+
 ---
 
 ## Open, and not yet solved
