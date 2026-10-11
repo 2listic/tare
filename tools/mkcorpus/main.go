@@ -114,7 +114,10 @@ func main() {
 		if out[i].Image != out[j].Image {
 			return out[i].Image < out[j].Image
 		}
-		return out[i].Container < out[j].Container
+		if out[i].Container != out[j].Container {
+			return out[i].Container < out[j].Container
+		}
+		return out[i].key() < out[j].key()
 	})
 
 	enc := json.NewEncoder(os.Stdout)

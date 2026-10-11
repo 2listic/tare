@@ -31,8 +31,10 @@ func runDiff(findings []analyze.Finding, repo string, write bool, kustomizeInto,
 
 	if kustomizeInto != "" {
 		patches, list := gitops.Kustomize(changes)
-		if err := os.MkdirAll(kustomizeInto, 0o755); err != nil {
-			return err
+		if write {
+			if err := os.MkdirAll(kustomizeInto, 0o755); err != nil {
+				return err
+			}
 		}
 		for _, p := range patches {
 			path := filepath.Join(kustomizeInto, p.Filename)
@@ -92,6 +94,17 @@ func verb(write bool) string {
 		return "wrote"
 	}
 	return "would change"
+}
+
+// checkDiffTarget validates where diff will write, before anything is read.
+func checkDiffTarget(o *options) error {
+	if o.repo == "" && o.kustomize == "" {
+		return fmt.Errorf("diff needs --repo <checkout> or --kustomize <dir>")
+	}
+	if o.repo != "" {
+		return repoLooksLikeManifests(o.repo)
+	}
+	return nil
 }
 
 // repoLooksLikeManifests is a cheap guard against pointing the tool at the

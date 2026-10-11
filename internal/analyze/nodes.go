@@ -9,12 +9,12 @@ import (
 	"github.com/mfranzon/tare/internal/metrics"
 )
 
-// ThreadPoolRatio is how many times more cores the node must have than the
+// threadPoolRatio is how many times more cores the node must have than the
 // container's CPU quota before an unconfigured runtime thread pool is worth
 // reporting. At 4x a runtime sized to the node burns its whole quota in the
 // first quarter of every scheduling period and stalls for the remainder; below
 // that the effect exists but is not worth a line in the report.
-const ThreadPoolRatio = 4
+const threadPoolRatio = 4
 
 // applyNodes adds the findings that need to know what the container is running
 // on. Every one of them is a refusal or a configuration finding: none changes a
@@ -49,7 +49,7 @@ func limitBoundOnIdleNode(f *Finding, util map[string]metrics.NodeObservation, t
 		return // no quota, so nothing can be bound by one
 	}
 	throttled := f.ThrottlePeak > th.ThrottleRatio
-	pressured := f.has(metrics.SigPSI) && f.PSIWaitingPeak > th.PSIWaiting
+	pressured := f.psiStalled(th)
 	if !throttled && !pressured {
 		return
 	}
@@ -164,7 +164,7 @@ func threadPoolMismatch(f *Finding, inv discover.Inventory) {
 		return
 	}
 	quotaCores := float64(f.CPULimit) / 1000
-	if quotaCores <= 0 || float64(cores)/quotaCores < ThreadPoolRatio {
+	if quotaCores <= 0 || float64(cores)/quotaCores < threadPoolRatio {
 		return
 	}
 
@@ -214,7 +214,7 @@ func unschedulable(f *Finding, inv discover.Inventory) {
 	if mem > 0 && f.RecMem > mem {
 		f.Reasons = append(f.Reasons, measured(UnschedulableMem, float64(f.RecMem), float64(mem), Bytes, fmt.Sprintf(
 			"the recommended %s memory request exceeds the largest schedulable node's %s allocatable: applying it makes the pod Pending rather than safer.",
-			humanBytes(f.RecMem), humanBytes(mem))))
+			HumanBytes(f.RecMem), HumanBytes(mem))))
 	}
 }
 

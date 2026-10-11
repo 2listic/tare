@@ -10,6 +10,7 @@ import (
 
 	"github.com/mfranzon/tare/internal/discover"
 	"github.com/mfranzon/tare/internal/metrics"
+	"github.com/mfranzon/tare/internal/render"
 )
 
 // runCheck answers, before any report is produced, what this cluster can and
@@ -91,12 +92,12 @@ func runCheck(ctx context.Context, out io.Writer, kc *discover.Client, namespace
 	case avail == 0:
 		mark(out, false, "history", fmt.Sprintf(
 			"less than an hour. %s was asked for; every finding would be rated low confidence",
-			humanDuration(window)))
+			render.HumanDuration(window)))
 	case avail < window:
 		mark(out, true, "history", fmt.Sprintf("%s (%s asked for, so the window will be shortened)",
-			humanDuration(avail), humanDuration(window)))
+			render.HumanDuration(avail), render.HumanDuration(window)))
 	default:
-		mark(out, true, "history", humanDuration(avail))
+		mark(out, true, "history", render.HumanDuration(avail))
 	}
 
 	fmt.Fprintln(out, "\nseries")
@@ -186,23 +187,18 @@ func checkSource(ctx context.Context, kc *discover.Client, promURL string) (*met
 		p.Ctx = ctx
 		return p, promURL + " (from --prometheus)", nil
 	}
-	candidates, err := kc.FindPrometheus(ctx)
+	p, c, others, err := discoverProm(ctx, kc)
 	if err != nil {
 		return nil, "", err
 	}
-	if len(candidates) == 0 {
+	if p == nil {
 		return nil, "", fmt.Errorf("no Prometheus-compatible service found; pass --prometheus http://... " +
 			"or set TARE_PROMETHEUS")
 	}
-	c := candidates[0]
-	p := metrics.New(&metrics.ProxyTransport{
-		Clientset: kc.Clientset(),
-		Namespace: c.Namespace, Service: c.Service, Port: c.Port, Scheme: c.Scheme,
-	})
 	p.Ctx = ctx
 	describe := c.String()
-	if len(candidates) > 1 {
-		describe += fmt.Sprintf(", %d other candidate(s); --prometheus picks a different one", len(candidates)-1)
+	if others > 0 {
+		describe += fmt.Sprintf(", %d other candidate(s); --prometheus picks a different one", others)
 	}
 	return p, describe, nil
 }
@@ -218,7 +214,7 @@ func mark(w io.Writer, ok bool, label, note string) {
 	}
 	// The note is the part worth reading, and it is often a sentence. Wrapping
 	// it under the label keeps the column of marks scannable.
-	lines := wrap(note, 74)
+	lines := render.Wrap(note, 74)
 	if len(lines) == 0 {
 		lines = []string{""}
 	}

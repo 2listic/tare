@@ -1,7 +1,9 @@
 package gitops
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 
@@ -25,7 +27,7 @@ import (
 // splice is one pending modification to the raw text.
 type splice struct {
 	line    int // 0-based
-	col     int // 0-based, where the value token starts
+	col     int // 0-based byte offset, where the value token starts
 	oldText string
 	newText string
 
@@ -33,28 +35,32 @@ type splice struct {
 	// lines have to be added.
 	insertAfter bool
 	lines       []string
+
+	owner int // index into the document's changes, so a failed splice un-applies its change
+}
+
+// refusal is a change whose manifest was found but deliberately not edited.
+// It is reported with its reason: "no manifest found" would send the reader
+// looking for a Helm chart that does not exist.
+type refusal struct {
+	c   Change
+	why string
 }
 
 // editRaw applies the planned changes to a file's bytes.
-func editRaw(raw []byte, lookup func(kind, name, namespace string) []Change) (string, []Change, bool, error) {
-	var docs []*yaml.Node
-	dec := yaml.NewDecoder(strings.NewReader(string(raw)))
-	for {
-		var doc yaml.Node
-		if err := dec.Decode(&doc); err != nil {
-			break
-		}
-		d := doc
-		docs = append(docs, &d)
-	}
+//
+// applied holds every change the file now satisfies, including one whose
+// values were already there; changed reports whether the bytes differ. On an
+// error, applied holds the changes that were not made because of it.
+func editRaw(raw []byte, lookup func(kind, name, namespace string) ([]Change, []refusal)) (out string, applied []Change, refused []refusal, changed bool, err error) {
+	docs := parseDocs(raw)
 	if len(docs) == 0 {
-		return "", nil, false, fmt.Errorf("no documents")
+		return "", nil, nil, false, fmt.Errorf("no documents")
 	}
+	lines, eol := splitLines(raw)
 
-	lines := strings.Split(string(raw), "\n")
 	var all []splice
-	var applied []Change
-
+	var cands []Change
 	for _, doc := range docs {
 		root := contentOf(doc)
 		if root == nil || root.Kind != yaml.MappingNode {
@@ -66,46 +72,195 @@ func editRaw(raw []byte, lookup func(kind, name, namespace string) []Change) (st
 		if kind == "" || name == "" {
 			continue
 		}
-		for _, c := range lookup(kind, name, scalarAt(meta, "namespace")) {
-			sp, ok := spliceContainer(root, c, lines)
-			if !ok {
+		want, no := lookup(kind, name, scalarAt(meta, "namespace"))
+		refused = append(refused, no...)
+		want, no = oneChangePerContainer(want)
+		refused = append(refused, no...)
+		for _, c := range want {
+			sp, why, found := spliceContainer(root, c, lines)
+			if !found {
 				continue
 			}
+			if why != "" {
+				refused = append(refused, refusal{c, why})
+				continue
+			}
+			for i := range sp {
+				sp[i].owner = len(cands)
+			}
 			all = append(all, sp...)
-			applied = append(applied, c)
+			cands = append(cands, c)
 		}
 	}
 	if len(all) == 0 {
-		return "", nil, false, nil
+		return "", cands, refused, false, nil
 	}
 
-	// Apply bottom-up so earlier line numbers stay valid.
-	sort.SliceStable(all, func(i, j int) bool {
-		if all[i].line != all[j].line {
-			return all[i].line > all[j].line
+	lines, failed := applyWhole(lines, all)
+	for i, c := range cands {
+		if failed[i] {
+			refused = append(refused, refusal{c, "the manifest text did not match its parsed structure, so the edit was not made"})
+		} else {
+			applied = append(applied, c)
 		}
-		return all[i].col > all[j].col
-	})
-	for _, s := range all {
-		if s.insertAfter {
-			lines = append(lines[:s.line+1], append(append([]string{}, s.lines...), lines[s.line+1:]...)...)
-			continue
-		}
-		l := lines[s.line]
-		if s.col > len(l) || !strings.HasPrefix(l[s.col:], s.oldText) {
-			continue // the tree and the text disagree; leave the line alone
-		}
-		lines[s.line] = l[:s.col] + s.newText + l[s.col+len(s.oldText):]
 	}
-	out := strings.Join(lines, "\n")
+	out = strings.Join(lines, eol)
 	// The last line of defence. These edits are textual, so a tokenising
 	// mistake produces a file that no longer parses, and writing that into
 	// somebody's repository is the worst thing this tool could do. Re-parsing
 	// costs nothing and turns a corruption into a skipped file.
 	if err := parses(out); err != nil {
-		return "", nil, false, fmt.Errorf("edit would not parse, file left alone: %w", err)
+		return "", applied, refused, false, fmt.Errorf("edit would not parse, file left alone: %w", err)
 	}
-	return out, applied, true, nil
+	return out, applied, refused, out != string(raw), nil
+}
+
+const whyDuplicate = "more than one recommendation targets this container, and tare will not choose between them"
+
+// oneChangePerContainer refuses every change to a container that more than one
+// change targets. Each would be planned against the same original bytes, so
+// both replaced one value token ("16MiMi") or both added a resources block,
+// and the result still parsed.
+func oneChangePerContainer(want []Change) (kept []Change, refused []refusal) {
+	n := map[string]int{}
+	for _, c := range want {
+		n[c.Container]++
+	}
+	for _, c := range want {
+		if n[c.Container] > 1 {
+			refused = append(refused, refusal{c, whyDuplicate})
+			continue
+		}
+		kept = append(kept, c)
+	}
+	return kept, refused
+}
+
+// parseDocs decodes every document in a file, stopping at the first that does
+// not parse.
+func parseDocs(raw []byte) []*yaml.Node {
+	var docs []*yaml.Node
+	dec := yaml.NewDecoder(strings.NewReader(string(raw)))
+	for {
+		var doc yaml.Node
+		if err := dec.Decode(&doc); err != nil {
+			return docs
+		}
+		d := doc
+		docs = append(docs, &d)
+	}
+}
+
+// splitLines splits a file into lines and reports its line ending. A file
+// checked out with CRLF endings keeps them. Splitting on \n alone left a \r on
+// every value token, which the replacement then dropped.
+func splitLines(raw []byte) (lines []string, eol string) {
+	text := string(raw)
+	eol = "\n"
+	if n := strings.Count(text, "\n"); n > 0 && strings.Count(text, "\r\n") == n {
+		eol = "\r\n"
+		text = strings.ReplaceAll(text, "\r\n", "\n")
+	}
+	return strings.Split(text, "\n"), eol
+}
+
+// mergeInserts joins inserts after the same line in the order they were
+// planned: applied one by one, a later block would land above an earlier one,
+// and a key meant for requests would end up under limits.
+func mergeInserts(all []splice) []splice {
+	var merged []splice
+	at := map[int]int{}
+	for _, s := range all {
+		if !s.insertAfter {
+			merged = append(merged, s)
+			continue
+		}
+		if i, ok := at[s.line]; ok {
+			merged[i].lines = append(merged[i].lines, s.lines...)
+			continue
+		}
+		at[s.line] = len(merged)
+		s.lines = append([]string{}, s.lines...)
+		merged = append(merged, s)
+	}
+	return merged
+}
+
+// applyWhole applies every change whose splices all match the text, and none
+// of a change that has one that does not. It reports the owners left out.
+func applyWhole(lines []string, all []splice) ([]string, map[int]bool) {
+	failed := mismatched(lines, all)
+	return applySplices(lines, mergeInserts(withoutOwners(all, failed))), failed
+}
+
+// mismatched reports the owners of any splice whose text does not match the
+// parsed structure. It runs before anything is applied: a change is several
+// splices, and applying the ones that matched while refusing the change wrote
+// half an edit into the file and reported none.
+func mismatched(lines []string, all []splice) map[int]bool {
+	failed := map[int]bool{}
+	var replaces []splice
+	for _, s := range all {
+		if s.insertAfter {
+			continue
+		}
+		if s.line >= len(lines) {
+			failed[s.owner] = true
+			continue
+		}
+		l := lines[s.line]
+		if s.col > len(l) || !strings.HasPrefix(l[s.col:], s.oldText) {
+			failed[s.owner] = true
+			continue
+		}
+		replaces = append(replaces, s)
+	}
+	// Two replacements over the same bytes were both checked against the
+	// original text, so both pass; applied, the second lands inside the first.
+	sort.SliceStable(replaces, func(i, j int) bool {
+		if replaces[i].line != replaces[j].line {
+			return replaces[i].line < replaces[j].line
+		}
+		return replaces[i].col < replaces[j].col
+	})
+	for i := 1; i < len(replaces); i++ {
+		a, b := replaces[i-1], replaces[i]
+		if a.line == b.line && b.col < a.col+len(a.oldText) {
+			failed[a.owner], failed[b.owner] = true, true
+		}
+	}
+	return failed
+}
+
+// withoutOwners drops every splice that belongs to a failed change.
+func withoutOwners(all []splice, failed map[int]bool) []splice {
+	var kept []splice
+	for _, s := range all {
+		if !failed[s.owner] {
+			kept = append(kept, s)
+		}
+	}
+	return kept
+}
+
+// applySplices applies bottom-up so earlier line numbers stay valid. Every
+// splice has already been checked against the text by mismatched.
+func applySplices(lines []string, merged []splice) []string {
+	sort.SliceStable(merged, func(i, j int) bool {
+		if merged[i].line != merged[j].line {
+			return merged[i].line > merged[j].line
+		}
+		return merged[i].col > merged[j].col
+	})
+	for _, s := range merged {
+		if s.insertAfter {
+			lines = append(lines[:s.line+1], append(append([]string{}, s.lines...), lines[s.line+1:]...)...)
+			continue
+		}
+		l := lines[s.line]
+		lines[s.line] = l[:s.col] + s.newText + l[s.col+len(s.oldText):]
+	}
+	return lines
 }
 
 // parses reports whether every document in a stream still decodes.
@@ -117,75 +272,225 @@ func parses(s string) error {
 		if err == nil {
 			continue
 		}
-		if err.Error() == "EOF" {
+		if errors.Is(err, io.EOF) {
 			return nil
 		}
 		return err
 	}
 }
 
+const (
+	whyAnchor = "its resources are shared through a YAML anchor or alias, so editing them here would change every container that references them"
+	whyMerge  = "the container is built from a YAML merge key (<<), so its resources are inherited and a block added here would override them"
+	whyFlow   = "its resources are written in flow style ({...}) without the key to change, and tare only adds keys to block-style YAML"
+	whyShape  = "its resources are not a plain mapping tare can edit"
+)
+
 // spliceContainer produces the edits for one container's resources.
-func spliceContainer(root *yaml.Node, c Change, lines []string) ([]splice, bool) {
+//
+// found is false when the document has no such container. When it does, the
+// result is either the splices (possibly none, when the values are already
+// there) or a reason the container was left alone. Every shape not handled
+// here is refused with a reason rather than guessed at: a guess that parses is
+// a silent wrong edit, and the parse check cannot catch it.
+func spliceContainer(root *yaml.Node, c Change, lines []string) (out []splice, why string, found bool) {
 	containers := mapValue(mapValue(mapValue(mapValue(root, "spec"), "template"), "spec"), "containers")
 	if containers == nil || containers.Kind != yaml.SequenceNode {
-		return nil, false
+		return nil, "", false
 	}
 	for _, ctr := range containers.Content {
 		if ctr.Kind != yaml.MappingNode || scalarAt(ctr, "name") != c.Container {
 			continue
 		}
-		want := []struct {
-			section string
-			key     string
-			val     *int64
-			render  func(int64) string
+		if mapValue(ctr, "<<") != nil {
+			return nil, whyMerge, true
+		}
+		if containers.Anchor != "" || ctr.Anchor != "" {
+			return nil, whyAnchor, true
+		}
+
+		resKey, res := entry(ctr, "resources")
+		if res == nil {
+			if ctr.Style&yaml.FlowStyle != 0 {
+				return nil, whyFlow, true
+			}
+			// No resources at all: append a complete block after the
+			// container's last line, at the indent of its own keys.
+			indent := ctr.Content[0].Column - 1
+			body := []string{pad(indent) + "resources:"}
+			body = append(body, blockFor(indent+2, "requests", c.CPURequest, c.MemRequest)...)
+			body = append(body, blockFor(indent+2, "limits", c.CPULimit, c.MemLimit)...)
+			if len(body) == 1 {
+				return nil, "", true
+			}
+			return []splice{{line: lastLineOf(ctr), insertAfter: true, lines: body}}, "", true
+		}
+		if anchored(res) {
+			return nil, whyAnchor, true
+		}
+		if isEmpty(res) {
+			// `resources: {}` is what most chart scaffolds render.
+			var body []string
+			body = append(body, blockFor(resKey.Column+1, "requests", c.CPURequest, c.MemRequest)...)
+			body = append(body, blockFor(resKey.Column+1, "limits", c.CPULimit, c.MemLimit)...)
+			return clearAndFill(resKey, lines, body)
+		}
+		if res.Kind != yaml.MappingNode {
+			return nil, whyShape, true
+		}
+
+		var missingSections []string
+		for _, sec := range []struct {
+			name     string
+			cpu, mem *int64
 		}{
-			{"requests", "cpu", c.CPURequest, cpuString},
-			{"requests", "memory", c.MemRequest, memString},
-			{"limits", "cpu", c.CPULimit, cpuString},
-			{"limits", "memory", c.MemLimit, memString},
-		}
-		var out []splice
-		res := mapValue(ctr, "resources")
-		for _, w := range want {
-			if w.val == nil {
+			{"requests", c.CPURequest, c.MemRequest},
+			{"limits", c.CPULimit, c.MemLimit},
+		} {
+			if sec.cpu == nil && sec.mem == nil {
 				continue
 			}
-			sec := mapValue(res, w.section)
-			if node := mapValue(sec, w.key); node != nil && node.Kind == yaml.ScalarNode {
-				if s, ok := replaceScalar(lines, node, w.render(*w.val)); ok {
-					out = append(out, s)
+			secKey, node := entry(res, sec.name)
+			if node == nil {
+				if res.Style&yaml.FlowStyle != 0 {
+					return nil, whyFlow, true
 				}
+				missingSections = append(missingSections, blockFor(res.Content[0].Column-1, sec.name, sec.cpu, sec.mem)...)
 				continue
 			}
-			// The key is absent. Building the missing structure by text is
-			// where this gets fragile, so it is done only for the whole
-			// resources block at once, below.
+			if anchored(node) {
+				return nil, whyAnchor, true
+			}
+			if isEmpty(node) {
+				if res.Style&yaml.FlowStyle != 0 {
+					return nil, whyFlow, true
+				}
+				sp, why, _ := clearAndFill(secKey, lines, keysFor(secKey.Column+1, sec.cpu, sec.mem))
+				if why != "" {
+					return nil, why, true
+				}
+				out = append(out, sp...)
+				continue
+			}
+			if node.Kind != yaml.MappingNode {
+				return nil, whyShape, true
+			}
+			var missCPU, missMem *int64
+			for _, k := range []struct {
+				key    string
+				val    *int64
+				render func(int64) string
+				miss   **int64
+			}{
+				{"cpu", sec.cpu, CPUQuantity, &missCPU},
+				{"memory", sec.mem, MemQuantity, &missMem},
+			} {
+				if k.val == nil {
+					continue
+				}
+				v := mapValue(node, k.key)
+				if v == nil {
+					*k.miss = k.val
+					continue
+				}
+				if anchored(v) {
+					return nil, whyAnchor, true
+				}
+				if v.Kind != yaml.ScalarNode {
+					return nil, whyShape, true
+				}
+				sp, ok, err := replaceScalar(lines, v, k.render(*k.val))
+				if err != "" {
+					return nil, err, true
+				}
+				if ok {
+					out = append(out, sp)
+				}
+			}
+			if missCPU != nil || missMem != nil {
+				if node.Style&yaml.FlowStyle != 0 {
+					return nil, whyFlow, true
+				}
+				out = append(out, splice{line: lastLineOf(node), insertAfter: true,
+					lines: keysFor(node.Content[0].Column-1, missCPU, missMem)})
+			}
 		}
-		if ins, ok := insertMissing(ctr, res, c, lines); ok {
-			out = append(out, ins...)
+		if len(missingSections) > 0 {
+			out = append(out, splice{line: lastLineOf(res), insertAfter: true, lines: missingSections})
 		}
-		return out, len(out) > 0
+		return out, "", true
 	}
-	return nil, false
+	return nil, "", false
+}
+
+// clearAndFill turns `key: {}` (or null, or nothing) into `key:` followed by
+// body. It works on the key's own line, so it refuses anything but a plain key
+// whose empty value sits beside it.
+func clearAndFill(key *yaml.Node, lines []string, body []string) ([]splice, string, bool) {
+	if len(body) == 0 {
+		return nil, "", true
+	}
+	li := key.Line - 1
+	if li < 0 || li >= len(lines) {
+		return nil, whyShape, true
+	}
+	l := lines[li]
+	b, ok := byteCol(l, key.Column)
+	if !ok || !strings.HasPrefix(l[b:], key.Value+":") {
+		return nil, whyShape, true
+	}
+	after := b + len(key.Value) + 1
+	rest := l[after:]
+	trimmed := strings.TrimLeft(rest, " \t")
+	tok := valueToken(trimmed) // which stops at the brace and would read {} as {
+	if strings.HasPrefix(trimmed, "{}") {
+		tok = "{}"
+	}
+	switch tok {
+	case "", "{}", "null", "Null", "NULL", "~":
+	default:
+		return nil, whyShape, true
+	}
+	out := []splice{{line: li, insertAfter: true, lines: body}}
+	if tok != "" {
+		out = append(out, splice{line: li, col: after, oldText: rest[:len(rest)-len(trimmed)+len(tok)], newText: ""})
+	}
+	return out, "", true
 }
 
 // replaceScalar rewrites a value in place, keeping any trailing comment.
-func replaceScalar(lines []string, node *yaml.Node, value string) (splice, bool) {
+func replaceScalar(lines []string, node *yaml.Node, value string) (splice, bool, string) {
 	li := node.Line - 1
 	if li < 0 || li >= len(lines) {
-		return splice{}, false
+		return splice{}, false, whyShape
 	}
-	col := node.Column - 1
 	l := lines[li]
-	if col < 0 || col > len(l) {
-		return splice{}, false
+	col, ok := byteCol(l, node.Column)
+	if !ok {
+		return splice{}, false, whyShape
 	}
 	old := valueToken(l[col:])
 	if old == value {
-		return splice{}, false
+		return splice{}, false, ""
 	}
-	return splice{line: li, col: col, oldText: old, newText: value}, true
+	return splice{line: li, col: col, oldText: old, newText: value}, true, ""
+}
+
+// byteCol converts yaml.v3's 1-based column, which counts characters, into a
+// byte offset into the line. Slicing by the column directly landed two bytes
+// early after an "é" and wrote a bare key that still parsed.
+func byteCol(line string, column int) (int, bool) {
+	n := 0
+	for i := range line {
+		if n == column-1 {
+			return i, true
+		}
+		n++
+	}
+	if n == column-1 {
+		return len(line), true
+	}
+	return 0, false
 }
 
 // valueToken returns just the scalar at the start of rest.
@@ -214,88 +519,33 @@ func valueToken(rest string) string {
 	for i := 0; i < len(rest); i++ {
 		switch rest[i] {
 		case ',', '}', ']':
-			return strings.TrimRight(rest[:i], " \t")
+			return strings.TrimRight(rest[:i], " \t\r")
 		case '#':
 			if i > 0 && (rest[i-1] == ' ' || rest[i-1] == '\t') {
-				return strings.TrimRight(rest[:i], " \t")
+				return strings.TrimRight(rest[:i], " \t\r")
 			}
 		}
 	}
-	return strings.TrimRight(rest, " \t")
-}
-
-// insertMissing writes the keys the manifest does not have yet.
-//
-// Only three shapes are handled, which between them cover every real manifest:
-// no resources block at all, a resources block missing requests, and one
-// missing limits. Anything stranger is left alone rather than guessed at, and
-// reported as unmatched so the omission is visible.
-func insertMissing(ctr, res *yaml.Node, c Change, lines []string) ([]splice, bool) {
-	needReq := (c.CPURequest != nil && mapValue(mapValue(res, "requests"), "cpu") == nil) ||
-		(c.MemRequest != nil && mapValue(mapValue(res, "requests"), "memory") == nil)
-	needLim := (c.CPULimit != nil && mapValue(mapValue(res, "limits"), "cpu") == nil) ||
-		(c.MemLimit != nil && mapValue(mapValue(res, "limits"), "memory") == nil)
-	if !needReq && !needLim {
-		return nil, false
-	}
-
-	if res == nil {
-		// No resources at all: append a complete block after the container's
-		// last line, indented one level in from the container's own keys.
-		last, indent := lastLineOf(ctr), ctr.Content[0].Column-1
-		body := []string{pad(indent) + "resources:"}
-		body = append(body, blockFor(indent+2, "requests", c.CPURequest, c.MemRequest)...)
-		body = append(body, blockFor(indent+2, "limits", c.CPULimit, c.MemLimit)...)
-		if len(body) == 1 {
-			return nil, false
-		}
-		return []splice{{line: last, insertAfter: true, lines: body}}, true
-	}
-
-	// A resources block exists but a whole section is missing.
-	indent := res.Content[0].Column - 1
-	last := lastLineOf(res)
-	var body []string
-	if needReq && mapValue(res, "requests") == nil {
-		body = append(body, blockFor(indent, "requests", c.CPURequest, c.MemRequest)...)
-	}
-	if needLim && mapValue(res, "limits") == nil {
-		body = append(body, blockFor(indent, "limits", c.CPULimit, c.MemLimit)...)
-	}
-	if len(body) == 0 {
-		return nil, false
-	}
-	return []splice{{line: last, insertAfter: true, lines: body}}, true
+	// A stray \r survives in a file with mixed line endings.
+	return strings.TrimRight(rest, " \t\r")
 }
 
 func blockFor(indent int, section string, cpu, mem *int64) []string {
 	if cpu == nil && mem == nil {
 		return nil
 	}
-	out := []string{pad(indent) + section + ":"}
+	return append([]string{pad(indent) + section + ":"}, keysFor(indent+2, cpu, mem)...)
+}
+
+func keysFor(indent int, cpu, mem *int64) []string {
+	var out []string
 	if cpu != nil {
-		out = append(out, pad(indent+2)+"cpu: "+cpuString(*cpu))
+		out = append(out, pad(indent)+"cpu: "+CPUQuantity(*cpu))
 	}
 	if mem != nil {
-		out = append(out, pad(indent+2)+"memory: "+memString(*mem))
+		out = append(out, pad(indent)+"memory: "+MemQuantity(*mem))
 	}
 	return out
 }
 
 func pad(n int) string { return strings.Repeat(" ", n) }
-
-// lastLineOf returns the 0-based index of the last line a node occupies.
-func lastLineOf(n *yaml.Node) int {
-	last := n.Line - 1
-	var walk func(*yaml.Node)
-	walk = func(x *yaml.Node) {
-		if x.Line-1 > last {
-			last = x.Line - 1
-		}
-		for _, ch := range x.Content {
-			walk(ch)
-		}
-	}
-	walk(n)
-	return last
-}

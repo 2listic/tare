@@ -235,18 +235,6 @@ func readGPU(n *corev1.Node, out *Node) {
 	}
 }
 
-// HasGPUs reports whether any node in the cluster advertises an accelerator.
-// A cluster with none must not be shown inference findings about devices it
-// does not have.
-func (inv Inventory) HasGPUs() bool {
-	for _, n := range inv.Nodes {
-		if n.GPUs > 0 {
-			return true
-		}
-	}
-	return false
-}
-
 // Get returns the node with the given name.
 func (inv Inventory) Get(name string) (Node, bool) {
 	for _, n := range inv.Nodes {

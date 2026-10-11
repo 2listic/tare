@@ -44,7 +44,6 @@ type Env struct {
 	Alloc  Allocation
 
 	now       time.Time
-	start     time.Time
 	lastStart time.Time // container start, for memory growth and deploys
 	restarts  float64
 	spikeLeft int
@@ -65,7 +64,6 @@ func New(d Demand, alloc Allocation, from time.Time, seed int64) *Env {
 // current allocation.
 func (e *Env) Reset(from time.Time) {
 	e.now = from
-	e.start = from
 	e.lastStart = from
 	e.restarts = 0
 	e.spikeLeft = 0
@@ -77,9 +75,6 @@ func (e *Env) Reset(from time.Time) {
 // between steps; it does not reset the clock or the sample history, because a
 // resize in the real world does not erase what came before.
 func (e *Env) SetAllocation(a Allocation) { e.Alloc = a }
-
-// Now reports the simulated clock.
-func (e *Env) Now() time.Time { return e.now }
 
 // Step advances one tick and returns the resulting sample.
 func (e *Env) Step() Sample {
@@ -151,10 +146,9 @@ func serve(want, limit float64) (got, psi float64) {
 	return limit, (want - limit) / want
 }
 
-// --- metrics.Source ---------------------------------------------------------
-
-// Cluster is a set of simulated containers that satisfies metrics.Source, so
-// the real analyzer can be run against simulation with no code path of its own.
+// Cluster is a set of simulated containers with the Observe and Usage methods
+// of a metrics source, so the real analyzer can be run against simulation with
+// no code path of its own.
 type Cluster struct {
 	Namespace string
 	Envs      map[string]*Env // container name to environment
@@ -191,8 +185,6 @@ func (c *Cluster) Run(d time.Duration) {
 	}
 }
 
-func (c *Cluster) Describe() string { return "simulate://" + c.Namespace }
-
 // Observe aggregates the trailing window into the same Observation values the
 // Prometheus source produces.
 func (c *Cluster) Observe(namespaces []string, window time.Duration) (map[metrics.Key]*metrics.Observation, error) {
@@ -223,13 +215,13 @@ func (e *Env) observe(k metrics.Key, window time.Duration) *metrics.Observation 
 		metrics.SigMemP95, metrics.SigPSI, metrics.SigPSIAvg, metrics.SigOOM,
 		metrics.SigRestarts, metrics.SigStartup,
 	} {
-		o.Have = markSignal(o.Have, sig)
+		o.Mark(sig)
 	}
 	if window >= 4*time.Hour {
-		o.Have = markSignal(o.Have, metrics.SigMemTrend)
+		o.Mark(metrics.SigMemTrend)
 	}
 	if e.Alloc.MemLimit > 0 {
-		o.Have = markSignal(o.Have, metrics.SigLimitTrend)
+		o.Mark(metrics.SigLimitTrend)
 	}
 
 	var early, late []float64
@@ -300,27 +292,6 @@ func mean(xs []float64) float64 {
 	}
 	return sum / float64(len(xs))
 }
-
-func markSignal(m map[metrics.Signal]bool, s metrics.Signal) map[metrics.Signal]bool {
-	if m == nil {
-		m = map[metrics.Signal]bool{}
-	}
-	m[s] = true
-	return m
-}
-
-// Without removes signals from every observation, so a test can ask what the
-// analyzer does on a cluster that does not export them.
-func Without(obs map[metrics.Key]*metrics.Observation, drop ...metrics.Signal) map[metrics.Key]*metrics.Observation {
-	for _, o := range obs {
-		for _, s := range drop {
-			delete(o.Have, s)
-		}
-	}
-	return obs
-}
-
-func (c *Cluster) Health() []metrics.SignalHealth { return nil }
 
 // Usage is the trailing window of one container as the same bucketed peaks
 // metrics.Prom.Usage returns, so a demo can draw what a cluster would.

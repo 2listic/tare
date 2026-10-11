@@ -191,10 +191,7 @@ func NewWithClientset(cs kubernetes.Interface) *Client { return &Client{cs: cs} 
 func (c *Client) Containers(ctx context.Context, namespaces []string) ([]Container, error) {
 	var out []Container
 
-	targets := namespaces
-	if len(targets) == 0 {
-		targets = []string{metav1.NamespaceAll}
-	}
+	targets := scopeOf(namespaces)
 	idx := c.index(namespaces)
 	for _, ns := range targets {
 		pods, err := c.cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
@@ -212,10 +209,7 @@ func (c *Client) Containers(ctx context.Context, namespaces []string) ([]Contain
 // server fills in RemainingItemCount for a limited list, so this costs one
 // small request rather than the several megabytes a real inventory does.
 func (c *Client) CountPods(ctx context.Context, namespaces []string) (int, error) {
-	targets := namespaces
-	if len(targets) == 0 {
-		targets = []string{metav1.NamespaceAll}
-	}
+	targets := scopeOf(namespaces)
 	var total int
 	for _, ns := range targets {
 		list, err := c.cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{Limit: 1})
@@ -274,7 +268,7 @@ func (c *Client) fromPod(ctx context.Context, idx *workloadIndex, pod *corev1.Po
 			MemLimit:     bytes(spec.Resources.Limits, corev1.ResourceMemory),
 			GPUs:         gpuCount(spec.Resources.Limits, spec.Resources.Requests),
 		}
-		if kind, name, ok := splitWorkload(workload); ok {
+		if kind, name, ok := SplitWorkload(workload); ok {
 			cc.Authored = idx.authoredFor(ctx, pod.Namespace, kind, name, spec.Name)
 		}
 		cc.Spec = specFor(spec, cc.MemLimit)
@@ -316,8 +310,18 @@ func specFor(spec *corev1.Container, memLimit int64) ceilings.Container {
 	return c
 }
 
-// splitWorkload splits a "Kind/name" workload string.
-func splitWorkload(workload string) (kind, name string, ok bool) {
+// scopeOf is the namespaces to query: the ones asked for, or every namespace
+// when none were.
+func scopeOf(namespaces []string) []string {
+	if len(namespaces) == 0 {
+		return []string{metav1.NamespaceAll}
+	}
+	return namespaces
+}
+
+// SplitWorkload splits a "Kind/name" workload string. ok is false unless both
+// halves are present.
+func SplitWorkload(workload string) (kind, name string, ok bool) {
 	kind, name, ok = strings.Cut(workload, "/")
 	return kind, name, ok && kind != "" && name != ""
 }

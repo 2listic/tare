@@ -97,11 +97,7 @@ func (p *Prom) CoveredKeys(namespaces []string, window time.Duration) (map[Key]b
 	}
 	out := make(map[Key]bool, len(samples))
 	for _, s := range samples {
-		out[Key{
-			Namespace: s.labels["namespace"],
-			Pod:       s.labels["pod"],
-			Container: s.labels["container"],
-		}] = true
+		out[keyOf(s.labels)] = true
 	}
 	return out, nil
 }

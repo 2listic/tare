@@ -3,6 +3,8 @@ package main
 import (
 	"testing"
 	"time"
+
+	"github.com/mfranzon/tare/internal/render"
 )
 
 func TestParseDuration(t *testing.T) {
@@ -48,7 +50,7 @@ func TestHumanDuration(t *testing.T) {
 		6 * time.Hour:       "6h",
 		90 * time.Minute:    "1h30m0s",
 	} {
-		if got := humanDuration(in); got != want {
+		if got := render.HumanDuration(in); got != want {
 			t.Errorf("%s = %q, want %q", in, got, want)
 		}
 	}

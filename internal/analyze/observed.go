@@ -57,7 +57,7 @@ func looksManagedRuntime(image string) bool {
 //   - the plateau is well below the limit, so there is headroom to explain
 //   - there is enough evidence to say anything at all
 func inferCeiling(f *Finding, th Thresholds) *ceilings.Ceiling {
-	if f.Image == "" || !looksManagedRuntime(f.Image) {
+	if !looksManagedRuntime(f.Image) {
 		return nil
 	}
 	for _, c := range f.Ceilings {
@@ -77,7 +77,7 @@ func inferCeiling(f *Finding, th Thresholds) *ceilings.Ceiling {
 		return nil
 	}
 	// Without the percentile there is no way to tell a plateau from a peak.
-	if !f.has(metrics.SigMemP95) {
+	if !f.hasSignal(metrics.SigMemP95) {
 		return nil
 	}
 	// A plateau: the 95th percentile sits close to the maximum, meaning the
@@ -92,7 +92,7 @@ func inferCeiling(f *Finding, th Thresholds) *ceilings.Ceiling {
 	}
 
 	plateau := int64(f.MemUsageMax)
-	overhead := max(plateau/4, 128<<20)
+	overhead := ceilings.JVMOverhead(plateau)
 
 	c := &ceilings.Ceiling{
 		Kind: ObservedCeiling, Resource: ceilings.Memory, Source: "observed",
@@ -102,12 +102,12 @@ func inferCeiling(f *Finding, th Thresholds) *ceilings.Ceiling {
 
 	// The strong case: the limit moved during the window and the plateau did
 	// not follow. That is a fixed cap, demonstrated rather than guessed.
-	if f.has(metrics.SigLimitTrend) && f.MemLimitEarly > 0 && f.MemLimitLate > 0 &&
+	if f.hasSignal(metrics.SigLimitTrend) && f.MemLimitEarly > 0 && f.MemLimitLate > 0 &&
 		relDiff(f.MemLimitEarly, f.MemLimitLate) > th.LimitMoveRatio {
 		c.Note = fmt.Sprintf(
 			"memory limit changed from %s to %s during the window and the working set stayed flat at %s. The runtime holds a fixed cap, so shrinking the limit will not shrink the application; %s is a floor, not a target.",
-			humanBytes(int64(f.MemLimitEarly)), humanBytes(int64(f.MemLimitLate)),
-			humanBytes(plateau), humanBytes(c.MinContainerBytes))
+			HumanBytes(int64(f.MemLimitEarly)), HumanBytes(int64(f.MemLimitLate)),
+			HumanBytes(plateau), HumanBytes(c.MinContainerBytes))
 		return c
 	}
 
@@ -116,7 +116,7 @@ func inferCeiling(f *Finding, th Thresholds) *ceilings.Ceiling {
 	// fact.
 	c.Note = fmt.Sprintf(
 		"no heap ceiling is visible in the pod spec, but memory sits flat at %s under a %s limit. For this runtime that shape usually means a heap cap set in the image entrypoint or a ConfigMap. Treating %s as a floor; confirm the flag before reducing further.",
-		humanBytes(plateau), humanBytes(f.MemLimit), humanBytes(c.MinContainerBytes))
+		HumanBytes(plateau), HumanBytes(f.MemLimit), HumanBytes(c.MinContainerBytes))
 	return c
 }
 

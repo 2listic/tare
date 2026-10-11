@@ -200,15 +200,6 @@ func pack(inv discover.Inventory, pods []discover.Pod, size Sizer) packResult {
 		bins[n.Name] = b
 		order = append(order, b)
 	}
-	// Largest node first: a big pod that only fits on the big node must not
-	// find it already filled with small ones.
-	sort.Slice(order, func(i, j int) bool {
-		if order[i].freeCPU != order[j].freeCPU {
-			return order[i].freeCPU > order[j].freeCPU
-		}
-		return order[i].node.Name < order[j].node.Name
-	})
-
 	requests := func(p discover.Pod) (int64, int64) {
 		if size == nil {
 			return p.CPU, p.Mem
@@ -281,7 +272,8 @@ func pack(inv discover.Inventory, pods []discover.Pod, size Sizer) packResult {
 		return ""
 	}
 
-	// Pinned pods hold their current node.
+	// Pinned pods hold their current node; the rest are placed below.
+	var movable []discover.Pod
 	for _, p := range pods {
 		if p.WorkloadKind == "DaemonSet" {
 			continue
@@ -289,6 +281,7 @@ func pack(inv discover.Inventory, pods []discover.Pod, size Sizer) packResult {
 		reason := held(p)
 		if reason == "" {
 			out.movable++
+			movable = append(movable, p)
 			continue
 		}
 		out.pinned++
@@ -346,17 +339,14 @@ func pack(inv discover.Inventory, pods []discover.Pod, size Sizer) packResult {
 	sort.Strings(out.unusable)
 
 	// Movable pods, biggest first.
-	var movable []discover.Pod
-	for _, p := range pods {
-		if p.WorkloadKind != "DaemonSet" && held(p) == "" {
-			movable = append(movable, p)
-		}
-	}
 	sort.Slice(movable, func(i, j int) bool {
 		ci, _ := requests(movable[i])
 		cj, _ := requests(movable[j])
 		if ci != cj {
 			return ci > cj
+		}
+		if movable[i].Namespace != movable[j].Namespace {
+			return movable[i].Namespace < movable[j].Namespace
 		}
 		return movable[i].Name < movable[j].Name
 	})
@@ -393,4 +383,20 @@ func pack(inv discover.Inventory, pods []discover.Pod, size Sizer) packResult {
 	}
 	sort.Strings(out.empty)
 	return out
+}
+
+// SortedPinReasons is the pin reasons most common first, then by name, so
+// every renderer lists them in the same order.
+func (r Result) SortedPinReasons() []string {
+	reasons := make([]string, 0, len(r.PinReasons))
+	for reason := range r.PinReasons {
+		reasons = append(reasons, reason)
+	}
+	sort.Slice(reasons, func(i, j int) bool {
+		if r.PinReasons[reasons[i]] != r.PinReasons[reasons[j]] {
+			return r.PinReasons[reasons[i]] > r.PinReasons[reasons[j]]
+		}
+		return reasons[i] < reasons[j]
+	})
+	return reasons
 }

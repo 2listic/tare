@@ -7,7 +7,7 @@ import (
 )
 
 // has reports whether a signal backed this finding.
-func (f *Finding) has(s metrics.Signal) bool { return f.Have[s] }
+func (f *Finding) hasSignal(s metrics.Signal) bool { return f.Have[s] }
 
 // HasPSI and HasThrottle let a renderer distinguish a measured zero from an
 // absent measurement.
@@ -43,7 +43,7 @@ var wanted = []struct {
 // data distinguishes it from one that is being throttled right now.
 func applySignalGaps(f *Finding) {
 	for _, w := range wanted {
-		if !f.has(w.sig) {
+		if !f.hasSignal(w.sig) {
 			f.Missing = append(f.Missing, w.sig)
 		}
 	}
@@ -62,7 +62,7 @@ func applySignalGaps(f *Finding) {
 		}
 	}
 
-	if !f.has(metrics.SigOOM) && f.RecMem > 0 && f.MemRequest > 0 && f.RecMem < f.MemRequest {
+	if !f.hasSignal(metrics.SigOOM) && f.RecMem > 0 && f.MemRequest > 0 && f.RecMem < f.MemRequest {
 		f.Reasons = append(f.Reasons, note(NoOOMHistory, "OOMKill history is unavailable, so a past failure at this "+
 			"size would not be visible; reduce memory in stages rather than in one step"))
 	}
@@ -71,7 +71,7 @@ func applySignalGaps(f *Finding) {
 	// number offered and come back for more. Without the trend signal there is
 	// nothing in the data that separates real growth from a leak, and the pod
 	// being younger than the window is enough to lose it.
-	if !f.has(metrics.SigMemTrend) && f.MemRequest > 0 && f.RecMem > f.MemRequest {
+	if !f.hasSignal(metrics.SigMemTrend) && f.MemRequest > 0 && f.RecMem > f.MemRequest {
 		f.Reasons = append(f.Reasons, measured(NoMemTrendOnRaise, float64(f.RecMem), float64(f.MemRequest), Bytes, "this recommendation RAISES memory, and the memory-trend signal "+
 			"is unavailable for this container, so steady growth cannot be distinguished from a leak. "+
 			"Check the working set over time before applying it."))
@@ -79,7 +79,7 @@ func applySignalGaps(f *Finding) {
 			f.Confidence = Medium
 		}
 	}
-	if !f.has(metrics.SigMemP95) {
+	if !f.hasSignal(metrics.SigMemP95) {
 		f.Reasons = append(f.Reasons, note(NoMemP95, "memory percentile data is unavailable, so a hidden runtime "+
 			"heap ceiling could not be inferred from behaviour"))
 	}
@@ -87,19 +87,13 @@ func applySignalGaps(f *Finding) {
 
 func (f *Finding) hasAny(ss ...metrics.Signal) bool {
 	for _, s := range ss {
-		if f.has(s) {
+		if f.hasSignal(s) {
 			return true
 		}
 	}
 	return false
 }
 
-// SummariseHealth renders the signal health of a source for the report header.
-//
-// A signal counts as degraded if ANY of its queries failed or returned nothing,
-// not only if all of them did. The memory trend needs both an early and a late
-// window: with only the late one it silently stops detecting leaks, which is
-// precisely the kind of half-working signal this reporting exists to expose.
 // SignalGap is one signal that did not fully work, and why.
 //
 // The status is separate from the prose for the same reason a Reason's code
@@ -138,6 +132,12 @@ func GapTexts(gs []SignalGap) []string {
 	return out
 }
 
+// SummariseHealth renders the signal health of a source for the report header.
+//
+// A signal counts as degraded if ANY of its queries failed or returned nothing,
+// not only if all of them did. The memory trend needs both an early and a late
+// window: with only the late one it silently stops detecting leaks, which is
+// precisely the kind of half-working signal this reporting exists to expose.
 func SummariseHealth(h []metrics.SignalHealth) (missing []SignalGap) {
 	type agg struct {
 		total, ok int

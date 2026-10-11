@@ -95,6 +95,12 @@ func Plan(fs []analyze.Finding) ([]Change, []Skipped) {
 	return out, skipped
 }
 
+// workload is the change's namespace/Kind/name, as a skip names it.
+func (c Change) workload() string { return c.Namespace + "/" + c.Kind + "/" + c.Name }
+
+// id identifies one container of one workload.
+func (c Change) id() string { return c.workload() + "/" + c.Container }
+
 func ptr(v int64) *int64 { return &v }
 func deref(p *int64) int64 {
 	if p == nil {
@@ -103,17 +109,26 @@ func deref(p *int64) int64 {
 	return *p
 }
 
-// cpuString renders millicores the way a manifest spells them.
-func cpuString(m int64) string {
-	if m%1000 == 0 && m > 0 {
+// CPUQuantity renders millicores the way a manifest spells them. It is the one
+// spelling for every output: -o patch and diff --write printed the same value
+// as 1000m and 1, which reads as two different recommendations.
+func CPUQuantity(m int64) string {
+	if m <= 0 {
+		return "0"
+	}
+	if m%1000 == 0 {
 		return fmt.Sprintf("%d", m/1000)
 	}
 	return fmt.Sprintf("%dm", m)
 }
 
-// memString renders bytes as whole mebibytes. A Kubernetes quantity has to
-// round-trip exactly, and a decimal gibibyte invites a rounding surprise.
-func memString(b int64) string {
+// MemQuantity renders bytes as whole mebibytes, or gibibytes when exact. A
+// Kubernetes quantity has to round-trip exactly, and a decimal gibibyte
+// invites a rounding surprise.
+func MemQuantity(b int64) string {
+	if b <= 0 {
+		return "0"
+	}
 	mi := b >> 20
 	if mi < 1 {
 		mi = 1
@@ -140,16 +155,16 @@ func PullRequestBody(changes []Change, skipped []Skipped, source, window string)
 		fmt.Fprintf(&b, "\n### %s/%s %s [%s]\n\n", c.Namespace, c.Kind, c.Name, c.Container)
 		b.WriteString("| field | new value |\n| --- | --- |\n")
 		if c.CPURequest != nil {
-			fmt.Fprintf(&b, "| requests.cpu | `%s` |\n", cpuString(*c.CPURequest))
+			fmt.Fprintf(&b, "| requests.cpu | `%s` |\n", CPUQuantity(*c.CPURequest))
 		}
 		if c.CPULimit != nil {
-			fmt.Fprintf(&b, "| limits.cpu | `%s` |\n", cpuString(*c.CPULimit))
+			fmt.Fprintf(&b, "| limits.cpu | `%s` |\n", CPUQuantity(*c.CPULimit))
 		}
 		if c.MemRequest != nil {
-			fmt.Fprintf(&b, "| requests.memory | `%s` |\n", memString(*c.MemRequest))
+			fmt.Fprintf(&b, "| requests.memory | `%s` |\n", MemQuantity(*c.MemRequest))
 		}
 		if c.MemLimit != nil {
-			fmt.Fprintf(&b, "| limits.memory | `%s` |\n", memString(*c.MemLimit))
+			fmt.Fprintf(&b, "| limits.memory | `%s` |\n", MemQuantity(*c.MemLimit))
 		}
 		if len(c.Reasons) > 0 {
 			b.WriteString("\nEvidence:\n\n")

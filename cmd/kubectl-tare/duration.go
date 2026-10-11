@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mfranzon/tare/internal/render"
 )
 
 // durationValue accepts day and week suffixes on top of Go's own units.
@@ -18,7 +20,7 @@ func (v durationValue) String() string {
 	if v.d == nil {
 		return ""
 	}
-	return humanDuration(*v.d)
+	return render.HumanDuration(*v.d)
 }
 
 func (v durationValue) Set(s string) error {
@@ -53,16 +55,4 @@ func parseDuration(s string) (time.Duration, error) {
 		return 0, fmt.Errorf("duration must be positive, got %q", s)
 	}
 	return d, nil
-}
-
-func humanDuration(d time.Duration) string {
-	switch {
-	case d%(7*24*time.Hour) == 0:
-		return fmt.Sprintf("%dw", int(d/(7*24*time.Hour)))
-	case d%(24*time.Hour) == 0:
-		return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
-	case d%time.Hour == 0:
-		return fmt.Sprintf("%dh", int(d/time.Hour))
-	}
-	return d.String()
 }

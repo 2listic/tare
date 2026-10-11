@@ -178,12 +178,11 @@ func TestNamespaceMismatchIsNotEdited(t *testing.T) {
 	dir := t.TempDir()
 	c := change("app", 300, 600, 512<<20, 640<<20)
 	c.Namespace = "staging" // the file says prod
-	edits, _, err := ApplyTree(dir, []Change{c}, true)
-	if err != nil {
+	if _, _, err := ApplyTree(dir, []Change{c}, true); err != nil {
 		t.Fatal(err)
 	}
 	write(t, dir, "api.yaml", deployYAML)
-	edits, _, _ = ApplyTree(dir, []Change{c}, true)
+	edits, _, _ := ApplyTree(dir, []Change{c}, true)
 	if len(edits) != 0 {
 		t.Error("a manifest in a different namespace must not be edited")
 	}
@@ -237,19 +236,19 @@ func TestQuantityRendering(t *testing.T) {
 	cases := []struct {
 		in   int64
 		want string
-	}{{2000, "2"}, {300, "300m"}, {10, "10m"}}
+	}{{2000, "2"}, {300, "300m"}, {10, "10m"}, {0, "0"}}
 	for _, tc := range cases {
-		if got := cpuString(tc.in); got != tc.want {
-			t.Errorf("cpuString(%d) = %q want %q", tc.in, got, tc.want)
+		if got := CPUQuantity(tc.in); got != tc.want {
+			t.Errorf("CPUQuantity(%d) = %q want %q", tc.in, got, tc.want)
 		}
 	}
 	memCases := []struct {
 		in   int64
 		want string
-	}{{1 << 30, "1Gi"}, {512 << 20, "512Mi"}, {1536 << 20, "1536Mi"}}
+	}{{1 << 30, "1Gi"}, {512 << 20, "512Mi"}, {1536 << 20, "1536Mi"}, {0, "0"}}
 	for _, tc := range memCases {
-		if got := memString(tc.in); got != tc.want {
-			t.Errorf("memString(%d) = %q want %q", tc.in, got, tc.want)
+		if got := MemQuantity(tc.in); got != tc.want {
+			t.Errorf("MemQuantity(%d) = %q want %q", tc.in, got, tc.want)
 		}
 	}
 }
@@ -264,7 +263,7 @@ func TestKustomizePatchAddressesTheObject(t *testing.T) {
 		t.Fatalf("expected one patch, got %d", len(patches))
 	}
 	body := patches[0].Body
-	for _, want := range []string{"kind: Deployment", "name: api", "namespace: prod", "- name: app", `cpu: "300m"`, `memory: "640Mi"`} {
+	for _, want := range []string{"kind: Deployment", "name: api", "namespace: prod", `- name: "app"`, `cpu: "300m"`, `memory: "640Mi"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("patch missing %q:\n%s", want, body)
 		}
@@ -279,7 +278,7 @@ func TestKustomizeGroupsContainersOfOneWorkload(t *testing.T) {
 	if len(patches) != 1 {
 		t.Fatalf("two containers of one Deployment are one patch, got %d", len(patches))
 	}
-	if !strings.Contains(patches[0].Body, "- name: app") || !strings.Contains(patches[0].Body, "- name: sidecar") {
+	if !strings.Contains(patches[0].Body, `- name: "app"`) || !strings.Contains(patches[0].Body, `- name: "sidecar"`) {
 		t.Errorf("both containers must appear:\n%s", patches[0].Body)
 	}
 }

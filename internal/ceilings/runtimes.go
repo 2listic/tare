@@ -97,10 +97,7 @@ func detectPython(c Container) []Ceiling {
 
 	var server string
 	for _, a := range argv {
-		base := a
-		if i := strings.LastIndex(a, "/"); i >= 0 {
-			base = a[i+1:]
-		}
+		base := lastSegment(a)
 		for _, s := range pythonServers {
 			if base == s {
 				server = s

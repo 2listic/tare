@@ -20,11 +20,6 @@ import (
 
 const sweepWindow = 7 * 24 * time.Hour
 
-var startAlloc = simulate.Allocation{
-	CPURequest: 2, CPULimit: 4,
-	MemRequest: 4 * gib, MemLimit: 8 * gib,
-}
-
 // scenario is a starting condition. A sweep that only ever starts from a
 // generous allocation cannot exercise any threshold on the saturation path,
 // because nothing is ever starved.

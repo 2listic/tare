@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"slices"
 )
 
 // Every subcommand parses the same flag set, so each one's help lists only
@@ -65,8 +66,9 @@ var usageFlags = map[string][]string{
 	"check": scopeFlags,
 }
 
-// diffOnly are hidden from report's help: report reads none of them.
-var diffOnly = map[string]bool{"repo": true, "write": true, "kustomize": true, "pr-body": true}
+// diffOnly are the flags only diff reads. They are hidden from report's help,
+// and checkCombination rejects them anywhere else.
+var diffOnly = []string{"repo", "write", "kustomize", "pr-body"}
 
 func usage(w io.Writer, cmd string) {
 	fmt.Fprint(w, usageText[cmd])
@@ -77,7 +79,7 @@ func usage(w io.Writer, cmd string) {
 		keep[name] = true
 	}
 	flag.VisitAll(func(f *flag.Flag) {
-		if (cmd == "report" && !diffOnly[f.Name]) || keep[f.Name] {
+		if (cmd == "report" && !slices.Contains(diffOnly, f.Name)) || keep[f.Name] {
 			fs.Var(f.Value, f.Name, f.Usage)
 			// Var records the current value as the default; restore the real
 			// one so "diff -n prod --help" does not claim prod is the default.

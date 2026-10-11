@@ -4,13 +4,14 @@ Every serious defect found in tare so far, in the order they were found.
 
 This file exists because tare's claim is not that it is clever. It is that it
 will not confidently tell you something false. That claim is worth exactly as
-much as the evidence behind it, and the evidence is this list: twenty-nine times
+much as the evidence behind it, and the evidence is this list: forty-seven times
 this tool produced an answer it had no business producing, almost always a clean
-and plausible one, and twenty-nine times it was caught and written down.
+and plausible one, and forty-seven times it was caught and written down.
 
-Two of them surfaced as an error: a run that timed out on a cluster larger than
-the lab (25), and a denied HPA read that aborted (26). The other twenty-seven did
-not surface at all, which is the whole point.
+Three of them surfaced as an error: a run that timed out on a cluster larger than
+the lab (25), a denied HPA read that aborted (26), and a panic on an empty
+`resources: {}` (36). The other forty-four did not surface at all, which is the
+whole point.
 
 ## The shape
 
@@ -636,6 +637,299 @@ measured raise and is not censored.
 No simulator archetype reaches this path, because the simulator observes the
 working set at the limit when it kills, which a real scrape does not. Like
 `PlateauHeadroom`, the case is pinned by unit tests only.
+
+## 34. A ratcheted CPU request above the limit it shipped with
+
+**Looked like:** `SATURATED  1000m`, a CPU increase for a starved container.
+
+**Was actually:** a patch the API server rejects. The ratchet raised the
+request to its current value, `max(rec, request)`, and held the limit at
+`max(rec, limit)`. With no current limit that is `max(rec, 0)`, so the
+usage-sized limit (875m) stayed below the ratcheted 1000m request. The
+restart-churn hold had the same line. Defect 9 split the ratchet by resource;
+nobody checked the two halves of one resource against each other.
+
+**Caught by:** the 2026-10-08 pre-release review, constructing a starved
+container with a request and no limit.
+
+**Fixed by:** both holds take `max(..., RecCPU)` for the limit.
+`TestRatchetedCPURequestNeverExceedsItsLimit` covers both paths.
+
+## 35. Two copies of "what tare will write" disagreed, and one wrote zeros
+
+**Looked like:** `-o patch` and `diff --write`, two renderings of the same
+findings.
+
+**Was actually:** two rules. `analyze.Patchable`, whose own comment warned that
+two copies would drift, accepted IDLE. The patch script kept its own copy, which
+did not. So `diff --write` committed `4Gi -> 26Mi` for containers the report
+said not to act on: defect 32's IDLE, now landing in git instead of in a total.
+The script, separately, wrote `"cpu":"0"` for every CPU field it had no number
+for. In a strategic merge patch that strips the request; the table showed the
+same field as withheld.
+
+**Caught by:** the same review, comparing the two paths field by field.
+
+**Fixed by:** `-o patch` renders `gitops.Plan`'s changes, so there is one rule.
+IDLE is out of `Patchable`, and a field without a number is omitted, not zeroed.
+
+## 36. The manifest editor reported edits it had not made
+
+**Looked like:** `edited deploy/api.yaml (2 container(s))`.
+
+**Was actually:** each of these produced a wrong edit or a false "applied":
+
+- `resources: {}`, which most chart scaffolds render, panicked on
+  `res.Content[0]` partway through the tree. Earlier files were already
+  rewritten, with non-atomic writes. A bare `resources:` and an alias did the
+  same.
+- A section holding `memory` but not `cpu` dropped the CPU change and still
+  counted the container as applied.
+- A manifest with no namespace (a Kustomize base) matched every namespace. The
+  first namespace's numbers won, the second's splice found the old text gone,
+  and both were reported as applied.
+- An edit through a YAML anchor changed every container that aliased it. A
+  container built from `<<: *base` had a block added that overrode what it
+  inherited.
+- CRLF files lost the `\r` on each edited line.
+- yaml.v3 columns count characters and the splice sliced bytes, so an `é`
+  earlier on the line wrote `cpu:500m`. That still parses, as a bare key, so the
+  parse check passed it.
+- Kustomize patch files were named by namespace and name only, so
+  Deployment/web and StatefulSet/web overwrote each other. A container named
+  `123` was emitted as the integer 123.
+- Writes followed symlinks out of the repository.
+
+**Caught by:** the same review, which fed the editor each shape a real repository
+contains.
+
+**Fixed by:** `spliceContainer` either edits a shape correctly or refuses it with
+a reason. The reason reaches the skipped list, and no longer reads "may be
+Helm". It covers empty values, missing keys inside an existing section, a
+namespace-less file with conflicting namespaces, anchors, merge keys and flow
+style. Line endings are preserved and columns are converted to bytes. A failed
+splice un-applies its change. Inserts after one line are joined in order,
+because applied one at a time a requests key landed under limits. Writes go
+through a temp file and a rename, and symlinks are refused. Each case has a
+test in `hazards_test.go`, checked against the pre-fix code: all ten failed
+there. The first run of that control passed everything, because it had copied
+the fixed working tree instead of HEAD.
+
+## 37. `-n prod check` ran a report and exited 0
+
+**Looked like:** a CI gate that passed.
+
+**Was actually:** defect 5 again, one position later. The fix for 5 split off a
+subcommand only when it came first, so a flag before the subcommand stopped Go's
+parser at `check`, and the full report ran instead. Leftover arguments were
+never inspected, so `report foo` and `-n a b` ran on the wrong scope. Several
+flag combinations were also accepted and then ignored:
+
+- `diff -o json --write` skipped the diff and exited 0.
+- `check --demo` printed the demo.
+- `--write` without `diff` wrote nothing.
+- A misspelled `-o` failed only after the whole cluster run.
+
+The test for 5 passed throughout, because it checked a copy of `run()`'s logic,
+not `run()`.
+
+**Caught by:** the same review.
+
+**Fixed by:** `parseArgs` parses flags on either side of the subcommand and
+rejects anything left over. `checkCombination` rejects ignored combinations
+before any cluster call. The tests call the real functions.
+
+**Also found:** `G` then Enter on an empty TUI view indexed `vis[-1]` and
+panicked.
+
+## 38. A limit that was throttling the container was cut by 70%
+
+**Looked like:** `WASTE  100m→30m`, a Guaranteed cache using a quarter of its
+CPU.
+
+**Was actually:** the 100m limit throttled it in 82% of scheduling periods.
+Its own `LIMIT_NOT_NODE` line, in the same finding, said the limit was the
+constraint. The limit was sized from peak usage, which is a rate averaged over
+seconds, while CFS spends the quota every 100ms. A container that bursts past
+its quota inside each period is throttled while its averaged peak sits far below
+the limit. metrics-app was the same, 600m cut to 165m at 63% throttled. The
+saturation path never saw either one, because their pressure was low against
+their allocation and read as node contention. This is defect 2 at a shorter
+timescale.
+
+**Caught by:** running the post-review build on msi on 2026-10-11 and
+reading the patch script's comments against its numbers.
+
+**Fixed by:** a CPU limit that throttled the container above `ThrottleRatio`
+is never lowered. The finding says so under `CPU_LIMIT_HELD_THROTTLED`, and the
+request is still sized from usage. On the live cluster the rule also held
+tomcat-lowxmx (1000m, which had been cut to 54m) and resize-target (500m to 40m).
+Both were throttled at boot, so the startup limit sized from averaged boot
+usage had the same flaw. `TestThrottledLimitIsNeverLowered` failed on the
+pre-fix code (100m to 31m). `TestUnthrottledLimitIsStillSized` is the control.
+
+**Cost:** fewer limit reductions. Nothing measured says how far a throttled
+limit could safely go down, so tare no longer offers one.
+
+## 39. A model's weight figure was decided by map order
+
+**Looked like:** a VRAM fit check for `--quantization gptq-int8`.
+
+**Was actually:** a coin toss. `precisionOf` looked the flag up by ranging over
+a map of precision names and returned the first one the flag contained. That
+flag contains both `gptq` (0.5 bytes per parameter) and `int8` (1.0), so the
+weights figure, and with it `VRAM_FITS` or `VRAM_EXCEEDS_DEVICE`, could change
+by a factor of two between two runs on the same cluster.
+
+**Caught by:** the 2026-10-11 consolidation review, which was looking for map
+iteration that reaches output. It found two more that only reordered findings
+from run to run: the analyzer's sort had no tie-break past the CPU request, and
+the simulator listed its inventory from a map.
+
+**Fixed by:** the widest matching precision. Overstating the weights refuses a
+fit; understating them passes one that cannot load. Findings are now sorted to
+a total order, and demo output is byte-identical between runs.
+
+## 40. `diff --write` wrote half of a change it reported as refused
+
+**Looked like:** `SKIP api [app]: the manifest text did not match its parsed
+structure, so the edit was not made`.
+
+**Was actually:** part of the edit was made. A change is several splices, one
+for each value it touches. Each splice was checked against the text only as it
+was applied. One that failed marked the change refused, while the splices
+already applied stayed in the file. The PR body said the container was left
+alone. The diff showed its CPU request changed and its memory not.
+
+**Caught by:** the 2026-10-11 consolidation review.
+
+**Fixed by:** every splice is checked before any is applied, and a change goes
+in whole or not at all (`applyWhole`). The first version of that fix had its
+own defect, which the gitops harness caught before it shipped. When two changes
+targeted one container, both were now checked against the original text and
+both passed, so the second overwrote part of the first. The result was
+`memory: 16MiMi`, which still parses. The old order had refused the second change
+only by accident, and still wrote two `resources:` blocks into a sidecar.
+Two changes for one container are now both refused with a reason, and two
+splices over the same bytes refuse both their changes.
+`TestFailedSpliceUnappliesItsWholeChange`,
+`TestTwoChangesForOneContainerAreBothRefused` and
+`TestOverlappingSplicesRefuseBothOwners` each fail when the fix is reverted.
+
+## 41. A CPU-starved container that kept restarting was told to cut memory
+
+**Looked like:** `SATURATED`, with a CPU increase and a memory decrease.
+
+**Was actually:** a container with 6 restarts in the window. The restart-churn
+hold refuses to reduce a container that keeps dying, because its samples
+describe a container that never ran at that size. But the hold only ran when
+nothing was starved. Starvation holds only the starved resource, so a
+CPU-throttled container skipped the churn hold entirely, and its memory was
+sized from a dying container's samples. In the fuzz population, 4GiB was cut to
+384MiB.
+
+**Caught by:** the 2026-10-11 consolidation review.
+
+**Fixed by:** churn now holds whichever resources starvation did not, and the
+verdict stays `SATURATED`. 567 of the 4,501 findings in the regression snapshot
+gained `RESTART_CHURN`, and 70 of those no longer get a memory cut. An
+OOMKilled container that keeps restarting now also keeps its CPU. `TestRestartChurnHoldsWhatStarvationDoesNot`.
+
+**Cost:** an OOM-looping container no longer gets a CPU reduction. Its CPU
+samples come from the same dying container, so that reduction was never
+measured either.
+
+## 42. A Guaranteed pod's held request was never checked against the node
+
+**Looked like:** a memory increase with no `UNSCHEDULABLE_MEM`.
+
+**Was actually:** a request no node could hold. The Guaranteed QoS hold raises
+the request to the limit, and it ran last, after the node-size check had
+already passed the lower value. The HPA notes and the authored-limit notes ran
+before it too, so they quoted numbers that were no longer the recommendation.
+
+**Caught by:** the 2026-10-11 consolidation review.
+
+**Fixed by:** `holdGuaranteed` runs straight after `decide`, before anything
+reads the numbers. `TestGuaranteedHoldIsCheckedAgainstTheLargestNode`.
+
+## 43. The floor flags described numbers that were gone
+
+**Looked like:** `"CPUFloored": true` in JSON output, which says the number is
+a constant rather than a measurement.
+
+**Was actually:** describing a value that had since changed. The flags were
+reconciled inside `decide`, so they missed everything that moved the numbers
+afterwards. The Guaranteed hold raised a floored 10m request to 14m, and a VPA
+conflict zeroed it, and in both cases the flag stayed set.
+
+**Caught by:** the 2026-10-11 consolidation review.
+
+**Fixed by:** the flags are reconciled once, after the last step that moves a
+number, and stay set only while the number is the floor.
+`TestFloorFlagsFollowTheFinalNumbers`.
+
+## 44. "Raise the limit" on a container starved only of memory
+
+**Looked like:** `CPU_PINNED_AT_LIMIT: usage is pinned at the 500m CPU limit;
+raise the limit, not just the request`.
+
+**Was actually:** printed beside a recommendation that raised nothing on CPU.
+The container was OOMKilled, and its CPU showed no stall. The note was gated
+only on CPU p95 being near the limit, not on CPU starvation.
+
+**Caught by:** the 2026-10-11 consolidation review.
+
+**Fixed by:** the note now requires CPU starvation.
+`TestPinnedAtLimitNeedsCPUStarvation`.
+
+## 45. One refused namespace stopped the VPA scan
+
+**Looked like:** recommendations for workloads in namespaces `b` and `c`, with
+one warning about VPAs in namespace `a`.
+
+**Was actually:** namespaces `b` and `c` were never scanned. The scan used
+`break` on any error, which is right when the VPA CRD is missing because every
+namespace fails the same way. RBAC is per namespace, though, so a refusal in one
+namespace says nothing about the next. A VPA in Auto mode in a later namespace
+went unseen, and tare recommended values for a field that controller was
+already writing. Errors other than Forbidden were also dropped silently.
+
+**Caught by:** the 2026-10-11 consolidation review.
+
+**Fixed by:** a missing CRD still stops the scan, silently. Any other error is
+reported and the scan continues. `TestVPAScanContinuesPastARefusedNamespace`,
+`TestMissingVPACRDIsSilent`.
+
+## 46. The commitment table counted pods, not containers, as unlimited
+
+**Looked like:** `UNLIMITED_CPU_PODS=0` on a node full of pods with sidecars.
+
+**Was actually:** a count of pods whose summed limit was zero, so one limited
+container hid every unlimited container beside it. The type's own comment said
+it counted containers.
+
+**Caught by:** the 2026-10-11 consolidation review.
+
+**Fixed by:** `podFrom` counts the unlimited containers in each pod, and the
+labels are now `UNLIMITED_CPU_CONTAINERS` / `UNLIMITED_MEM_CONTAINERS`.
+`TestUnlimitedContainersAreCountedPerContainer`,
+`TestUnlimitedSidecarBesideALimitedContainerIsCounted`.
+
+## 47. Four smaller ones from the same review
+
+- **`-o patch` and `diff --write` spelled one value two ways**, `1024Mi` against
+  `1Gi` and `1000m` against `1`, which reads as two different recommendations.
+  `--write` also rendered zero bytes as `1Mi`. Both now use
+  `gitops.CPUQuantity` / `gitops.MemQuantity`.
+- **`OLLAMA_MAX_LOADED_MODELS` was filed under the keep-alive kind**, so a
+  lookup by kind could return the wrong setting. The test asserted the wrong
+  kind, which is how it survived. It now has its own kind,
+  `ollama-max-loaded-models`.
+- **`AvailableWindow` probed the default 14-day window twice** before stepping
+  down. The probe ladder now skips a step equal to the requested window.
+- **`diff --repo /typo` was rejected only after the whole run**, minutes of
+  Prometheus queries later. The target is now checked before any cluster call.
 
 ---
 

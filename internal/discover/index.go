@@ -30,10 +30,7 @@ type workloadIndex struct {
 }
 
 func newWorkloadIndex(c *Client, namespaces []string) *workloadIndex {
-	scope := namespaces
-	if len(scope) == 0 {
-		scope = []string{metav1.NamespaceAll}
-	}
+	scope := scopeOf(namespaces)
 	return &workloadIndex{
 		c: c, scope: scope,
 		tmpl:    map[string]map[string]Authored{},

@@ -120,20 +120,6 @@ const (
 	Guaranteed
 )
 
-// String names the shape for test failure messages.
-func (s Shape) String() string {
-	switch s {
-	case NoRequests:
-		return "NoRequests"
-	case RequestsOnly:
-		return "RequestsOnly"
-	case Guaranteed:
-		return "Guaranteed"
-	default:
-		return "Burstable"
-	}
-}
-
 // cpuDemand returns wanted cores at time t.
 func (d Demand) cpuDemand(t time.Time, spiking bool, rng *rand.Rand) float64 {
 	v := d.BaseCPU
@@ -176,32 +162,4 @@ func (d Demand) memDemand(uptime time.Duration, rng *rand.Rand) int64 {
 		v = d.MemCeiling
 	}
 	return v
-}
-
-// PeakCPU is the ground truth: the smallest CPU allocation that never starves
-// this workload, computed by replaying demand with no allocation limit.
-// Tests assert recommendations against this rather than against a hard-coded
-// number, so changing the demand model cannot silently invalidate them.
-func PeakCPU(d Demand, from time.Time, dur time.Duration, seed int64) float64 {
-	e := New(d, Allocation{}, from, seed)
-	e.Run(dur)
-	var peak float64
-	for _, s := range e.samples {
-		peak = math.Max(peak, s.CPUDemand)
-	}
-	return peak
-}
-
-// PeakMem is the ground truth for memory: the largest demand observed with no
-// allocation limit, which is the smallest limit that avoids an OOMKill.
-func PeakMem(d Demand, from time.Time, dur time.Duration, seed int64) int64 {
-	e := New(d, Allocation{}, from, seed)
-	e.Run(dur)
-	var peak int64
-	for _, s := range e.samples {
-		if s.MemDemand > peak {
-			peak = s.MemDemand
-		}
-	}
-	return peak
 }

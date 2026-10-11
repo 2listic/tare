@@ -9,6 +9,7 @@ import (
 func limited(name, on string, req, lim int64, memReq, memLim int64) discover.Pod {
 	p := pod(name, on, req, memReq)
 	p.CPULimit, p.MemLimit = lim, memLim
+	p.UnlimitedCPU, p.UnlimitedMem = 0, 0
 	return p
 }
 
@@ -21,7 +22,7 @@ func TestUnderRequestedAndOverLimitedIsVisible(t *testing.T) {
 		// 500m requested, 8 cores allowed, each.
 		pods = append(pods, limited(n, "n1", 500, 8000, gib, 4*gib))
 	}
-	cs := Commitments(inv, pods, UnlimitedCounts(pods))
+	cs := Commitments(inv, pods)
 	if len(cs) != 1 {
 		t.Fatalf("expected one node, got %d", len(cs))
 	}
@@ -42,7 +43,7 @@ func TestMemoryOvercommitIsSeparateFromCPU(t *testing.T) {
 		limited("a", "n1", 100, 200, gib, 20*gib),
 		limited("b", "n1", 100, 200, gib, 20*gib),
 	}
-	c := Commitments(inv, pods, nil)[0]
+	c := Commitments(inv, pods)[0]
 	if c.MemRatio() <= 1 {
 		t.Errorf("MemRatio = %.2f, want above 1: 40Gi of limits on a 32Gi node", c.MemRatio())
 	}
@@ -59,7 +60,19 @@ func TestUnlimitedContainersAreCounted(t *testing.T) {
 		limited("capped", "n1", 100, 500, gib, gib),
 		pod("uncapped", "n1", 100, gib), // no limits at all
 	}
-	c := Commitments(inv, pods, UnlimitedCounts(pods))[0]
+	c := Commitments(inv, pods)[0]
+	if c.UnlimitedCPU != 1 || c.UnlimitedMem != 1 {
+		t.Errorf("UnlimitedCPU=%d UnlimitedMem=%d, want 1 and 1", c.UnlimitedCPU, c.UnlimitedMem)
+	}
+}
+
+// A pod whose app container is limited and whose sidecar is not has a
+// non-zero limit total. Counting pods by that total hid the sidecar.
+func TestUnlimitedSidecarBesideALimitedContainerIsCounted(t *testing.T) {
+	inv := discover.Inventory{Nodes: []discover.Node{node("n1", 8)}}
+	p := limited("app", "n1", 100, 500, gib, gib)
+	p.UnlimitedCPU, p.UnlimitedMem = 1, 1 // the sidecar
+	c := Commitments(inv, []discover.Pod{p})[0]
 	if c.UnlimitedCPU != 1 || c.UnlimitedMem != 1 {
 		t.Errorf("UnlimitedCPU=%d UnlimitedMem=%d, want 1 and 1", c.UnlimitedCPU, c.UnlimitedMem)
 	}
@@ -67,7 +80,7 @@ func TestUnlimitedContainersAreCounted(t *testing.T) {
 
 func TestEmptyNodesAreOmitted(t *testing.T) {
 	inv := discover.Inventory{Nodes: []discover.Node{node("n1", 8), node("empty", 8)}}
-	cs := Commitments(inv, []discover.Pod{pod("a", "n1", 100, gib)}, nil)
+	cs := Commitments(inv, []discover.Pod{pod("a", "n1", 100, gib)})
 	for _, c := range cs {
 		if c.Node == "empty" {
 			t.Error("a node hosting nothing has committed nothing and is noise in this table")
@@ -81,14 +94,14 @@ func TestMostOvercommittedFirst(t *testing.T) {
 		limited("a", "calm", 100, 500, gib, gib),
 		limited("b", "hot", 100, 32000, gib, gib),
 	}
-	cs := Commitments(inv, pods, nil)
+	cs := Commitments(inv, pods)
 	if cs[0].Node != "hot" {
 		t.Errorf("first node = %q, want the most overcommitted one", cs[0].Node)
 	}
 }
 
 func TestNoInventoryProducesNoTable(t *testing.T) {
-	if cs := Commitments(discover.Inventory{Partial: true}, []discover.Pod{pod("a", "n1", 1, 1)}, nil); cs != nil {
+	if cs := Commitments(discover.Inventory{Partial: true}, []discover.Pod{pod("a", "n1", 1, 1)}); cs != nil {
 		t.Errorf("a partial inventory must produce no commitment table, got %d rows", len(cs))
 	}
 }

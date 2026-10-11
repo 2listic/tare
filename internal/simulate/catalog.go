@@ -2,6 +2,8 @@ package simulate
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -9,10 +11,7 @@ import (
 	"github.com/mfranzon/tare/internal/discover"
 )
 
-const (
-	mib = 1 << 20
-	gib = 1 << 30
-)
+const mib = 1 << 20
 
 // Archetypes are the workload shapes a right-sizer has to get right. Each one
 // exists because it breaks a naive recommender in a specific way.
@@ -207,7 +206,9 @@ var GuaranteedCache = Demand{
 // the parser's own unit tests.
 func (c *Cluster) Containers() []discover.Container {
 	var out []discover.Container
-	for name, e := range c.Envs {
+	// Sorted: Envs is a map, and the inventory order reaches the report.
+	for _, name := range slices.Sorted(maps.Keys(c.Envs)) {
+		e := c.Envs[name]
 		// A sidecar has its own environment so that it runs and is observed,
 		// but it is rendered into the inventory by the workload whose pod it
 		// shares. Rendering it here as well produced a second container in a
@@ -215,29 +216,7 @@ func (c *Cluster) Containers() []discover.Container {
 		if e.Demand.PodOf != "" {
 			continue
 		}
-		dc := discover.Container{
-			Namespace:  c.Namespace,
-			Pod:        name + "-0",
-			Name:       name,
-			Workload:   "Deployment/" + name,
-			Image:      "sim/" + name + ":1.0",
-			CPURequest: int64(e.Alloc.CPURequest * 1000),
-			CPULimit:   int64(e.Alloc.CPULimit * 1000),
-			MemRequest: e.Alloc.MemRequest,
-			MemLimit:   e.Alloc.MemLimit,
-			QoS:        "Burstable",
-		}
-		applyShape(&dc, e.Demand.Shape)
-		dc.Authored = authoredFor(e.Demand.Shape)
-		dc.Spec = ceilings.Container{
-			Name:  name,
-			Image: dc.Image,
-			Env:   map[string]string{},
-			// dc.MemLimit, not the allocation: a shape that drops the limit
-			// must drop it here too, or a container declared without one still
-			// has a JVM heap inferred from a limit its manifest does not set.
-			MemoryLimitBytes: dc.MemLimit,
-		}
+		dc := c.render(name+"-0", name, "Deployment/"+name, e.Alloc, "Burstable", e.Demand.Shape)
 		if strings.Contains(name, "jvm") {
 			dc.Spec.Image = "eclipse-temurin:21-jre"
 			dc.Image = dc.Spec.Image
@@ -259,28 +238,39 @@ func (c *Cluster) Containers() []discover.Container {
 		// by, and a fixture that gave each container its own pod would not
 		// reach any of the code that folds several containers into one.
 		if sc := e.Demand.Sidecar; sc != nil {
-			side := discover.Container{
-				Namespace:  c.Namespace,
-				Pod:        dc.Pod,
-				Name:       sc.Name,
-				Workload:   dc.Workload,
-				Image:      "sim/" + sc.Name + ":1.0",
-				CPURequest: int64(e.Alloc.CPURequest * 1000),
-				CPULimit:   int64(e.Alloc.CPULimit * 1000),
-				MemRequest: e.Alloc.MemRequest,
-				MemLimit:   e.Alloc.MemLimit,
-				QoS:        dc.QoS,
-			}
-			applyShape(&side, sc.Shape)
-			side.Authored = authoredFor(sc.Shape)
-			side.Spec = ceilings.Container{
-				Name: sc.Name, Image: side.Image,
-				Env: map[string]string{}, MemoryLimitBytes: side.MemLimit,
-			}
-			out = append(out, side)
+			out = append(out, c.render(dc.Pod, sc.Name, dc.Workload, e.Alloc, dc.QoS, sc.Shape))
 		}
 	}
 	return out
+}
+
+// render is one container as discover would report it, before any
+// workload-specific spec is added.
+func (c *Cluster) render(pod, name, workload string, a Allocation, qos string, shape Shape) discover.Container {
+	dc := discover.Container{
+		Namespace:  c.Namespace,
+		Pod:        pod,
+		Name:       name,
+		Workload:   workload,
+		Image:      "sim/" + name + ":1.0",
+		CPURequest: int64(a.CPURequest * 1000),
+		CPULimit:   int64(a.CPULimit * 1000),
+		MemRequest: a.MemRequest,
+		MemLimit:   a.MemLimit,
+		QoS:        qos,
+	}
+	applyShape(&dc, shape)
+	dc.Authored = authoredFor(shape)
+	dc.Spec = ceilings.Container{
+		Name:  name,
+		Image: dc.Image,
+		Env:   map[string]string{},
+		// dc.MemLimit, not the allocation: a shape that drops the limit must
+		// drop it here too, or a container declared without one still has a
+		// JVM heap inferred from a limit its manifest does not set.
+		MemoryLimitBytes: dc.MemLimit,
+	}
+	return dc
 }
 
 // authoredFor is what the controller's pod template set, which is not

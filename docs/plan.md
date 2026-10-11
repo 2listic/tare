@@ -738,6 +738,11 @@ Restoring it surfaced a real bug that had been introduced alongside: the
 restored version keyed off the new `WorkloadKind` field, which the simulator
 does not populate, so every constraint lookup silently missed and two
 constraint tests failed. It now parses `Workload`, which every producer sets.
+
+**2026-10-11:** gone for a better reason. There were three builders of the same
+key - this method, `discover.workloadKey` and `analyze.keyOf` - and the tests
+used a different one from production. All three are now
+`discover.ConstraintKey`, which production and tests share.
 That is the project's recurring failure shape again - a lookup that returns a
 clean empty answer instead of an error - caught this time only because the
 tests were already there.
@@ -975,7 +980,7 @@ defensible one.
 
 ### What shipped
 
-`internal/ceilings/inference.go` parses vLLM, Ollama, TGI and llama.cpp:
+`internal/ceilings/inference.go` (renamed `llm.go` on 2026-10-11) parses vLLM, Ollama, TGI and llama.cpp:
 
 | flag | why it is a finding |
 | --- | --- |
@@ -987,7 +992,7 @@ defensible one.
 | `OLLAMA_MAX_LOADED_MODELS` | peak VRAM is the sum of the N largest, not the largest |
 | missing `-ngl` | llama.cpp runs every layer on the CPU while holding an allocated device |
 
-`internal/analyze/inference.go` turns those into fit checks against the device,
+`internal/analyze/inference.go` (renamed `gpu.go` on 2026-10-11) turns those into fit checks against the device,
 using GPU fields added to the node inventory (`nvidia.com/gpu` capacity, plus
 `nvidia.com/gpu.product` and `nvidia.com/gpu.memory` from the GPU Operator).
 
@@ -1494,6 +1499,28 @@ internal/packing/                 bin-packing replay: node-count delta under
                                   scheduling constraints     (added 2026-09-19)
 ```
 
+**As built, after the 2026-10-11 consolidation.** The layout above was the plan;
+this is what exists. No cobra, no controller-runtime, no Prometheus client
+library: the flag package, client-go and plain HTTP.
+
+```
+cmd/kubectl-tare/       flags, run, check, diff, help: the CLI and nothing else
+internal/discover/      inventory from the API: containers, pods, nodes, PDBs,
+                        HPA/VPA constraints, Prometheus discovery
+internal/metrics/       Source interface, Prometheus implementation, preflight
+internal/ceilings/      runtime ceilings from flags: JVM, Go, Node, .NET, LLM servers
+internal/analyze/       Finding, Thresholds, decide() and the post-decide annotators
+                        (nodes, gpu, authored, constraints, signal gaps)
+internal/packing/       bin-packing replay and node commitment
+internal/report/        the Report model and the arithmetic every format shares:
+                        totals, verdict counts, view filters, redaction, demo
+internal/render/        table, wide, explain, json, html and the patch script,
+                        writing data and diagnostics to separate writers
+internal/tui/           the interactive report
+internal/gitops/        diff --write: plan, manifest splicing, Kustomize, PR body
+internal/simulate/      the workload simulator behind --demo and the sweeps
+```
+
 Key dependencies: `k8s.io/client-go`, `sigs.k8s.io/controller-runtime` (client only,
 for v0.2 continuity), `github.com/prometheus/client_golang/api/v1`,
 `github.com/spf13/cobra`.
@@ -1667,7 +1694,7 @@ each opened by a `# section=` marker, each with a header row, columns separated
 by two or more spaces, an empty field written `-`, and every hint or warning on
 stderr. `kubectl tare report | awk '$4 == "OOMKILLED"'` now works without a JSON
 parser. The commitment NOTE column became codes (`MEM_OVERCOMMIT`,
-`UNLIMITED_CPU_PODS=3`) rather than a paragraph in a table cell.
+`UNLIMITED_CPU_CONTAINERS=3`) rather than a paragraph in a table cell.
 
 `-o json` benefits most: the reasons carry raw numbers, so a consumer doing
 arithmetic no longer parses `"4.0Gi"` back into bytes with a rounding error the

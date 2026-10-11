@@ -34,14 +34,17 @@ const (
 	CPUAtLimit     Code = "CPU_PINNED_AT_LIMIT"
 
 	// How the recommendation was arrived at.
-	CPUFloor         Code = "CPU_FLOOR"
-	MemFloor         Code = "MEM_FLOOR"
-	CPUCapped        Code = "CPU_CAPPED_BY_CEILING"
-	MemRaised        Code = "MEM_RAISED_BY_CEILING"
-	CPUStartup       Code = "CPU_SIZED_FOR_STARTUP"
-	CeilingBlocked   Code = "CEILING_UNRESOLVED"
-	UnschedulableCPU Code = "UNSCHEDULABLE_CPU"
-	UnschedulableMem Code = "UNSCHEDULABLE_MEM"
+	CPUFloor   Code = "CPU_FLOOR"
+	MemFloor   Code = "MEM_FLOOR"
+	CPUCapped  Code = "CPU_CAPPED_BY_CEILING"
+	MemRaised  Code = "MEM_RAISED_BY_CEILING"
+	CPUStartup Code = "CPU_SIZED_FOR_STARTUP"
+	// CPULimitThrottled: the current CPU limit is already throttling the
+	// container, so it is not lowered, whatever averaged usage says.
+	CPULimitThrottled Code = "CPU_LIMIT_HELD_THROTTLED"
+	CeilingBlocked    Code = "CEILING_UNRESOLVED"
+	UnschedulableCPU  Code = "UNSCHEDULABLE_CPU"
+	UnschedulableMem  Code = "UNSCHEDULABLE_MEM"
 	// MemDemandCensored: OOMKilled, and nothing measured says how much more it
 	// needs, so memory is left as it is rather than given a number.
 	MemDemandCensored Code = "MEM_DEMAND_CENSORED"

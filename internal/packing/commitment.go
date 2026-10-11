@@ -41,38 +41,26 @@ type Commitment struct {
 // CPURatio is committed limits as a multiple of allocatable. Above 1 the node
 // is overcommitted on CPU, which throttles rather than kills.
 func (c Commitment) CPURatio() float64 {
-	if c.AllocCPU == 0 {
-		return 0
-	}
-	return float64(c.LimCPU) / float64(c.AllocCPU)
+	return ratio(c.LimCPU, c.AllocCPU)
 }
 
 // MemRatio is the same for memory, where the consequence is an OOMKill rather
 // than a slowdown, so the tolerable value is much closer to 1.
 func (c Commitment) MemRatio() float64 {
-	if c.AllocMem == 0 {
-		return 0
-	}
-	return float64(c.LimMem) / float64(c.AllocMem)
+	return ratio(c.LimMem, c.AllocMem)
 }
 
 // ReqCPUFrac is how much of the node the scheduler considers spoken for.
 func (c Commitment) ReqCPUFrac() float64 {
-	if c.AllocCPU == 0 {
-		return 0
-	}
-	return float64(c.ReqCPU) / float64(c.AllocCPU)
+	return ratio(c.ReqCPU, c.AllocCPU)
 }
 
 func (c Commitment) ReqMemFrac() float64 {
-	if c.AllocMem == 0 {
-		return 0
-	}
-	return float64(c.ReqMem) / float64(c.AllocMem)
+	return ratio(c.ReqMem, c.AllocMem)
 }
 
 // Commitments summarises every node that hosts at least one pod.
-func Commitments(inv discover.Inventory, pods []discover.Pod, unlimited map[string][2]int) []Commitment {
+func Commitments(inv discover.Inventory, pods []discover.Pod) []Commitment {
 	if inv.Partial || len(inv.Nodes) == 0 {
 		return nil
 	}
@@ -93,11 +81,11 @@ func Commitments(inv discover.Inventory, pods []discover.Pod, unlimited map[stri
 		c.ReqMem += p.Mem
 		c.LimCPU += p.CPULimit
 		c.LimMem += p.MemLimit
-	}
-	for node, counts := range unlimited {
-		if c, ok := byNode[node]; ok {
-			c.UnlimitedCPU, c.UnlimitedMem = counts[0], counts[1]
-		}
+		// Counted per container. Testing the pod's summed limit counted only
+		// pods whose every container was unlimited, so an app container with
+		// a limit hid the unlimited sidecar beside it.
+		c.UnlimitedCPU += p.UnlimitedCPU
+		c.UnlimitedMem += p.UnlimitedMem
 	}
 
 	var out []Commitment
@@ -116,20 +104,10 @@ func Commitments(inv discover.Inventory, pods []discover.Pod, unlimited map[stri
 	return out
 }
 
-// UnlimitedCounts counts, per node, the containers with no CPU and no memory
-// limit. It is computed from the pod list rather than folded into Commitments
-// so that the caller can pass whatever container view it already has.
-func UnlimitedCounts(pods []discover.Pod) map[string][2]int {
-	out := map[string][2]int{}
-	for _, p := range pods {
-		c := out[p.Node]
-		if p.CPULimit == 0 {
-			c[0]++
-		}
-		if p.MemLimit == 0 {
-			c[1]++
-		}
-		out[p.Node] = c
+// ratio is a/b, or 0 for a node with nothing allocatable.
+func ratio(a, b int64) float64 {
+	if b == 0 {
+		return 0
 	}
-	return out
+	return float64(a) / float64(b)
 }

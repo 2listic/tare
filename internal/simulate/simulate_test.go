@@ -7,6 +7,8 @@ import (
 	"github.com/mfranzon/tare/internal/metrics"
 )
 
+const gib = 1 << 30
+
 func key() metrics.Key {
 	return metrics.Key{Namespace: "sim", Pod: "p-0", Container: "c"}
 }

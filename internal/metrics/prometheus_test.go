@@ -295,3 +295,27 @@ func truncate(s string) string {
 	}
 	return s
 }
+
+// A 14-day request probed 14d twice before stepping down: the default window
+// is also the first step of the ladder.
+func TestAvailableWindowProbesEachWindowOnce(t *testing.T) {
+	f := newFakeProm(func(expr string) (string, int) {
+		if strings.Contains(expr, "offset 3d") {
+			return vector("app", 1), 200
+		}
+		return emptyVector, 200
+	})
+	defer f.Close()
+
+	got, err := NewProm(f.URL).AvailableWindow([]string{"ns"}, 14*24*time.Hour)
+	if err != nil || got != 3*24*time.Hour {
+		t.Fatalf("AvailableWindow = %v, %v; want 72h", got, err)
+	}
+	probed := map[string]int{}
+	for _, q := range f.seen {
+		probed[q]++
+		if probed[q] > 1 {
+			t.Errorf("probed twice: %s", q)
+		}
+	}
+}

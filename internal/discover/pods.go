@@ -34,8 +34,11 @@ type Pod struct {
 	CPULimit int64
 	MemLimit int64
 
-	// Labels are carried so a disruption budget can be matched to the pod.
-	Labels map[string]string
+	// UnlimitedCPU and UnlimitedMem count the pod's containers with no limit
+	// on that resource. The sums above cannot say this: one limited container
+	// makes the pod's total non-zero and hides every unlimited one beside it.
+	UnlimitedCPU int
+	UnlimitedMem int
 
 	// NodeSelector is the pod's own nodeSelector. It is a pin reason for a
 	// workload pod, and for a DaemonSet - which is charged as per-node
@@ -60,10 +63,7 @@ type Pod struct {
 // disruption is pinned: a node it sits on cannot be drained, so counting that
 // node as removable would promise a consolidation the cluster will refuse.
 func (c *Client) Pods(ctx context.Context, namespaces []string, pdbs []PDB) ([]Pod, error) {
-	targets := namespaces
-	if len(targets) == 0 {
-		targets = []string{metav1.NamespaceAll}
-	}
+	targets := scopeOf(namespaces)
 	idx := c.index(namespaces)
 	var out []Pod
 	for _, ns := range targets {
@@ -89,13 +89,13 @@ func (c *Client) Pods(ctx context.Context, namespaces []string, pdbs []PDB) ([]P
 // this project has shipped before.
 func podFrom(p *corev1.Pod, workload string, pdbs []PDB) Pod {
 	cpu, mem := effectiveRequests(p)
-	cpuLim, memLim := effectiveLimits(p)
+	cpuLim, memLim, noCPULim, noMemLim := effectiveLimits(p)
 	pod := Pod{
 		Namespace: p.Namespace, Name: p.Name, Node: p.Spec.NodeName,
 		Workload: workload, WorkloadKind: kindOf(workload),
 		CPU: cpu, Mem: mem,
 		CPULimit: cpuLim, MemLimit: memLim,
-		Labels:       p.Labels,
+		UnlimitedCPU: noCPULim, UnlimitedMem: noMemLim,
 		NodeSelector: p.Spec.NodeSelector,
 	}
 	pod.PinReason = pinReason(p, pod.WorkloadKind)
@@ -155,14 +155,22 @@ func blockedByPDB(pdbs []PDB, ns string, podLabels map[string]string) string {
 
 // effectiveLimits sums what the pod may consume. A container with no limit is
 // unbounded, which cannot be summed: the total is then reported as unbounded
-// by the caller rather than understated by treating the gap as zero.
-func effectiveLimits(p *corev1.Pod) (cpu, mem int64) {
+// by the caller rather than understated by treating the gap as zero, which is
+// what the unlimited counts are for.
+func effectiveLimits(p *corev1.Pod) (cpu, mem int64, unlimitedCPU, unlimitedMem int) {
 	for i := range p.Spec.Containers {
 		l := p.Spec.Containers[i].Resources.Limits
-		cpu += milli(l, corev1.ResourceCPU)
-		mem += bytes(l, corev1.ResourceMemory)
+		c, m := milli(l, corev1.ResourceCPU), bytes(l, corev1.ResourceMemory)
+		cpu += c
+		mem += m
+		if c == 0 {
+			unlimitedCPU++
+		}
+		if m == 0 {
+			unlimitedMem++
+		}
 	}
-	return cpu, mem
+	return cpu, mem, unlimitedCPU, unlimitedMem
 }
 
 // pinReason returns why a pod cannot be modelled as movable, or "".
@@ -187,7 +195,7 @@ func pinReason(p *corev1.Pod, kind string) string {
 	if len(p.Spec.TopologySpreadConstraints) > 0 {
 		return "has topology spread constraints"
 	}
-	if len(p.Spec.Tolerations) > 0 && hasNonDefaultToleration(p.Spec.Tolerations) {
+	if hasNonDefaultToleration(p.Spec.Tolerations) {
 		return "tolerates a taint, so it may be placed where other pods cannot follow"
 	}
 	if usesExtendedResources(p) {

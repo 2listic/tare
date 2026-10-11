@@ -77,7 +77,10 @@ func (c *Client) FindPrometheus(ctx context.Context) ([]PromCandidate, error) {
 		if out[i].Rank != out[j].Rank {
 			return out[i].Rank < out[j].Rank
 		}
-		return out[i].Namespace+out[i].Service < out[j].Namespace+out[j].Service
+		if out[i].Namespace != out[j].Namespace {
+			return out[i].Namespace < out[j].Namespace
+		}
+		return out[i].Service < out[j].Service
 	})
 	return out, nil
 }
@@ -120,10 +123,7 @@ func classify(s *corev1.Service) (PromCandidate, bool) {
 func metricsPort(s *corev1.Service) (port, scheme string, ok bool) {
 	for _, p := range s.Spec.Ports {
 		switch strings.ToLower(p.Name) {
-		case "http-web", "web", "http", "http-query", "query", "grpc-query":
-			if p.Name == "grpc-query" {
-				continue // gRPC does not serve the HTTP query API
-			}
+		case "http-web", "web", "http", "http-query", "query": // not grpc-query: gRPC does not serve the HTTP query API
 			return p.Name, "http", true
 		}
 	}

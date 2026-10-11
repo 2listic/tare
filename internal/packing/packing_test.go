@@ -24,6 +24,7 @@ func pod(name, on string, cpu int64, mem int64) discover.Pod {
 		Namespace: "default", Name: name, Node: on,
 		Workload: "Deployment/" + name, WorkloadKind: "Deployment",
 		CPU: cpu, Mem: mem,
+		UnlimitedCPU: 1, UnlimitedMem: 1, // one container, no limits
 	}
 }
 

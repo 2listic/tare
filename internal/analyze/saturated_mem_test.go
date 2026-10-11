@@ -42,7 +42,7 @@ func resizeTarget() ([]discover.Container, map[metrics.Key]*metrics.Observation)
 		metrics.SigPSI, metrics.SigOOM, metrics.SigRestarts, metrics.SigMemTrend,
 		metrics.SigLimitTrend,
 	} {
-		o.Have = markSignal(o.Have, s)
+		o.Mark(s)
 	}
 	return []discover.Container{c}, map[metrics.Key]*metrics.Observation{key: o}
 }
@@ -56,14 +56,6 @@ func starved() ([]discover.Container, map[metrics.Key]*metrics.Observation) {
 		o.CPUUsageP95, o.CPUUsageMax, o.CPUSteadyMax = 0.48, 0.50, 0.50
 	}
 	return cs, obs
-}
-
-func markSignal(m map[metrics.Signal]bool, s metrics.Signal) map[metrics.Signal]bool {
-	if m == nil {
-		m = map[metrics.Signal]bool{}
-	}
-	m[s] = true
-	return m
 }
 
 // TestCPUSaturationDoesNotInflateMemory is the bug from the long run: a
@@ -153,7 +145,7 @@ func TestTrendPairsStayWithinOnePod(t *testing.T) {
 			metrics.SigCPUUsage, metrics.SigCPUPeak, metrics.SigMemory,
 			metrics.SigMemP95, metrics.SigPSI, metrics.SigMemTrend,
 		} {
-			o.Have = markSignal(o.Have, s)
+			o.Mark(s)
 		}
 		return c, o
 	}
@@ -305,5 +297,35 @@ func TestOOMKilledWithMeasuredRaiseIsNotCensored(t *testing.T) {
 	}
 	if f.RecMem <= 16*mib {
 		t.Errorf("RecMem = %.0fMi, want the measured raise", float64(f.RecMem)/mib)
+	}
+}
+
+// TestRatchetedCPURequestNeverExceedsItsLimit: a container with a 1000m request
+// and no CPU limit ratchets its request up to 1000m, while the limit is sized
+// from usage (875m). A limit below the request is rejected by the API server,
+// so the patch tare prints would fail on every apply.
+func TestRatchetedCPURequestNeverExceedsItsLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		restarts float64
+	}{{"saturated", 0}, {"restart-churn", 5}} {
+		t.Run(tc.name, func(t *testing.T) {
+			cs, obs := starved()
+			cs[0].CPURequest, cs[0].CPULimit = 1000, 0
+			for _, o := range obs {
+				o.CPUUsageP95, o.CPUUsageMax, o.CPUSteadyMax = 0.68, 0.70, 0.70
+				o.Restarts = tc.restarts
+				if tc.restarts > 0 {
+					o.PSIWaitingMax = 0
+				}
+			}
+			f := analyze.Run(cs, obs, 14*24*time.Hour, analyze.DefaultThresholds())[0]
+			if f.RecCPU != 1000 {
+				t.Fatalf("verdict=%s: request should ratchet to 1000m, got %dm", f.Verdict, f.RecCPU)
+			}
+			if f.RecCPULimit < f.RecCPU {
+				t.Errorf("verdict=%s: CPU limit %dm below request %dm", f.Verdict, f.RecCPULimit, f.RecCPU)
+			}
+		})
 	}
 }

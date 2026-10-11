@@ -475,7 +475,7 @@ func TestHPAOnCPUIsWarned(t *testing.T) {
 
 	containers := c.Containers()
 	cons := map[string]discover.Constraints{
-		containers[0].WorkloadKey(): {HPAOnCPU: true, HPAName: "web", HPAMin: 2, HPAMax: 10},
+		discover.ConstraintKey(containers[0].Namespace, containers[0].Workload): {HPAOnCPU: true, HPAName: "web", HPAMin: 2, HPAMax: 10},
 	}
 	f := analyze.RunWithCluster(containers, obs, analyze.Cluster{Constraints: cons}, window, analyze.DefaultThresholds())[0]
 
@@ -503,7 +503,7 @@ func TestVPAConflictWithholdsRecommendation(t *testing.T) {
 
 	containers := c.Containers()
 	cons := map[string]discover.Constraints{
-		containers[0].WorkloadKey(): {VPAName: "web-vpa", VPAMode: "Auto"},
+		discover.ConstraintKey(containers[0].Namespace, containers[0].Workload): {VPAName: "web-vpa", VPAMode: "Auto"},
 	}
 	f := analyze.RunWithCluster(containers, obs, analyze.Cluster{Constraints: cons}, window, analyze.DefaultThresholds())[0]
 
@@ -527,7 +527,7 @@ func TestVPAOffIsNotAConflict(t *testing.T) {
 	obs, _ := c.Observe(nil, window)
 	containers := c.Containers()
 	cons := map[string]discover.Constraints{
-		containers[0].WorkloadKey(): {VPAName: "web-vpa", VPAMode: "Off"},
+		discover.ConstraintKey(containers[0].Namespace, containers[0].Workload): {VPAName: "web-vpa", VPAMode: "Off"},
 	}
 	f := analyze.RunWithCluster(containers, obs, analyze.Cluster{Constraints: cons}, window, analyze.DefaultThresholds())[0]
 	if f.Verdict == analyze.Conflicted {

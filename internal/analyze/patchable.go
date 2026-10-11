@@ -3,6 +3,8 @@ package analyze
 import (
 	"fmt"
 	"strings"
+
+	"github.com/mfranzon/tare/internal/discover"
 )
 
 // Patchable reports whether tare will stand behind writing this finding's
@@ -17,8 +19,10 @@ func Patchable(f Finding) (ok bool, why string) {
 	if !found || name == "" {
 		return false, "no controller owns this pod, so there is no manifest to change"
 	}
+	// IDLE is excluded: its own evidence says IDLE_NOT_RULED_OUT and its
+	// action is deletion, not the floor-clamped number it carries.
 	switch f.Verdict {
-	case Saturated, Waste, Healthy, Idle:
+	case Saturated, Waste, Healthy:
 	default:
 		return false, fmt.Sprintf("verdict %s, so tare does not stand behind a number for it", f.Verdict)
 	}
@@ -38,6 +42,5 @@ func Patchable(f Finding) (ok bool, why string) {
 
 // WorkloadParts splits a finding's "Kind/name" workload identifier.
 func WorkloadParts(f Finding) (kind, name string, ok bool) {
-	kind, name, ok = strings.Cut(f.Workload, "/")
-	return kind, name, ok && kind != "" && name != ""
+	return discover.SplitWorkload(f.Workload)
 }

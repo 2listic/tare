@@ -114,7 +114,8 @@ func (o *Observation) Has(s Signal) bool {
 	return o.Have[s]
 }
 
-func (o *Observation) mark(s Signal) {
+// Mark records that s backed this observation.
+func (o *Observation) Mark(s Signal) {
 	if o.Have == nil {
 		o.Have = map[Signal]bool{}
 	}

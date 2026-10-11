@@ -55,7 +55,7 @@ func slowLeaker(earlyMiB, lateMiB, restarts float64) ([]discover.Container, map[
 		metrics.SigPSI, metrics.SigOOM, metrics.SigRestarts, metrics.SigMemTrend,
 		metrics.SigLimitTrend,
 	} {
-		o.Have = markSignal(o.Have, s)
+		o.Mark(s)
 	}
 	return []discover.Container{c}, map[metrics.Key]*metrics.Observation{key: o}
 }

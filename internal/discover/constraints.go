@@ -48,16 +48,13 @@ var vpaGVR = schema.GroupVersionResource{
 	Group: "autoscaling.k8s.io", Version: "v1", Resource: "verticalpodautoscalers",
 }
 
-// LoadConstraints indexes HPAs and VPAs by the workload they target.
-// A cluster without the VPA CRD installed is the common case, and is not an
-// error.
-func (c *Client) LoadConstraints(ctx context.Context, namespaces []string) (map[string]Constraints, error) {
+// LoadConstraints indexes HPAs and VPAs by the workload they target. A read
+// that fails degrades to a warning rather than an error: a cluster without the
+// VPA CRD installed is the common case.
+func (c *Client) LoadConstraints(ctx context.Context, namespaces []string) map[string]Constraints {
 	out := map[string]Constraints{}
 
-	targets := namespaces
-	if len(targets) == 0 {
-		targets = []string{metav1.NamespaceAll}
-	}
+	targets := scopeOf(namespaces)
 
 	for _, ns := range targets {
 		hpas, err := c.cs.AutoscalingV2().HorizontalPodAutoscalers(ns).List(ctx, metav1.ListOptions{})
@@ -73,7 +70,7 @@ func (c *Client) LoadConstraints(ctx context.Context, namespaces []string) (map[
 		}
 		for i := range hpas.Items {
 			h := &hpas.Items[i]
-			key := workloadKey(h.Namespace, h.Spec.ScaleTargetRef.Kind, h.Spec.ScaleTargetRef.Name)
+			key := ConstraintKey(h.Namespace, h.Spec.ScaleTargetRef.Kind+"/"+h.Spec.ScaleTargetRef.Name)
 			cs := out[key]
 			cs.HPAName, cs.HPAMax = h.Name, h.Spec.MaxReplicas
 			if h.Spec.MinReplicas != nil {
@@ -103,63 +100,60 @@ func (c *Client) LoadConstraints(ctx context.Context, namespaces []string) (map[
 			list, err := c.dyn.Resource(vpaGVR).Namespace(ns).List(ctx, metav1.ListOptions{})
 			if err != nil {
 				// A cluster without the VPA CRD is the common case and not
-				// worth a word. Being refused the read is a different thing:
-				// a VPA in Auto mode writes the very fields tare recommends,
-				// and two controllers writing one field is a fight.
-				if errors.IsForbidden(err) {
-					c.warn("vertical pod autoscalers in %s could not be read (%v): "+
-						"tare cannot tell whether a VPA is already setting these resources",
-						describeScope(ns), err)
+				// worth a word, and every namespace will say the same.
+				if errors.IsNotFound(err) {
+					break
 				}
-				break
+				// Being refused the read is a different thing: a VPA in Auto
+				// mode writes the very fields tare recommends, and two
+				// controllers writing one field is a fight. RBAC is per
+				// namespace, so one refusal says nothing about the next one;
+				// stopping here left every later namespace unscanned and
+				// unreported.
+				c.warn("vertical pod autoscalers in %s could not be read (%v): "+
+					"tare cannot tell whether a VPA is already setting these resources",
+					describeScope(ns), err)
+				continue
 			}
 			for _, item := range list.Items {
-				kind, _, _ := unstructuredString(item.Object, "spec", "targetRef", "kind")
-				name, _, _ := unstructuredString(item.Object, "spec", "targetRef", "name")
-				mode, _, _ := unstructuredString(item.Object, "spec", "updatePolicy", "updateMode")
+				kind := unstructuredString(item.Object, "spec", "targetRef", "kind")
+				name := unstructuredString(item.Object, "spec", "targetRef", "name")
+				mode := unstructuredString(item.Object, "spec", "updatePolicy", "updateMode")
 				if name == "" {
 					continue
 				}
-				key := workloadKey(item.GetNamespace(), kind, name)
+				key := ConstraintKey(item.GetNamespace(), kind+"/"+name)
 				cs := out[key]
 				cs.VPAName, cs.VPAMode = item.GetName(), mode
 				out[key] = cs
 			}
 		}
 	}
-	return out, nil
+	return out
 }
 
-func workloadKey(ns, kind, name string) string {
-	return ns + "/" + kind + "/" + name
-}
-
-// WorkloadKey builds the index key a container's constraints are stored under.
+// ConstraintKey is the index key LoadConstraints stores a workload's
+// constraints under, from its namespace and "Kind/name" workload string.
 //
-// It parses Workload rather than reading WorkloadKind, so that it is correct
-// for a Container built by anything that sets the one field a workload is
+// It is built from Workload rather than WorkloadKind, so that it is correct for
+// a Container built by anything that sets the one field a workload is
 // identified by. The simulator sets Workload and not WorkloadKind, and keying
 // off the empty field silently missed every constraint.
-func (c Container) WorkloadKey() string {
-	_, name, ok := strings.Cut(c.Workload, "/")
-	if !ok {
-		return c.Namespace + "/" + c.Workload
-	}
-	return workloadKey(c.Namespace, kindOf(c.Workload), name)
+func ConstraintKey(namespace, workload string) string {
+	return namespace + "/" + workload
 }
 
-func unstructuredString(obj map[string]any, path ...string) (string, bool, error) {
+// unstructuredString reads a string field, or "" if any step of the path is
+// missing or of the wrong type.
+func unstructuredString(obj map[string]any, path ...string) string {
 	cur := any(obj)
 	for _, p := range path {
 		m, ok := cur.(map[string]any)
 		if !ok {
-			return "", false, nil
+			return ""
 		}
-		cur, ok = m[p]
-		if !ok {
-			return "", false, nil
-		}
+		cur = m[p]
 	}
-	s, ok := cur.(string)
-	return s, ok, nil
+	s, _ := cur.(string)
+	return s
 }

@@ -35,7 +35,7 @@ func applyAuthored(f *Finding, a discover.Authored) {
 	if f.MemLimit > 0 && !a.MemRequest && a.MemLimit {
 		f.Reasons = append(f.Reasons, measured(MemLimitCopied, float64(f.MemLimit), 0, Bytes, fmt.Sprintf(
 			"the manifest sets a memory limit of %s and no memory request, so Kubernetes copied it into the request: %s is reserved per replica rather than capped.",
-			humanBytes(f.MemLimit), humanBytes(f.MemLimit))))
+			HumanBytes(f.MemLimit), HumanBytes(f.MemLimit))))
 	}
 
 	// Proposing a limit where the manifest set none is a behavioural change,
@@ -59,7 +59,7 @@ func applyAuthored(f *Finding, a discover.Authored) {
 	if a.MemRequest && !a.MemLimit && f.RecMemLimit > 0 {
 		f.Reasons = append(f.Reasons, measured(MemLimitAdded, float64(f.RecMemLimit), 0, Bytes, fmt.Sprintf(
 			"the manifest sets no memory limit, so this recommendation would ADD one at %s: the container becomes OOMKillable at that cap rather than evicted under node pressure. That is usually what you want, but it changes how this workload fails.",
-			humanBytes(f.RecMemLimit))))
+			HumanBytes(f.RecMemLimit))))
 	}
 
 	// Nothing authored at all is BestEffort: first evicted under node pressure,

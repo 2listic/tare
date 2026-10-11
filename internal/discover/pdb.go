@@ -7,6 +7,7 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 // PDB is a PodDisruptionBudget as it bears on consolidation.
@@ -19,16 +20,6 @@ import (
 type PDB struct {
 	Namespace string
 	Name      string
-
-	// Allowed is status.disruptionsAllowed: how many pods may be evicted right
-	// now. Zero means every drain touching this budget blocks until something
-	// changes. It is the controller's own live computation, which is stronger
-	// evidence than reading minAvailable against a replica count.
-	Allowed int32
-
-	// Expected is status.expectedPods, and Healthy status.currentHealthy.
-	Expected int32
-	Healthy  int32
 
 	// Blocking says the budget permits nothing to be evicted, and Why explains
 	// whether that is a permanent configuration or a transient unhealthy state.
@@ -50,10 +41,7 @@ func (p PDB) Covers(podLabels map[string]string) bool {
 // else in this package, a failure degrades rather than aborts: the sizing
 // report is still worth printing without it.
 func (c *Client) PDBs(ctx context.Context, namespaces []string) []PDB {
-	targets := namespaces
-	if len(targets) == 0 {
-		targets = []string{metav1.NamespaceAll}
-	}
+	targets := scopeOf(namespaces)
 	var out []PDB
 	for _, ns := range targets {
 		list, err := c.cs.PolicyV1().PodDisruptionBudgets(ns).List(ctx, metav1.ListOptions{})
@@ -73,9 +61,6 @@ func (c *Client) PDBs(ctx context.Context, namespaces []string) []PDB {
 			}
 			pdb := PDB{
 				Namespace: p.Namespace, Name: p.Name,
-				Allowed:  p.Status.DisruptionsAllowed,
-				Expected: p.Status.ExpectedPods,
-				Healthy:  p.Status.CurrentHealthy,
 				selector: sel,
 			}
 			pdb.Blocking, pdb.Why = pdbBlocking(p)
@@ -94,7 +79,7 @@ func pdbBlocking(p *policyv1.PodDisruptionBudget) (bool, string) {
 	}
 	switch {
 	case p.Spec.MaxUnavailable != nil && p.Spec.MaxUnavailable.IntValue() == 0 &&
-		p.Spec.MaxUnavailable.Type == 0:
+		p.Spec.MaxUnavailable.Type == intstr.Int:
 		return true, fmt.Sprintf(
 			"PodDisruptionBudget %s/%s sets maxUnavailable: 0, which permits no eviction ever. "+
 				"Every drain of a node running these pods blocks indefinitely, so no consolidation can remove such a node and a cluster autoscaler will keep retrying and give up.",

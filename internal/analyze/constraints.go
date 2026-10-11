@@ -10,9 +10,7 @@ import (
 // workload that have nothing to do with its resource usage. A number that is
 // correct in isolation and breaks something when applied is not a useful
 // recommendation.
-func applyConstraints(f *Finding, c discover.Constraints, th Thresholds) {
-	// QoS comes from the pod, not from an HPA or VPA lookup, so it is derived
-	// here rather than in the cluster scan.
+func applyConstraints(f *Finding, c discover.Constraints) {
 	c.Guaranteed = f.QoS == "Guaranteed"
 	f.Constraints = c
 
@@ -55,22 +53,29 @@ func applyConstraints(f *Finding, c discover.Constraints, th Thresholds) {
 				"multiplies observed utilisation by %.1fx and will trigger scale-out.",
 			c.HPAName, ratio)))
 	}
-
-	// Guaranteed QoS requires requests to equal limits for both resources.
-	// Recommending different values silently demotes the pod to Burstable,
-	// costing it eviction priority, and on clusters with in-place resize the
-	// change is rejected outright because QoS may not change.
-	if c.Guaranteed {
-		f.RecCPU = max(f.RecCPU, f.RecCPULimit)
-		f.RecCPULimit = f.RecCPU
-		f.RecMem = max(f.RecMem, f.RecMemLimit)
-		f.RecMemLimit = f.RecMem
-		f.Reasons = append(f.Reasons, note(QoSHeld, fmt.Sprintf(
-			"this pod is Guaranteed, so requests are held equal to limits (%dm CPU, %s memory). "+
-				"Splitting them would demote it to Burstable and lose eviction priority.",
-			f.RecCPU, humanBytes(f.RecMem))))
-	}
 }
 
-// Conflicted marks a workload another controller already manages.
-const Conflicted Verdict = "CONFLICT"
+// holdGuaranteed keeps a Guaranteed pod's requests equal to its limits.
+// Recommending different values silently demotes the pod to Burstable, costing
+// it eviction priority, and on clusters with in-place resize the change is
+// rejected outright because QoS may not change.
+//
+// It runs straight after decide, before anything reads the numbers. Run last,
+// it raised the memory request after the node-size check had passed the lower
+// value, so a request no node could hold shipped without UNSCHEDULABLE, and the
+// HPA and authored-limit notes quoted values that were no longer the
+// recommendation. QoS comes from the pod, not from an HPA or VPA lookup, so it
+// is derived here rather than in the cluster scan.
+func holdGuaranteed(f *Finding, c discover.Constraints) {
+	if f.QoS != "Guaranteed" || c.Managed() || (f.RecMem == 0 && f.RecCPU == 0) {
+		return
+	}
+	f.RecCPU = max(f.RecCPU, f.RecCPULimit)
+	f.RecCPULimit = f.RecCPU
+	f.RecMem = max(f.RecMem, f.RecMemLimit)
+	f.RecMemLimit = f.RecMem
+	f.Reasons = append(f.Reasons, note(QoSHeld, fmt.Sprintf(
+		"this pod is Guaranteed, so requests are held equal to limits (%dm CPU, %s memory). "+
+			"Splitting them would demote it to Burstable and lose eviction priority.",
+		f.RecCPU, HumanBytes(f.RecMem))))
+}

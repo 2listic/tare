@@ -108,8 +108,68 @@ func selector(namespaces []string) string {
 
 // Observe runs the query set and joins the results by container key.
 func (p *Prom) Observe(namespaces []string, window time.Duration) (map[Key]*Observation, error) {
+	out := map[Key]*Observation{}
+	p.health = p.health[:0]
+
+	for _, q := range observeQueries(selector(namespaces), window) {
+		samples, err := p.query(q.expr)
+		p.health = append(p.health, SignalHealth{
+			Signal: q.signal, Query: q.expr, Err: err,
+			Series: len(samples), Required: q.required,
+		})
+		if err != nil {
+			if q.required {
+				return nil, fmt.Errorf("required signal %s: %w", q.signal, err)
+			}
+			continue
+		}
+		for _, s := range samples {
+			k := keyOf(s.labels)
+			if k.Container == "" || k.Pod == "" {
+				continue
+			}
+			o, ok := out[k]
+			if !ok {
+				o = &Observation{Key: k}
+				out[k] = o
+			}
+			q.assign(o, s.value)
+			o.Mark(q.signal)
+		}
+	}
+	p.flagDeadPressure(out)
+	dropHalfTrends(out)
+	return out, nil
+}
+
+// observeQuery is one expression of the Observe set and where its value goes.
+//
+// required marks a signal without which the report is not worth printing.
+// Everything else may legitimately be absent on some clusters, but absence is
+// recorded and surfaced rather than silently read as zero.
+//
+// reduce is the PromQL aggregator that collapses a container's incarnations,
+// applied by (namespace, pod, container). A container restart gives cAdvisor a
+// brand new series for the same container: identical namespace, pod and
+// container labels, a new `id`. An unaggregated query therefore returns one
+// sample per incarnation for the same key, and the join in Observe keeps
+// whichever Prometheus happened to return last - as often as not the dead one,
+// whose values never change again. That is how a leaker that OOMKilled and
+// restarted kept reporting the pre-restart sample count, pressure and peak for
+// twelve hours while the live container ran underneath it. Every query must
+// state how its incarnations combine.
+type observeQuery struct {
+	signal   Signal
+	expr     string
+	reduce   string // aggregator over incarnations; "max" when empty
+	assign   func(o *Observation, v float64)
+	required bool
+}
+
+// observeQueries builds the Observe query set for a selector and window, each
+// already wrapped in its incarnation aggregate.
+func observeQueries(sel string, window time.Duration) []observeQuery {
 	w := durationString(window)
-	sel := selector(namespaces)
 
 	// step is the inner rate window for percentiles: five minutes smooths
 	// scrape jitter without hiding sustained saturation.
@@ -124,28 +184,7 @@ func (p *Prom) Observe(namespaces []string, window time.Duration) (map[Key]*Obse
 	// startupWindow is how long after a container start counts as boot.
 	const startupWindow = 120
 
-	// required marks a signal without which the report is not worth printing.
-	// Everything else may legitimately be absent on some clusters, but absence
-	// is recorded and surfaced rather than silently read as zero.
-	//
-	// reduce is the PromQL aggregator that collapses a container's incarnations,
-	// applied by (namespace, pod, container). A container restart gives cAdvisor
-	// a brand new series for the same container: identical namespace, pod and
-	// container labels, a new `id`. An unaggregated query therefore returns one
-	// sample per incarnation for the same key, and the join below keeps
-	// whichever Prometheus happened to return last - as often as not the dead
-	// one, whose values never change again. That is how a leaker that OOMKilled
-	// and restarted kept reporting the pre-restart sample count, pressure and
-	// peak for twelve hours while the live container ran underneath it. Every
-	// query must state how its incarnations combine.
-	type query struct {
-		signal   Signal
-		expr     string
-		reduce   string // aggregator over incarnations; "max" when empty
-		assign   func(o *Observation, v float64)
-		required bool
-	}
-	queries := []query{
+	queries := []observeQuery{
 		{
 			expr:   fmt.Sprintf(`quantile_over_time(0.95, rate(container_cpu_usage_seconds_total{%s}[%s])[%s:%s])`, sel, step, w, step),
 			signal: SigCPUUsage, required: true,
@@ -254,12 +293,12 @@ func (p *Prom) Observe(namespaces []string, window time.Duration) (map[Key]*Obse
 	// The early-window average needs an offset, which only makes sense once the
 	// window is wide enough to have an "early" at all.
 	if window >= 4*time.Hour {
-		queries = append(queries, query{
+		queries = append(queries, observeQuery{
 			expr:   fmt.Sprintf(`avg_over_time(container_memory_working_set_bytes{%s}[1h] offset %s)`, sel, durationString(window-time.Hour)),
 			signal: SigMemTrend,
 			assign: func(o *Observation, v float64) { o.MemEarly = v },
 		})
-		queries = append(queries, query{
+		queries = append(queries, observeQuery{
 			expr:   fmt.Sprintf(`max_over_time(kube_pod_container_resource_limits{%s,resource="memory"}[1h] offset %s)`, sel, durationString(window-time.Hour)),
 			signal: SigLimitTrend,
 			assign: func(o *Observation, v float64) { o.MemLimitEarly = v },
@@ -267,7 +306,7 @@ func (p *Prom) Observe(namespaces []string, window time.Duration) (map[Key]*Obse
 	}
 
 	// Collapse every query to one series per container before it is sent. See
-	// the `reduce` field above for why an unaggregated query is a silent trap.
+	// observeQuery.reduce for why an unaggregated query is a silent trap.
 	// max is the default because every other field here is already a worst case
 	// over the pods of a workload, and an incarnation is the same kind of thing:
 	// the recommendation has to hold for the worst one, not the most recent.
@@ -279,47 +318,17 @@ func (p *Prom) Observe(namespaces []string, window time.Duration) (map[Key]*Obse
 		queries[i].expr = fmt.Sprintf(`%s by (namespace,pod,container) (%s)`, op, queries[i].expr)
 	}
 
-	out := map[Key]*Observation{}
-	p.health = p.health[:0]
+	return queries
+}
 
-	for _, q := range queries {
-		samples, err := p.query(q.expr)
-		p.health = append(p.health, SignalHealth{
-			Signal: q.signal, Query: q.expr, Err: err,
-			Series: len(samples), Required: q.required,
-		})
-		if err != nil {
-			if q.required {
-				return nil, fmt.Errorf("required signal %s: %w", q.signal, err)
-			}
-			continue
-		}
-		for _, s := range samples {
-			k := Key{
-				Namespace: s.labels["namespace"],
-				Pod:       s.labels["pod"],
-				Container: s.labels["container"],
-			}
-			if k.Container == "" || k.Pod == "" {
-				continue
-			}
-			o, ok := out[k]
-			if !ok {
-				o = &Observation{Key: k}
-				out[k] = o
-			}
-			q.assign(o, s.value)
-			o.mark(q.signal)
-		}
-	}
-	p.flagDeadPressure(out)
-
-	// A trend needs both halves. The late query returns a series for any live
-	// container, and marking per-series would otherwise record the signal as
-	// present while the early half matched nothing - which is what happens to
-	// any pod created after the window opened. Leak detection and limit-trend
-	// inference are both guarded on the early value being non-zero, so they
-	// would silently never run while the report claimed nothing was missing.
+// dropHalfTrends unmarks a trend that has only one of its two halves. The late
+// query returns a series for any live container, and marking per-series would
+// otherwise record the signal as present while the early half matched nothing
+// - which is what happens to any pod created after the window opened. Leak
+// detection and limit-trend inference are both guarded on the early value
+// being non-zero, so they would silently never run while the report claimed
+// nothing was missing.
+func dropHalfTrends(out map[Key]*Observation) {
 	for _, o := range out {
 		if o.MemEarly == 0 {
 			delete(o.Have, SigMemTrend)
@@ -328,8 +337,11 @@ func (p *Prom) Observe(namespaces []string, window time.Duration) (map[Key]*Obse
 			delete(o.Have, SigLimitTrend)
 		}
 	}
+}
 
-	return out, nil
+// keyOf reads a container key from a series' labels.
+func keyOf(labels map[string]string) Key {
+	return Key{Namespace: labels["namespace"], Pod: labels["pod"], Container: labels["container"]}
 }
 
 // AvailableWindow reports how much history this backend actually holds for the
@@ -343,7 +355,7 @@ func (p *Prom) Observe(namespaces []string, window time.Duration) (map[Key]*Obse
 // each probe is one instant query against an aggregate.
 func (p *Prom) AvailableWindow(namespaces []string, want time.Duration) (time.Duration, error) {
 	sel := selector(namespaces)
-	for _, d := range []time.Duration{
+	for i, d := range []time.Duration{
 		want,
 		14 * 24 * time.Hour,
 		10 * 24 * time.Hour,
@@ -358,7 +370,9 @@ func (p *Prom) AvailableWindow(namespaces []string, want time.Duration) (time.Du
 		3 * time.Hour,
 		time.Hour,
 	} {
-		if d > want {
+		// want is probed first; a later step equal to it is the same query
+		// again, and a step above it is a window nobody asked for.
+		if i > 0 && d >= want {
 			continue
 		}
 		samples, err := p.query(fmt.Sprintf(

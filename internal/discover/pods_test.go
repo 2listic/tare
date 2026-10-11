@@ -245,3 +245,17 @@ func TestBlockingTaint(t *testing.T) {
 		t.Error("an untainted node blocks nothing")
 	}
 }
+
+// The pod's summed limit cannot say how many of its containers are unbounded:
+// a limited app container hides the unlimited sidecar beside it.
+func TestUnlimitedContainersAreCountedPerContainer(t *testing.T) {
+	app := ctr("app", "100m", "128Mi")
+	app.Resources.Limits = res("500m", "256Mi")
+	sidecar := ctr("proxy", "10m", "32Mi")
+	sidecar.Resources.Limits = corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("64Mi")}
+
+	p := podFrom(&corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{app, sidecar}}}, "Deployment/web", nil)
+	if p.UnlimitedCPU != 1 || p.UnlimitedMem != 0 {
+		t.Errorf("UnlimitedCPU=%d UnlimitedMem=%d, want 1 and 0", p.UnlimitedCPU, p.UnlimitedMem)
+	}
+}

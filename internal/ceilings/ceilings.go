@@ -40,15 +40,16 @@ const (
 	// Inference servers. For these the pod spec is almost the whole story:
 	// what the process reserves on the GPU is set by flags at startup and
 	// observation cannot see past them.
-	VLLMMemUtil    Kind = "vllm-gpu-memory-utilization"
-	VLLMModelLen   Kind = "vllm-max-model-len"
-	VLLMSwapSpace  Kind = "vllm-swap-space"
-	ModelWeights   Kind = "model-weights" // VRAM the weights alone occupy
-	OllamaKeepWarm Kind = "ollama-keep-alive"
-	OllamaParallel Kind = "ollama-num-parallel"
-	TGITokens      Kind = "tgi-max-total-tokens"
-	TGIMemFraction Kind = "tgi-cuda-memory-fraction"
-	LlamaGPULayers Kind = "llama-n-gpu-layers"
+	VLLMMemUtil     Kind = "vllm-gpu-memory-utilization"
+	VLLMModelLen    Kind = "vllm-max-model-len"
+	VLLMSwapSpace   Kind = "vllm-swap-space"
+	ModelWeights    Kind = "model-weights" // VRAM the weights alone occupy
+	OllamaKeepWarm  Kind = "ollama-keep-alive"
+	OllamaParallel  Kind = "ollama-num-parallel"
+	OllamaMaxModels Kind = "ollama-max-loaded-models"
+	TGITokens       Kind = "tgi-max-total-tokens"
+	TGIMemFraction  Kind = "tgi-cuda-memory-fraction"
+	LlamaGPULayers  Kind = "llama-n-gpu-layers"
 )
 
 // Container is the minimal view of a pod container that detection needs.
@@ -194,14 +195,6 @@ func MemoryFloor(cs []Ceiling) (floor int64, blocked bool) {
 		}
 	}
 	return floor, blocked
-}
-
-// jvmOverhead estimates non-heap JVM memory: metaspace, code cache, thread
-// stacks, GC structures and direct buffers. A quarter of heap with a 128Mi
-// minimum is the widely used rule of thumb and errs on the safe side, which is
-// the correct direction to err when the failure mode is an OOMKill.
-func jvmOverhead(heap int64) int64 {
-	return max(heap/4, 128<<20)
 }
 
 // CPUCeiling reports the smallest resolved cap on useful CPU. Recommending

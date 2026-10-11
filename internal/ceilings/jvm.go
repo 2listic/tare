@@ -79,10 +79,7 @@ func expandArgv(argv []string) []string {
 	if len(argv) == 0 {
 		return out
 	}
-	base := argv[0]
-	if i := strings.LastIndex(base, "/"); i >= 0 {
-		base = base[i+1:]
-	}
+	base := lastSegment(argv[0])
 	if !shells[base] {
 		return out
 	}
@@ -110,18 +107,11 @@ func runsJava(c Container) (isJava, known bool) {
 		return true, true
 	}
 	for _, a := range argv {
-		base := a
-		if i := strings.LastIndex(a, "/"); i >= 0 {
-			base = a[i+1:]
-		}
-		if base == "java" {
+		if lastSegment(a) == "java" {
 			return true, true
 		}
 	}
-	first := argv[0]
-	if i := strings.LastIndex(first, "/"); i >= 0 {
-		first = first[i+1:]
-	}
+	first := lastSegment(argv[0])
 	if shells[first] {
 		// We read the script and found no java in it.
 		return false, true
@@ -275,7 +265,7 @@ func jvmHeapCeiling(t token) Ceiling {
 		return ce
 	}
 	ce.Bytes = b
-	ce.MinContainerBytes = b + jvmOverhead(b)
+	ce.MinContainerBytes = b + JVMOverhead(b)
 	ce.Note = fmt.Sprintf("JVM heap is capped at %s by %s, so the container needs about %s once metaspace, code cache and thread stacks are counted. Raising the limit above that buys nothing; lowering it below invites an OOMKill. Change the flag, not the limit.", humanBytes(b), raw, humanBytes(ce.MinContainerBytes))
 	return ce
 }
@@ -294,7 +284,7 @@ func jvmPercentCeiling(c Container, t token, prefix string) Ceiling {
 		return ce
 	}
 	ce.Bytes = int64(float64(c.MemoryLimitBytes) * pct / 100)
-	ce.MinContainerBytes = ce.Bytes + jvmOverhead(ce.Bytes)
+	ce.MinContainerBytes = ce.Bytes + JVMOverhead(ce.Bytes)
 	ce.ScalesWithLimit = true
 	ce.Note = fmt.Sprintf("JVM heap tracks the container memory limit at %.1f%%, currently %s. The heap moves with the limit, so this container does respond to resizing.", pct, humanBytes(ce.Bytes))
 	return ce
@@ -314,7 +304,7 @@ func jvmFractionCeiling(c Container, t token) Ceiling {
 		return ce
 	}
 	ce.Bytes = c.MemoryLimitBytes / f
-	ce.MinContainerBytes = ce.Bytes + jvmOverhead(ce.Bytes)
+	ce.MinContainerBytes = ce.Bytes + JVMOverhead(ce.Bytes)
 	ce.ScalesWithLimit = true
 	ce.Note = fmt.Sprintf("JVM heap is 1/%d of the container memory limit, currently %s. MaxRAMFraction is deprecated; MaxRAMPercentage is the supported knob.", f, humanBytes(ce.Bytes))
 	return ce
@@ -331,8 +321,22 @@ func jvmDefaultHeap(c Container) Ceiling {
 		return ce
 	}
 	ce.Bytes = c.MemoryLimitBytes / 4
-	ce.MinContainerBytes = ce.Bytes + jvmOverhead(ce.Bytes)
+	ce.MinContainerBytes = ce.Bytes + JVMOverhead(ce.Bytes)
 	ce.ScalesWithLimit = true
 	ce.Note = fmt.Sprintf("JVM detected with no heap flags. Container-aware JVMs default to 25%% of the memory limit, about %s of heap out of %s. Setting MaxRAMPercentage explicitly usually reclaims most of the difference.", humanBytes(ce.Bytes), humanBytes(c.MemoryLimitBytes))
 	return ce
+}
+
+// JVMOverhead estimates non-heap JVM memory: metaspace, code cache, thread
+// stacks, GC structures and direct buffers. A quarter of heap with a 128Mi
+// minimum is the widely used rule of thumb and errs on the safe side, which is
+// the correct direction to err when the failure mode is an OOMKill.
+func JVMOverhead(heap int64) int64 {
+	return max(heap/4, 128<<20)
+}
+
+// lastSegment is what follows the final slash: a binary's name from its
+// path, a model's name from its repository.
+func lastSegment(s string) string {
+	return s[strings.LastIndex(s, "/")+1:]
 }
