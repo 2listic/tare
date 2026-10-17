@@ -76,6 +76,7 @@ func decide(f *Finding, window time.Duration, th Thresholds) {
 	default:
 		if idleReason := isIdle(f, window, th); idleReason != nil {
 			markIdle(f, *idleReason)
+			noteLoweredLimits(f)
 			return
 		}
 		classifyWaste(f, th)
@@ -406,6 +407,7 @@ func classifyWaste(f *Finding, th Thresholds) {
 	wastedMem := f.MemRequest > 0 && f.MemUsageMax < float64(f.MemRequest)*th.WasteRatio
 	if !wastedCPU && !wastedMem {
 		f.Verdict = Healthy
+		noteLoweredLimits(f)
 		return
 	}
 	f.Verdict = Waste
@@ -414,6 +416,23 @@ func classifyWaste(f *Finding, th Thresholds) {
 	}
 	if wastedMem {
 		f.Reasons = append(f.Reasons, measured(MemUnderused, f.MemUsageMax, float64(f.MemRequest), Bytes, fmt.Sprintf("memory peak is %s against a %s request", HumanBytes(int64(f.MemUsageMax)), HumanBytes(f.MemRequest))))
+	}
+	noteLoweredLimits(f)
+}
+
+// noteLoweredLimits explains why an existing limit is recommended lower.
+// Requests get CPU_UNDERUSED and MEM_UNDERUSED; without a corresponding reason
+// for limits, a row whose memory limit drops by 90% or whose IDLE container
+// has its limits lowered carries no reason for the limit change at all.
+func noteLoweredLimits(f *Finding) {
+	if f.CPULimit > 0 && f.RecCPULimit > 0 && f.RecCPULimit < f.CPULimit {
+		peak := max(f.CPUUsageMax, f.CPUSteadyMax, f.CPUStartupMax) * 1000
+		f.Reasons = append(f.Reasons, measured(CPULimitUnderused, peak, float64(f.CPULimit), Millicores,
+			fmt.Sprintf("CPU peak is %.0fm against a %dm limit", peak, f.CPULimit)))
+	}
+	if f.MemLimit > 0 && f.RecMemLimit > 0 && f.RecMemLimit < f.MemLimit {
+		f.Reasons = append(f.Reasons, measured(MemLimitUnderused, f.MemUsageMax, float64(f.MemLimit), Bytes,
+			fmt.Sprintf("memory peak is %s against a %s limit", HumanBytes(int64(f.MemUsageMax)), HumanBytes(f.MemLimit))))
 	}
 }
 

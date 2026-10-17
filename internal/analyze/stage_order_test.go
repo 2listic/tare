@@ -127,3 +127,39 @@ func TestPinnedAtLimitNeedsCPUStarvation(t *testing.T) {
 		t.Errorf("%s on a container with no CPU stall", analyze.CPUAtLimit)
 	}
 }
+
+// Lowered limits must carry a reason just as lowered requests do, including on
+// IDLE containers where classifyWaste does not run.
+func TestLoweredLimitsCarryReasons(t *testing.T) {
+	t.Run("waste container", func(t *testing.T) {
+		f := runOne(t, container("Burstable", 100, 500, 256*mib, 1024*mib), metrics.Observation{
+			CPUUsageP95: 0.001, CPUUsageMax: 0.005,
+			MemWorkingSet: 63 * mib, MemP95: 60 * mib,
+		}, analyze.Cluster{})
+		if f.RecCPULimit >= 500 || f.RecMemLimit >= 1024*mib {
+			t.Fatalf("fixture drifted: limits not lowered (%dm, %s)", f.RecCPULimit, analyze.HumanBytes(f.RecMemLimit))
+		}
+		if !hasCode(f, analyze.CPULimitUnderused) {
+			t.Errorf("lowered CPU limit has no %s reason: %v", analyze.CPULimitUnderused, f.Reasons)
+		}
+		if !hasCode(f, analyze.MemLimitUnderused) {
+			t.Errorf("lowered memory limit has no %s reason: %v", analyze.MemLimitUnderused, f.Reasons)
+		}
+	})
+	t.Run("idle container", func(t *testing.T) {
+		obs := metrics.Observation{
+			CPUUsageP95: 0.0002, CPUUsageMax: 0.0004,
+			MemWorkingSet: 10 * mib, MemP95: 10 * mib,
+			MemEarly: 10 * mib, MemLate: 10 * mib,
+			Samples: 60000,
+		}
+		obs.Mark(metrics.SigMemTrend)
+		f := runOne(t, container("Burstable", 100, 100, 64*mib, 64*mib), obs, analyze.Cluster{})
+		if f.Verdict != analyze.Idle {
+			t.Fatalf("fixture drifted: want IDLE, got %s", f.Verdict)
+		}
+		if !hasCode(f, analyze.CPULimitUnderused) || !hasCode(f, analyze.MemLimitUnderused) {
+			t.Errorf("IDLE container with lowered limits is missing limit reasons: %v", f.Reasons)
+		}
+	})
+}

@@ -34,11 +34,13 @@ import (
 // stay in -o wide and the JSON; in the compact view they would bury the codes
 // that are news.
 var impliedCodes = map[analyze.Code]bool{
-	analyze.CPUUnderused: true, // WASTE with a smaller number
-	analyze.MemUnderused: true,
-	analyze.CPUFloor:     true, // the recommendation is the minimum, visibly
-	analyze.MemFloor:     true,
-	analyze.BestEffort:   true, // the current value reads "unset"
+	analyze.CPUUnderused:      true, // WASTE with a smaller number
+	analyze.MemUnderused:      true,
+	analyze.CPULimitUnderused: true, // compact view shows requests; -o wide and --explain carry limit reasons
+	analyze.MemLimitUnderused: true,
+	analyze.CPUFloor:          true, // the recommendation is the minimum, visibly
+	analyze.MemFloor:          true,
+	analyze.BestEffort:        true, // the current value reads "unset"
 }
 
 const maxWhyCodes = 2

@@ -29,9 +29,11 @@ const (
 	RestartChurn   Code = "RESTART_CHURN"
 	IdleWindow     Code = "IDLE_NO_WORK"
 	IdleCaveat     Code = "IDLE_NOT_RULED_OUT"
-	CPUUnderused   Code = "CPU_UNDERUSED"
-	MemUnderused   Code = "MEM_UNDERUSED"
-	CPUAtLimit     Code = "CPU_PINNED_AT_LIMIT"
+	CPUUnderused      Code = "CPU_UNDERUSED"
+	MemUnderused      Code = "MEM_UNDERUSED"
+	CPULimitUnderused Code = "CPU_LIMIT_UNDERUSED"
+	MemLimitUnderused Code = "MEM_LIMIT_UNDERUSED"
+	CPUAtLimit        Code = "CPU_PINNED_AT_LIMIT"
 
 	// How the recommendation was arrived at.
 	CPUFloor   Code = "CPU_FLOOR"
