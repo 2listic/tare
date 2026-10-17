@@ -177,17 +177,19 @@ func (p *printer) printWarnings(r *report.Report) {
 	}
 	w := tabwriter.NewWriter(p.diag, 0, 0, 2, ' ', 0)
 	for _, x := range ws {
-		fmt.Fprintf(w, "warning\t%s\t%s\n", x.code, x.detail)
+		fmt.Fprintf(w, "warning	%s	%s\n", x.code, x.detail)
 	}
 	w.Flush()
 }
 
 // compactRows drops the verdicts that ask nothing of the reader. They are
 // counted in a comment rather than vanishing, and an explicit --verdict lists
-// every row it selected.
+// every row it selected. UNSET containers reserve nothing today, so nothing is
+// being reduced and listing 35 near-identical "unset→" rows buries the findings
+// that need a decision.
 func compactRows(fs []analyze.Finding) (shown, hidden []analyze.Finding) {
 	for _, f := range fs {
-		if f.Verdict == analyze.Healthy || f.Verdict == analyze.NoData {
+		if f.Verdict == analyze.Healthy || f.Verdict == analyze.NoData || f.Verdict == analyze.Unset {
 			hidden = append(hidden, f)
 		} else {
 			shown = append(shown, f)

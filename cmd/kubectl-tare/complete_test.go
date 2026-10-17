@@ -92,7 +92,7 @@ func TestCompleteVerdictsAndCommaLists(t *testing.T) {
 		t.Errorf("directive = %q, want :4", dir)
 	}
 	joined := strings.Join(lines, "\n")
-	for _, v := range []string{"SATURATED\t", "WASTE\t", "IDLE\t", "UNVERIFIED\t", "OK\t", "NO-DATA\t"} {
+	for _, v := range []string{"SATURATED\t", "WASTE\t", "IDLE\t", "UNVERIFIED\t", "UNSET\t", "OK\t", "NO-DATA\t"} {
 		if !strings.Contains(joined, v) {
 			t.Errorf("missing verdict %q in:\n%s", v, joined)
 		}

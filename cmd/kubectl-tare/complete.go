@@ -69,6 +69,7 @@ var verdictDescriptions = map[analyze.Verdict]string{
 	analyze.Idle:       "no measurable work all window; candidate for deletion",
 	analyze.Unverified: "reduction cannot be backed by a saturation signal",
 	analyze.Waste:      "requesting far more than it uses",
+	analyze.Unset:      "no requests or limits set; starting-point size",
 	analyze.Healthy:    "sized appropriately",
 	analyze.NoData:     "no metric series in the window",
 }

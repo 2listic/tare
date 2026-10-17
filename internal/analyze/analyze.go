@@ -27,6 +27,7 @@ const (
 	Idle       Verdict = "IDLE"       // no measurable work all window; the saving is deletion, not resizing
 	Waste      Verdict = "WASTE"      // requesting far more than it uses
 	Unverified Verdict = "UNVERIFIED" // a reduction cannot be shown to be safe: no saturation signal, or the container kept restarting
+	Unset      Verdict = "UNSET"      // no requests and no limits; recommendations are a starting point, not a reduction
 	Healthy    Verdict = "OK"
 	NoData     Verdict = "NO-DATA"
 	Conflicted Verdict = "CONFLICT" // another controller already manages these fields
@@ -37,7 +38,7 @@ const (
 // the call site - silently drops any verdict added later, and a verdict
 // missing from the summary is a finding the reader never learns exists.
 func ReportOrder() []Verdict {
-	return []Verdict{Conflicted, Saturated, Leaking, Blocked, Idle, Unverified, Waste, Healthy, NoData}
+	return []Verdict{Conflicted, Saturated, Leaking, Blocked, Idle, Unverified, Waste, Unset, Healthy, NoData}
 }
 
 // Confidence reflects how much evidence stands behind a recommendation. It is
@@ -242,6 +243,8 @@ func severity(v Verdict) int {
 	case Unverified:
 		return 2
 	case Waste:
+		return 2
+	case Unset:
 		return 2
 	case Healthy:
 		return 1

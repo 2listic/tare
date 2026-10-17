@@ -401,8 +401,13 @@ func markIdle(f *Finding, why Reason) {
 }
 
 // classifyWaste calls a container wasteful when either request sits far above
-// what it uses, and healthy otherwise.
+// what it uses, UNSET when it sets neither requests nor limits, and healthy
+// otherwise.
 func classifyWaste(f *Finding, th Thresholds) {
+	if f.CPURequest == 0 && f.MemRequest == 0 && f.CPULimit == 0 && f.MemLimit == 0 {
+		f.Verdict = Unset
+		return
+	}
 	wastedCPU := f.CPURequest > 0 && f.CPUUsageP95*1000 < float64(f.CPURequest)*th.WasteRatio
 	wastedMem := f.MemRequest > 0 && f.MemUsageMax < float64(f.MemRequest)*th.WasteRatio
 	if !wastedCPU && !wastedMem {

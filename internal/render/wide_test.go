@@ -391,6 +391,41 @@ func TestCensoredMemoryRendersAsUnknown(t *testing.T) {
 	}
 }
 
+func TestWarningsAreNotClipped(t *testing.T) {
+	r := packedReport()
+	longMsg := "dbf667e1: carries the taint node-role.kubernetes.io/control-plane=:NoSchedule, which no pod in this report tolerates"
+	r.Nodes.Unusable = []string{longMsg}
+	_, stderr := renderCompact(t, r)
+	if !strings.Contains(stderr, longMsg) {
+		t.Errorf("warning detail was clipped:\n%s", stderr)
+	}
+}
+
+func TestCompactCollapsesUnsetAndCountsListedRows(t *testing.T) {
+	r := sampleReport()
+	unset := r.Findings[0]
+	unset.Verdict, unset.Container = analyze.Unset, "node-agent"
+	unset.CPURequest, unset.MemRequest, unset.CPULimit, unset.MemLimit = 0, 0, 0, 0
+	noData := r.Findings[0]
+	noData.Verdict, noData.Container = analyze.NoData, "ghost"
+	r.Findings = append(r.Findings, unset, noData)
+	r.CoverageMissing, r.CoverageTotal = 9, 75
+
+	out, stderr := renderCompact(t, r)
+	if strings.Contains(out, "node-agent") {
+		t.Errorf("an UNSET row is listed by default:\n%s", out)
+	}
+	if !strings.Contains(stderr, "3 containers (1 listed) over 2w:") {
+		t.Errorf("summary does not report total vs listed containers:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "9 of 75 pod containers have no series (1 NO-DATA workloads; the rest have other pods covered)") {
+		t.Errorf("METRICS_COVERAGE warning does not distinguish pod containers from NO-DATA workloads:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "not listed: 1 UNSET, 1 NO-DATA") {
+		t.Errorf("hidden UNSET and NO-DATA rows not counted in not listed:\n%s", stderr)
+	}
+}
+
 func TestExplainPrintsCommitmentTableAndOnlyApplicableLegend(t *testing.T) {
 	r := sampleReport()
 	r.Commitment = []packing.Commitment{{
@@ -407,15 +442,5 @@ func TestExplainPrintsCommitmentTableAndOnlyApplicableLegend(t *testing.T) {
 	}
 	if strings.Contains(out, "CPU_OVERCOMMIT_HEAVY: looks empty") {
 		t.Errorf("table --explain printed legend for CPU_OVERCOMMIT_HEAVY when no node has it:\n%s", out)
-	}
-}
-
-func TestWarningsAreNotClipped(t *testing.T) {
-	r := packedReport()
-	longMsg := "dbf667e1: carries the taint node-role.kubernetes.io/control-plane=:NoSchedule, which no pod in this report tolerates"
-	r.Nodes.Unusable = []string{longMsg}
-	_, stderr := renderCompact(t, r)
-	if !strings.Contains(stderr, longMsg) {
-		t.Errorf("warning detail was clipped:\n%s", stderr)
 	}
 }

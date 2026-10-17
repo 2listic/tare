@@ -52,7 +52,7 @@ func defineFlags(fs *flag.FlagSet) *options {
 	fs.StringVar(&o.kubectx, "context", "", "kubeconfig context")
 	fs.StringVar(&o.output, "o", "table", "output format: table (a screenful: summary, warnings, one row per finding), wide (every section, evidence row and limit, for scripts and tickets), tui (interactive), json, html (a self-contained file you can send to someone), or patch (apply-ready strategic merge patches)")
 	fs.IntVar(&o.top, "top", 0, "show only the N biggest opportunities")
-	fs.StringVar(&o.verdicts, "verdict", "", "show only these verdicts, comma separated: SATURATED,WASTE,IDLE,LEAKING,CONFLICT,BLOCKED,UNVERIFIED,OK,NO-DATA")
+	fs.StringVar(&o.verdicts, "verdict", "", "show only these verdicts, comma separated: SATURATED,WASTE,IDLE,LEAKING,CONFLICT,BLOCKED,UNVERIFIED,UNSET,OK,NO-DATA")
 	fs.BoolVar(&o.bySavings, "by-savings", false, "order by reclaimable resource rather than by severity")
 	fs.BoolVar(&o.all, "all-namespaces", false, "include kube-* and other infrastructure namespaces")
 	fs.BoolVar(&o.explain, "explain", false, "after the tables, print the sentence behind every evidence code. The tables say what was measured; this says what it means and what it does not rule out.")

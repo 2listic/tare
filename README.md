@@ -300,10 +300,10 @@ without either getting in the other's way.
 - Hints, progress and warnings go to stderr. stdout is data.
 
 The default view puts one section on stdout, `findings`, and the summary and
-warnings on stderr. It leaves out what asks nothing of the reader: `OK` and `NO-DATA` rows are counted
+warnings on stderr. It leaves out what asks nothing of the reader: `OK`, `UNSET` and `NO-DATA` rows are counted
 in a comment instead of listed (any `--verdict` lists everything it selects),
 and `WHY` omits the codes the row already shows (`CPU_UNDERUSED`,
-`MEM_UNDERUSED`, `CPU_FLOOR`, `MEM_FLOOR`, `BEST_EFFORT`) and stops at two with
+`MEM_UNDERUSED`, `CPU_LIMIT_UNDERUSED`, `MEM_LIMIT_UNDERUSED`, `CPU_FLOOR`, `MEM_FLOOR`, `BEST_EFFORT`) and stops at two with
 a `+N`. What it never leaves out is a gap: every signal the run could not see,
 every node it could not use, every budget that blocks a drain is a `warning`
 line on stderr, once, however many containers it touches.
