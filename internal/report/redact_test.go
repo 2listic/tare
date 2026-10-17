@@ -79,3 +79,25 @@ func TestRedactionIsStable(t *testing.T) {
 		t.Error("nothing was redacted at all")
 	}
 }
+
+// Custom-resource controller kinds (such as Rollout, Kafka, Prometheus) are API
+// type names, not cluster secrets, and hashing them turns "Rollout/api" into
+// "27cf1792/44050a29", which no longer reads as kind/name.
+func TestRedactionPreservesCustomResourceKinds(t *testing.T) {
+	r := &Report{
+		Findings: []analyze.Finding{{
+			Namespace: "payments", Workload: "Rollout/checkout-api", Container: "api",
+			Reasons: []analyze.Reason{{Code: analyze.CPUUnderused, Text: "Rollout/checkout-api in payments"}},
+		}},
+	}
+	Redact(r)
+	if !strings.HasPrefix(r.Findings[0].Workload, "Rollout/") {
+		t.Errorf("custom controller kind was hashed: %q", r.Findings[0].Workload)
+	}
+	if strings.Contains(r.Findings[0].Workload, "checkout-api") {
+		t.Errorf("workload name was not hashed: %q", r.Findings[0].Workload)
+	}
+	if !strings.Contains(r.Findings[0].Reasons[0].Text, "Rollout/") {
+		t.Errorf("custom controller kind was hashed in reason text: %q", r.Findings[0].Reasons[0].Text)
+	}
+}

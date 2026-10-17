@@ -176,9 +176,8 @@ func (p *printer) printWarnings(r *report.Report) {
 		return
 	}
 	w := tabwriter.NewWriter(p.diag, 0, 0, 2, ' ', 0)
-	width := termWidth() - len("warning  SIGNAL_NOT_MEASURED") - 2
 	for _, x := range ws {
-		fmt.Fprintf(w, "warning\t%s\t%s\n", x.code, Clip(x.detail, width))
+		fmt.Fprintf(w, "warning\t%s\t%s\n", x.code, x.detail)
 	}
 	w.Flush()
 }

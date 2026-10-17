@@ -43,7 +43,11 @@ func Redact(r *Report) {
 	for i := range r.Findings {
 		f := &r.Findings[i]
 		add(f.Namespace)
-		add(f.Workload)
+		if _, name, ok := strings.Cut(f.Workload, "/"); ok {
+			add(name)
+		} else {
+			add(f.Workload)
+		}
 		add(f.Container)
 		add(f.Image)
 		for _, n := range f.Nodes {
@@ -75,7 +79,11 @@ func Redact(r *Report) {
 	for i := range r.Findings {
 		f := &r.Findings[i]
 		f.Namespace = rep(f.Namespace)
-		f.Workload = rep(f.Workload)
+		if kind, name, ok := strings.Cut(f.Workload, "/"); ok {
+			f.Workload = kind + "/" + rep(name)
+		} else {
+			f.Workload = rep(f.Workload)
+		}
 		f.Container = rep(f.Container)
 		f.Image = rep(f.Image)
 		f.Nodes = repEach(rep, f.Nodes)

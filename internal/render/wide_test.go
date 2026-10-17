@@ -409,3 +409,13 @@ func TestExplainPrintsCommitmentTableAndOnlyApplicableLegend(t *testing.T) {
 		t.Errorf("table --explain printed legend for CPU_OVERCOMMIT_HEAVY when no node has it:\n%s", out)
 	}
 }
+
+func TestWarningsAreNotClipped(t *testing.T) {
+	r := packedReport()
+	longMsg := "dbf667e1: carries the taint node-role.kubernetes.io/control-plane=:NoSchedule, which no pod in this report tolerates"
+	r.Nodes.Unusable = []string{longMsg}
+	_, stderr := renderCompact(t, r)
+	if !strings.Contains(stderr, longMsg) {
+		t.Errorf("warning detail was clipped:\n%s", stderr)
+	}
+}
