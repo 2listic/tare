@@ -390,3 +390,22 @@ func TestCensoredMemoryRendersAsUnknown(t *testing.T) {
 		t.Errorf("HTML shows %q / %q, want both unknown", v.Rows[0].Mem, v.Rows[0].MemLimit)
 	}
 }
+
+func TestExplainPrintsCommitmentTableAndOnlyApplicableLegend(t *testing.T) {
+	r := sampleReport()
+	r.Commitment = []packing.Commitment{{
+		Node: "ip-10-0-3-41", Pods: 14, Schedulable: true,
+		ReqCPU: 1000, LimCPU: 2000, AllocCPU: 4000,
+		ReqMem: 1 << 30, LimMem: 5 << 30, AllocMem: 4 << 30,
+	}}
+	out := renderFormat(t, r, "table", true)
+	if !strings.Contains(out, "ip-10-0-3-41") || !strings.Contains(out, "MEM_REQ_PCT") {
+		t.Errorf("table --explain did not print the commitment table:\n%s", out)
+	}
+	if !strings.Contains(out, "MEM_OVERCOMMIT: if these pods") {
+		t.Errorf("table --explain did not explain MEM_OVERCOMMIT when present:\n%s", out)
+	}
+	if strings.Contains(out, "CPU_OVERCOMMIT_HEAVY: looks empty") {
+		t.Errorf("table --explain printed legend for CPU_OVERCOMMIT_HEAVY when no node has it:\n%s", out)
+	}
+}

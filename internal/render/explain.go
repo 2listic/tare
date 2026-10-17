@@ -2,6 +2,8 @@ package render
 
 import (
 	"fmt"
+	"strings"
+	"text/tabwriter"
 
 	"github.com/mfranzon/tare/internal/analyze"
 	"github.com/mfranzon/tare/internal/packing"
@@ -16,7 +18,7 @@ import (
 // difference between a report and a workload somebody deleted on a Friday, and
 // no column can carry it. So the tables are the default and the prose is one
 // flag away, rather than the other way round.
-func (p *printer) printExplanations(r *report.Report) {
+func (p *printer) printExplanations(r *report.Report, wide bool) {
 	fmt.Fprintln(p.out)
 	fmt.Fprintln(p.out, "# explanations")
 
@@ -36,7 +38,7 @@ func (p *printer) printExplanations(r *report.Report) {
 
 	p.explainTotals(r.Findings)
 	p.explainNodes(r)
-	p.explainCommitment(r.Commitment)
+	p.explainCommitment(r.Commitment, wide)
 }
 
 // explainTotals carries the two readings of the summary that a count does not:
@@ -74,15 +76,48 @@ func (p *printer) explainNodes(r *report.Report) {
 	}
 }
 
-func (p *printer) explainCommitment(cs []packing.Commitment) {
+func (p *printer) explainCommitment(cs []packing.Commitment, wide bool) {
 	if len(cs) == 0 {
 		return
 	}
 	fmt.Fprintln(p.out, "\ncommitment:")
+	if !wide {
+		w := tabwriter.NewWriter(p.out, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "  NODE	PODS	CPU_REQ_PCT	CPU_LIM_PCT	MEM_REQ_PCT	MEM_LIM_PCT	NOTE")
+		for _, c := range cs {
+			note := strings.Join(commitmentCodes(c), ",")
+			if note == "" {
+				note = "-"
+			}
+			fmt.Fprintf(w, "  %s	%d	%.0f	%.0f	%.0f	%.0f	%s\n",
+				c.Node, c.Pods, c.ReqCPUFrac()*100, c.CPURatio()*100,
+				c.ReqMemFrac()*100, c.MemRatio()*100, note)
+		}
+		w.Flush()
+	}
 	fmt.Fprintln(p.out, "  Requests are what the scheduler reserved; limits are what the pods may take.")
-	fmt.Fprintln(p.out, "  MEM_OVERCOMMIT: if these pods all claim their limit the kernel starts OOMKilling.")
-	fmt.Fprintln(p.out, "  CPU_OVERCOMMIT_HEAVY: looks empty to the scheduler, throttles under simultaneous load.")
-	fmt.Fprintln(p.out, "  UNLIMITED_CPU_CONTAINERS / UNLIMITED_MEM_CONTAINERS: containers with no limit, so these totals are a floor.")
+	seen := map[string]bool{}
+	for _, c := range cs {
+		for _, code := range commitmentCodes(c) {
+			name, _, _ := strings.Cut(code, "=")
+			seen[name] = true
+		}
+	}
+	if seen["CORDONED"] {
+		fmt.Fprintln(p.out, "  CORDONED: unschedulable node, excluded as a packing destination.")
+	}
+	if seen["MEM_OVERCOMMIT"] {
+		fmt.Fprintln(p.out, "  MEM_OVERCOMMIT: if these pods all claim their limit the kernel starts OOMKilling.")
+	}
+	if seen["CPU_OVERCOMMIT_HEAVY"] {
+		fmt.Fprintln(p.out, "  CPU_OVERCOMMIT_HEAVY: looks empty to the scheduler, throttles under simultaneous load.")
+	}
+	if seen["CPU_OVERCOMMIT"] {
+		fmt.Fprintln(p.out, "  CPU_OVERCOMMIT: CPU limits exceed twice the node's allocatable capacity.")
+	}
+	if seen["UNLIMITED_CPU_CONTAINERS"] || seen["UNLIMITED_MEM_CONTAINERS"] {
+		fmt.Fprintln(p.out, "  UNLIMITED_CPU_CONTAINERS / UNLIMITED_MEM_CONTAINERS: containers with no limit, so these totals are a floor.")
+	}
 	fmt.Fprintln(p.out, "  A node can be under-requested and over-limited at once. The scheduler only reads the first,")
 	fmt.Fprintln(p.out, "  which is why shrinking requests without looking at limits packs more onto a node that is")
 	fmt.Fprintln(p.out, "  already promised away.")

@@ -45,7 +45,7 @@ func Render(out, diag io.Writer, r *report.Report, format string, verbose bool) 
 	case "table":
 		p.printCompact(r)
 		if verbose {
-			p.printExplanations(r)
+			p.printExplanations(r, false)
 		} else {
 			p.compactHint()
 		}
@@ -61,7 +61,7 @@ func Render(out, diag io.Writer, r *report.Report, format string, verbose bool) 
 		p.printDrainBlockers(r.DrainBlockers)
 		p.printCommitment(r.Commitment)
 		if verbose {
-			p.printExplanations(r)
+			p.printExplanations(r, true)
 		} else {
 			// stderr, so a redirected report stays pure data.
 			fmt.Fprintln(p.diag, "run with --explain for the reasoning behind every code above")
