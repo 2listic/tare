@@ -115,10 +115,13 @@ module proxy yet, so build it from this tree:
 ```sh
 ./tools/build.sh                                 # this machine, into bin/
 sudo install bin/kubectl-tare /usr/local/bin/
+sudo ln -sf kubectl-tare /usr/local/bin/kubectl_complete-tare
 ```
 
 Anything named `kubectl-*` on your `PATH` becomes a kubectl subcommand, so it is
-available immediately as `kubectl tare`. The build is stamped with a version;
+available immediately as `kubectl tare`, and `kubectl_complete-tare` gives it
+tab completion for subcommands, flags, formats, verdicts and namespaces wherever
+kubectl's own completion is enabled. The build is stamped with a version;
 `kubectl tare version` prints it, and it is the first thing to quote when a
 number looks wrong.
 

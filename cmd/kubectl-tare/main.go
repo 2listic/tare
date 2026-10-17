@@ -73,6 +73,9 @@ func defineFlags(fs *flag.FlagSet) *options {
 }
 
 func run() error {
+	if compArgs, ok := isCompleteInvocation(os.Args[0], os.Args[1:]); ok {
+		return runComplete(os.Stdout, compArgs)
+	}
 	cmd := "report"
 	flag.CommandLine.Usage = func() { usage(os.Stderr, cmd) }
 	o := defineFlags(flag.CommandLine)

@@ -2,10 +2,25 @@ package discover
 
 import (
 	"context"
+	"sort"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+// ListNamespaces returns the names of all namespaces in the cluster, sorted.
+func (c *Client) ListNamespaces(ctx context.Context) ([]string, error) {
+	list, err := c.cs.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(list.Items))
+	for _, item := range list.Items {
+		out = append(out, item.Name)
+	}
+	sort.Strings(out)
+	return out, nil
+}
 
 // MissingNamespaces reports which of the requested namespaces do not exist.
 //

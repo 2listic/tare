@@ -28,6 +28,9 @@ build() {
 	fi
 	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$version" -o "$out" ./cmd/kubectl-tare
 	unset GOOS GOARCH 2>/dev/null || true
+	if [ "$1" = "native" ]; then
+		ln -sf kubectl-tare bin/kubectl_complete-tare
+	fi
 	ls -lh "$out" | awk '{print $NF, $5}'
 }
 
@@ -38,4 +41,4 @@ else
 fi
 
 echo "version: $version"
-echo "install: sudo install bin/kubectl-tare /usr/local/bin/kubectl-tare"
+echo "install: sudo install bin/kubectl-tare /usr/local/bin/kubectl-tare && sudo ln -sf kubectl-tare /usr/local/bin/kubectl_complete-tare"
