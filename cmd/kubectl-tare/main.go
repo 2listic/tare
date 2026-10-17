@@ -345,8 +345,8 @@ func coverageNote(containers []discover.Container, obs map[metrics.Key]*metrics.
 	if missing == 0 {
 		return "", 0
 	}
-	return fmt.Sprintf("metrics cover %d of %d containers; the other %d have no series in this backend "+
-		"and appear as NO-DATA. A workload with other pods covered is still sized, from those pods",
+	return fmt.Sprintf("metrics cover %d of %d pod containers; the other %d have no series in this backend "+
+		"(a workload with no covered pods appears as NO-DATA; one with other pods covered is sized from those pods)",
 		len(containers)-missing, len(containers), missing), missing
 }
 

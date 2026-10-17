@@ -51,7 +51,7 @@ func (p *printer) printCompact(r *report.Report) {
 	p.printCompactFindings(shown, r.BySavings)
 
 	fmt.Fprintln(p.diag)
-	p.printSummary(r)
+	p.printSummary(r, len(shown))
 	p.printWarnings(r)
 	if len(hidden) > 0 {
 		fmt.Fprintf(p.diag, "not listed: %s (--verdict %s)\n",
@@ -63,9 +63,13 @@ func (p *printer) printCompact(r *report.Report) {
 // Nodes lead because they are the only figure that maps to a bill; request
 // changes follow, signed, and never called "reclaimed": a lowered request
 // frees nothing anyone pays for until a node goes away.
-func (p *printer) printSummary(r *report.Report) {
+func (p *printer) printSummary(r *report.Report, listed int) {
 	s := report.Totals(r.Findings)
-	line := fmt.Sprintf("%d containers over %s:", len(r.Findings), r.WindowUsed)
+	head := fmt.Sprintf("%d containers", len(r.Findings))
+	if listed != len(r.Findings) {
+		head = fmt.Sprintf("%d containers (%d listed)", len(r.Findings), listed)
+	}
+	line := fmt.Sprintf("%s over %s:", head, r.WindowUsed)
 	if nodes, freed := nodeCells(r); nodes != "" {
 		line += fmt.Sprintf(" nodes freed %s of %s;", freed, nodes)
 	}
@@ -109,8 +113,14 @@ func (p *printer) printWarnings(r *report.Report) {
 		add("WINDOW_SHORT", r.Window)
 	}
 	if r.CoverageTotal > 0 {
-		add("METRICS_COVERAGE", fmt.Sprintf("%d of %d containers have no series, listed as NO-DATA",
-			r.CoverageMissing, r.CoverageTotal))
+		noData := report.Tally(r.Findings)[analyze.NoData]
+		detail := fmt.Sprintf("%d of %d pod containers have no series (%d NO-DATA workloads; the rest have other pods covered)",
+			r.CoverageMissing, r.CoverageTotal, noData)
+		if r.CoverageMissing == noData {
+			detail = fmt.Sprintf("%d of %d pod containers have no series (%d NO-DATA)",
+				r.CoverageMissing, r.CoverageTotal, noData)
+		}
+		add("METRICS_COVERAGE", detail)
 	}
 	for _, g := range r.Missing {
 		add("SIGNAL_"+g.Status, string(g.Signal)+": "+g.Detail)
