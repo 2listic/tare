@@ -183,7 +183,7 @@ func runCluster(sub string, o *options, namespaces []string) error {
 		return runCheck(ctx, os.Stdout, kc, namespaces, o.promURL, o.window, o.all)
 	}
 
-	progressf("reading pods from %s", scopeName(namespaces))
+	progressf("reading pods from %s", scopeLabel(namespaces, o.redact))
 	containers, err := kc.Containers(ctx, namespaces)
 	if err != nil {
 		return fail(err)
@@ -195,13 +195,17 @@ func runCluster(sub string, o *options, namespaces []string) error {
 	}
 	progressf("%d containers", len(containers))
 
-	src, err := buildSource(ctx, kc, o.promURL)
+	src, err := buildSource(ctx, kc, o.promURL, o.redact)
 	if err != nil {
 		return fail(err)
 	}
 	window, windowNote := resolveWindow(src, namespaces, o.window)
 
-	progressf("querying %s over %s", src.Describe(), windowNote)
+	srcLabel := src.Describe()
+	if o.redact {
+		srcLabel = report.RedactSource(srcLabel)
+	}
+	progressf("querying %s over %s", srcLabel, windowNote)
 	obs, err := src.Observe(namespaces, window)
 	if err != nil {
 		return fail(err)
@@ -434,7 +438,7 @@ func emit(r *report.Report, format string, verbose bool) error {
 // buildSource resolves where to read history from. An explicit URL always
 // wins; otherwise the cluster is asked where its own Prometheus is, and the
 // query goes through the API server proxy so no port forward is needed.
-func buildSource(ctx context.Context, kc *discover.Client, promURL string) (metrics.Source, error) {
+func buildSource(ctx context.Context, kc *discover.Client, promURL string, redact bool) (metrics.Source, error) {
 	if promURL != "" {
 		return metrics.NewProm(promURL), nil
 	}
@@ -453,11 +457,31 @@ func buildSource(ctx context.Context, kc *discover.Client, promURL string) (metr
 				"  or set TARE_PROMETHEUS in the environment.")
 	}
 
-	fmt.Fprintf(os.Stderr, "using %s\n", c)
+	fmt.Fprintf(os.Stderr, "using %s\n", formatCandidate(c, redact))
 	if others > 0 {
 		fmt.Fprintf(os.Stderr, "  (%d other candidates found; pass --prometheus to choose a different one)\n", others)
 	}
 	return prom, nil
+}
+
+func formatCandidate(c discover.PromCandidate, redact bool) string {
+	if !redact {
+		return c.String()
+	}
+	c.Namespace = report.HashName(c.Namespace)
+	c.Service = report.HashName(c.Service)
+	return c.String()
+}
+
+func scopeLabel(namespaces []string, redact bool) string {
+	if !redact || len(namespaces) == 0 {
+		return scopeName(namespaces)
+	}
+	hashed := make([]string, len(namespaces))
+	for i, ns := range namespaces {
+		hashed[i] = report.HashName(ns)
+	}
+	return scopeName(hashed)
 }
 
 // discoverProm asks the cluster where its own Prometheus is and returns a

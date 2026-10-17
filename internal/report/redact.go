@@ -105,15 +105,15 @@ func Redact(r *Report) {
 	// invites a reader to go looking for a namespace called 3f2a91c4.
 	// Single-spaced: the meta section is a table now, and two consecutive
 	// spaces are its column separator.
-	r.Source = redactSource(rep(r.Source)) + " | names redacted"
+	r.Source = RedactSource(rep(r.Source)) + " | names redacted"
 	r.Redacted = true
 }
 
-// redactSource hides where the data came from while keeping what kind of place
+// RedactSource hides where the data came from while keeping what kind of place
 // it was. The endpoint names a namespace and a service, or a hostname, none of
 // which appear anywhere else in the report and all of which describe the
 // employer rather than the workload.
-func redactSource(s string) string {
+func RedactSource(s string) string {
 	const proxy = "apiserver-proxy://"
 	if rest, ok := strings.CutPrefix(s, proxy); ok {
 		ns, svcPort, found := strings.Cut(rest, "/")
@@ -178,4 +178,9 @@ func repEach(rep func(string) string, in []string) []string {
 func hashName(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])[:8]
+}
+
+// HashName returns the stable 8-character hash Redact uses for a cluster name.
+func HashName(s string) string {
+	return hashName(s)
 }
