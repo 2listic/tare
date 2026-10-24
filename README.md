@@ -109,8 +109,25 @@ Prometheus you already have.
 
 ## Install
 
-tare is one static binary with no runtime dependencies. It is not published to a
-module proxy yet, so build it from this tree:
+tare is one static binary with no runtime dependencies. Linux and macOS:
+
+```sh
+os=$(uname -s | tr '[:upper:]' '[:lower:]')
+arch=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
+curl -fsSL "https://github.com/2listic/tare/releases/latest/download/kubectl-tare_${os}_${arch}.tar.gz" | tar xz kubectl-tare
+sudo install kubectl-tare /usr/local/bin/
+sudo ln -sf kubectl-tare /usr/local/bin/kubectl_complete-tare
+```
+
+Windows: `kubectl-tare_windows_amd64.zip` from the
+[releases page](https://github.com/2listic/tare/releases), with
+`kubectl-tare.exe` put anywhere on `PATH`. Every release has a `checksums.txt`.
+On macOS, an archive downloaded through a browser is quarantined and the binary
+will not start until you run `xattr -d com.apple.quarantine kubectl-tare`;
+`curl` does not set the flag.
+
+With Go installed, `go install github.com/2listic/tare/cmd/kubectl-tare@latest`
+works too. From this tree:
 
 ```sh
 ./tools/build.sh                                 # this machine, into bin/
@@ -124,12 +141,6 @@ tab completion for subcommands, flags, formats, verdicts and namespaces wherever
 kubectl's own completion is enabled. The build is stamped with a version;
 `kubectl tare version` prints it, and it is the first thing to quote when a
 number looks wrong.
-
-Building for someone else's laptop:
-
-```sh
-./tools/build.sh linux/amd64 darwin/arm64 darwin/amd64
-```
 
 ## First run
 ```sh
@@ -626,6 +637,14 @@ workload survives.
 extracted from 39 public Helm charts. See `test/corpus/README.md`.
 
 Design decisions and their reasoning are in `docs/plan.md`.
+
+A release is built from a clean tree and published locally, with no CI
+involved:
+
+```sh
+./tools/release.sh v0.1.0              # test, build every platform into dist/
+./tools/release.sh v0.1.0 --publish    # then tag HEAD, push the tag, create the GitHub release
+```
 
 ## License
 

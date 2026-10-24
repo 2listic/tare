@@ -3,9 +3,10 @@
 #
 # The version matters more here than it does for most tools: these binaries get
 # passed to people by hand, and when somebody reports that a recommendation was
-# wrong the first question is which build produced it. There is no git history
-# in this tree, so the stamp is the date plus a hash of the sources, which is
-# enough to tell two builds apart and to match a binary back to a tree.
+# wrong the first question is which build produced it. A release passes its tag
+# in TARE_VERSION (tools/release.sh does); otherwise the stamp is the date plus
+# a hash of the sources, which is enough to tell two builds apart and to match
+# a binary back to a tree.
 #
 #   ./tools/build.sh                     this machine
 #   ./tools/build.sh linux/amd64         one other platform
@@ -16,7 +17,7 @@ cd "$(dirname "$0")/.."
 mkdir -p bin
 
 sources=$(find cmd internal -name '*.go' ! -name '*_test.go' | sort | xargs shasum | shasum | cut -c1-8)
-version="v0.0.0+$(date -u +%Y%m%d).$sources"
+version=${TARE_VERSION:-"v0.0.0+$(date -u +%Y%m%d).$sources"}
 
 build() {
 	goos=${1%/*}
@@ -24,6 +25,7 @@ build() {
 	out="bin/kubectl-tare"
 	if [ "$1" != "native" ]; then
 		out="bin/kubectl-tare-$goos-$goarch"
+		[ "$goos" = windows ] && out="$out.exe"
 		export GOOS="$goos" GOARCH="$goarch"
 	fi
 	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$version" -o "$out" ./cmd/kubectl-tare
