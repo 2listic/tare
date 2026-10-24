@@ -61,7 +61,8 @@ counters of tasks as they exit. Both feed one shared state.
 **Startup (`main.go`).** It opens the host's `/proc`, detects the cgroup version (on
 v2 it walks `/sys/fs/cgroup`, on v1 the `cpu,cpuacct` tree), starts the exit listener
 in the background and serves `/metrics` on port 9105. If the exit listener fails, the
-agent keeps serving the live threads and logs why.
+agent keeps serving the live threads, logs why, exports `tare_agent_exit_listener_up 0`
+and fails `/healthz`, so the pod shows as not ready.
 
 **Finding containers (`cgroups.go`).** On every scrape it walks the cgroup tree and
 keeps the directories whose path contains a 64-hex container id
@@ -110,8 +111,16 @@ The groups never overlap:
   its place, so the counter never goes down in between;
 - a thread still visible in `/proc` after its exit record (a zombie, or a read racing
   the exit) is skipped in the live sum;
-- a placeholder whose record has not arrived after two scrapes becomes final
-  ("never received").
+- a thread that was missing from one read and is back is live again, and its
+  placeholder is deleted (only if it is the same thread: same container, counters
+  not lower, since a reused thread id starts from zero);
+- a placeholder whose record has not arrived within 30 seconds becomes final
+  ("never received"). The limit is time, not a number of scrapes, because several
+  scrapers make reads milliseconds apart; a record that arrives later still adds only
+  what the placeholder did not count.
+
+Scrapes are serialised: each one changes this state, and two whose reads were applied
+out of order would make a counter go down, which Prometheus takes for a reset.
 
 Containers whose cgroup is gone are dropped from the output.
 

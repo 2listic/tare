@@ -92,8 +92,11 @@ kubectl -n tare-agent rollout status ds/tare-agent
 kubectl -n tare-agent logs ds/tare-agent
 ```
 
-The log should show the cgroup version and `registered for exits on cpus ...`. If
-the exit listener cannot start, the agent keeps serving the live threads and logs why.
+The log should show the cgroup version and `registration sent for cpus ...`, and the
+pods should become ready. If the exit listener cannot register or stops (no
+`CAP_NET_ADMIN`, not in the host network namespace), the agent logs why, keeps serving
+the live threads, reports `tare_agent_exit_listener_up 0`, and fails its readiness
+probe: without exit records CPU wait misses every task that exited between scrapes.
 
 Why the pod is privileged:
 
@@ -218,10 +221,11 @@ curl -s localhost:9105/metrics | grep '^tare_'
 |---|---|
 | `tare_cpu_wait_seconds_total{id}` | CPU wait of the container (counter, seconds) |
 | `tare_cpu_run_seconds_total{id}` | CPU time the agent accounted for the container: compared with the kubelet's CPU usage it gives coverage |
+| `tare_agent_exit_listener_up` | 1 when the exit listener is registered and receiving. Must be 1: at 0 CPU wait misses exited tasks |
 | `tare_agent_exits_total` | exit records received |
 | `tare_agent_exits_unattributed_total` | exit records that could not be assigned to any container. Healthy: a few percent at most |
 | `tare_agent_exits_outside_containers_total` | exits of host processes, not in any container (normal) |
-| `tare_agent_exits_never_received_total` | threads whose exit record never arrived. Healthy: close to 0 |
+| `tare_agent_exits_never_received_total` | threads whose exit record did not arrive within 30 s of leaving `/proc`. Healthy: close to 0 |
 | `tare_agent_exits_layout_total{layout}` | records decoded per kernel record layout (`upstream`, `rhel10`) |
 | `tare_agent_exits_layout_unknown_total` | records from a kernel whose layout the agent does not know. Must be 0 |
 | `tare_agent_netlink_drops_total` | exit records the kernel dropped. Must be 0 |
