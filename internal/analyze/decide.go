@@ -178,7 +178,11 @@ func assessSaturation(f *Finding, th Thresholds) starved {
 			f.ThrottlePeak*100, th.ThrottleRatio*100, f.Throttle*100, util*100)))
 	}
 
-	if !wantsCPU && f.psiStalled(th) {
+	// A throttled container's stalls are its own quota, however low its
+	// averaged usage reads: CFS enforces the quota per 100ms period and a
+	// 5-minute rate hides the bursts that hit it. Blaming the node there
+	// contradicts LIMIT_NOT_NODE on the same row.
+	if !wantsCPU && f.psiStalled(th) && !f.throttleStalled(th) {
 		f.Reasons = append(f.Reasons, measured(NodeContention, f.PSIWaitingPeak, th.PSIWaiting, SecPerSec, fmt.Sprintf(
 			"CPU pressure peaked at %.3f s/s but the container used only %.0f%% of its allocation (window mean pressure %.4f), so this is contention on the node rather than a shortage of its own: a larger request would not remove it",
 			f.PSIWaitingPeak, util*100, f.PSIWaiting)))
@@ -258,6 +262,25 @@ func sizeCPULimit(f *Finding, th Thresholds, cpuStarved bool, recCPU, cpuCap int
 				"Usage is averaged over seconds and CFS enforces the quota every 100ms, so a limit sized from averaged usage (%dm) "+
 				"would throttle it harder: the limit is held, and only the request is sized from usage.",
 			f.CPULimit, f.ThrottlePeak*100, f.Throttle*100, limit)))
+		limit = f.CPULimit
+	}
+	// Nothing above measures whether a lower limit is enough. CFS spends the
+	// quota every 100ms and the finest CPU signal here is a rate averaged over
+	// a minute, so a container that needs 50m for a few milliseconds per
+	// request reads as using 5m, and a limit sized from that stretches every
+	// such burst across several periods. On msi Online Boutique ran at
+	// baseline error rate under tare's limits, restarted nothing, and served
+	// its product page at 4x the p95 latency, 18x at twice the load. Lowering
+	// a limit saves nothing the scheduler sees - it reserves the request - so
+	// a CPU limit is only ever held or raised, and none is added.
+	if !cpuStarved && limit > 0 && (f.CPULimit == 0 || limit < f.CPULimit) {
+		if f.CPULimit > 0 {
+			f.Reasons = append(f.Reasons, measured(CPULimitHeld, float64(f.CPULimit), float64(limit), Millicores, fmt.Sprintf(
+				"the %dm CPU limit is held. Usage sizes it at %dm, but CFS enforces a limit every 100ms and usage is a rate averaged over a minute, "+
+					"so nothing measured shows the lower limit covers this container's bursts; one that does not slows every request without an error or a restart. "+
+					"The scheduler reserves the request, not the limit, so only the request is sized from usage.",
+				f.CPULimit, limit)))
+		}
 		limit = f.CPULimit
 	}
 	if hasCPUCap && limit > cpuCap {

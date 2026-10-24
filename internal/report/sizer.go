@@ -15,6 +15,8 @@ import (
 // container the analyzer declined to size keeps its current requests, and so
 // does an IDLE one: the totals leave it out because idleness is not ruled out,
 // and a node count built on it would count the same unconfirmed saving twice.
+// UNVERIFIED likewise: the totals leave it out because the reduction cannot be
+// shown to be safe.
 func Sizer(fs []analyze.Finding) packing.Sizer {
 	type agg struct {
 		cpu, mem int64
@@ -28,7 +30,7 @@ func Sizer(fs []analyze.Finding) packing.Sizer {
 			a = &agg{usable: true}
 			byWorkload[key] = a
 		}
-		if f.RecCPU <= 0 || f.RecMem <= 0 || f.Verdict == analyze.Idle {
+		if f.RecCPU <= 0 || f.RecMem <= 0 || f.Verdict == analyze.Idle || f.Verdict == analyze.Unverified {
 			a.usable = false
 			continue
 		}

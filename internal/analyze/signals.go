@@ -85,6 +85,24 @@ func applySignalGaps(f *Finding) {
 	}
 }
 
+// holdTooYoung refuses a reduction measured over less than MinSamplesForSizing.
+// Low confidence alone does not stop one: -o patch and diff --write act on
+// any WASTE row, and a window of minutes is mostly startup, before the load
+// has arrived. Starvation still stands, because a container pinned at its
+// limit for five minutes was pinned at its limit.
+func holdTooYoung(f *Finding, th Thresholds) {
+	if f.Samples == 0 || f.Samples >= th.MinSamplesForSizing {
+		return
+	}
+	f.Reasons = append(f.Reasons, measured(TooFewSamples, float64(f.Samples), float64(th.MinSamplesForSizing), Count, fmt.Sprintf(
+		"only %d samples, under the %d needed before a reduction is proposed: usage this young describes startup, not the load the container will meet",
+		f.Samples, th.MinSamplesForSizing)))
+	f.Confidence = Low
+	if f.Verdict == Waste || f.Verdict == Healthy || f.Verdict == Idle {
+		f.Verdict = Unverified
+	}
+}
+
 func (f *Finding) hasAny(ss ...metrics.Signal) bool {
 	for _, s := range ss {
 		if f.hasSignal(s) {

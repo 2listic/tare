@@ -209,6 +209,10 @@ func (p *printer) printTotals(fs []analyze.Finding) {
 		row(w, "idle", strconv.Itoa(s.IdleWorkloads), CPUDelta(-s.IdleCPUMillicores), MemDelta(-s.IdleMemBytes),
 			"not_in_lower:"+string(analyze.IdleCaveat))
 	}
+	if s.UnverifiedWorkloads > 0 {
+		row(w, "unverified", strconv.Itoa(s.UnverifiedWorkloads), CPUDelta(-s.UnverifiedCPUMillicores), MemDelta(-s.UnverifiedMemBytes),
+			"not_in_lower:"+string(analyze.Unverified))
+	}
 	if s.MemUnknown > 0 {
 		row(w, "unknown", strconv.Itoa(s.MemUnknown), "-", "?", string(analyze.MemDemandCensored))
 	}

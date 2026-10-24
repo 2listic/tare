@@ -91,6 +91,9 @@ func (p *printer) printSummary(r *report.Report, listed int) {
 	if s.IdleWorkloads > 0 {
 		line += fmt.Sprintf("; %d IDLE not counted", s.IdleWorkloads)
 	}
+	if s.UnverifiedWorkloads > 0 {
+		line += fmt.Sprintf("; %d UNVERIFIED not counted", s.UnverifiedWorkloads)
+	}
 	fmt.Fprintln(p.diag, line)
 }
 

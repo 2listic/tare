@@ -81,12 +81,30 @@ type Client struct {
 	// silently removes a finding, so none of them is allowed to stay inside
 	// this package.
 	warnings []string
+	// denied marks the warnings the API server refused, as opposed to reads
+	// that timed out or failed in transit. A --timeout that expired was
+	// reported as an RBAC denial, which sends the reader to fix permissions
+	// they already have.
+	denied map[string]bool
 }
 
 // warn records a read that failed without being fatal.
 func (c *Client) warn(format string, args ...any) {
-	c.warnings = append(c.warnings, fmt.Sprintf(format, args...))
+	w := fmt.Sprintf(format, args...)
+	c.warnings = append(c.warnings, w)
+	for _, a := range args {
+		if err, ok := a.(error); ok && errors.IsForbidden(err) {
+			if c.denied == nil {
+				c.denied = map[string]bool{}
+			}
+			c.denied[w] = true
+		}
+	}
 }
+
+// Denied reports whether a warning from Warnings was a refusal by the API
+// server rather than a read that failed.
+func (c *Client) Denied(warning string) bool { return c.denied[warning] }
 
 // Warnings lists the non-fatal read failures of this run, usually RBAC. Each
 // one silently removes a finding from the report, so none of them is allowed
@@ -98,14 +116,6 @@ func (c *Client) Warnings() []string {
 		if !seen[w] {
 			seen[w] = true
 			out = append(out, w)
-		}
-	}
-	for _, x := range c.idxs {
-		for _, w := range x.warn {
-			if !seen[w] {
-				seen[w] = true
-				out = append(out, w)
-			}
 		}
 	}
 	sort.Strings(out)

@@ -102,6 +102,7 @@ func RunWithCluster(containers []discover.Container, obs map[metrics.Key]*metric
 		applyConstraints(f, c)
 		f.reconcileFloors(th)
 		applySignalGaps(f)
+		holdTooYoung(f, th)
 		out = append(out, *f)
 	}
 	sortFindings(out)

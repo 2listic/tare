@@ -29,6 +29,14 @@ type Savings struct {
 	IdleMemBytes      int64
 	IdleWorkloads     int
 
+	// UNVERIFIED is kept out for the same reason: its row says a reduction
+	// cannot be shown to be safe, and -o patch refuses to write it. Summed in,
+	// a cluster without PSI got a headline made entirely of reductions the
+	// report disowned row by row.
+	UnverifiedCPUMillicores int64
+	UnverifiedMemBytes      int64
+	UnverifiedWorkloads     int
+
 	// MemUnknown counts containers whose memory tare does not know
 	// (MemCensored). They contribute nothing to either direction, and a total
 	// that silently left them out would read as "nothing needs more memory".
@@ -46,6 +54,12 @@ func Totals(fs []analyze.Finding) Savings {
 			s.IdleWorkloads++
 			s.IdleCPUMillicores += max(c, 0)
 			s.IdleMemBytes += max(m, 0)
+			continue
+		}
+		if f.Verdict == analyze.Unverified {
+			s.UnverifiedWorkloads++
+			s.UnverifiedCPUMillicores += max(c, 0)
+			s.UnverifiedMemBytes += max(m, 0)
 			continue
 		}
 		if c > 0 || m > 0 {

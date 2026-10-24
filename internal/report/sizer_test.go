@@ -54,3 +54,13 @@ func TestSizerKeepsIdleWorkloadsAsTheyAre(t *testing.T) {
 		t.Error("an IDLE workload must keep its current requests in the replay")
 	}
 }
+
+func TestSizerKeepsUnverifiedWorkloadsAsTheyAre(t *testing.T) {
+	size := Sizer([]analyze.Finding{
+		{Namespace: "web", Workload: "Deployment/new", Container: "app", Verdict: analyze.Unverified,
+			CPURequest: 100, RecCPU: 10, MemRequest: 64 << 20, RecMem: 16 << 20},
+	})
+	if _, _, ok := size(discover.Pod{Namespace: "web", Workload: "Deployment/new"}); ok {
+		t.Error("an UNVERIFIED workload must keep its current requests in the replay")
+	}
+}

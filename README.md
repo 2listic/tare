@@ -73,6 +73,43 @@ tare                                                      384Mi   256Mi heap + 1
 tare reads the flag, reports it as the finding, and refuses to recommend below
 it. Sizing from observed usage alone cannot get there, however the floor is set.
 
+## Applied to a real application, then measured
+
+We applied tare's own patch to Google's
+[Online Boutique](https://github.com/GoogleCloudPlatform/microservices-demo)
+(v0.10.3, eleven services, locust load) and measured the shop afterwards. The
+probe made 300 product-page requests from a pod outside the patch. The same
+cluster ran every phase, each for 20 minutes.
+
+| sizing | users | errors | restarts | p95 | p99 |
+|---|---|---|---|---|---|
+| original manifests | 100 | 0.03% | 0 | 26-29ms | 52-54ms |
+| original manifests | 200 | 0.03-0.04% | 0 | 22-49ms | 52-78ms |
+| requests **and CPU limits** sized from usage | 100 | 0.03% | 0 | 113ms | 181ms |
+| requests **and CPU limits** sized from usage | 200 | 0.02% | 0 | **896ms** | **1115ms** |
+| tare: requests sized, CPU limits held | 100 | 0.27%¹ | 0 | 10ms | 29ms |
+| tare: requests sized, CPU limits held | 200 | 0.04% | 0 | 14ms | 46ms |
+
+The third and fourth rows are what an earlier tare recommended. Every check
+that looks at errors and restarts passes them. Latency got 18x worse at twice
+the load, because CFS enforces a CPU limit every 100ms and averaged usage cannot
+see the bursts that happen inside one period. tare now never lowers or adds a
+CPU limit (`CPU_LIMIT_HELD`), and the last two rows are the result. CPU
+requests went down by about 85%, about 1.3 cores, and memory requests by about
+1GiB. Latency stayed at baseline, with no service throttled above 1.4%.
+
+Read the 85% as a measure of how generous Boutique's demo manifests are, not
+as what tare will save you. Lower requests turn into money only when the
+autoscaler can remove nodes, and on this three-node cluster none could be.
+The runs lasted minutes, so they say nothing about a memory request that holds
+for an hour and fails over a week. The full record, including the earlier
+version that took the shop down, is in [KNOWN-FAILURES.md](KNOWN-FAILURES.md)
+(53).
+
+¹ This phase included the rollout of eleven single-replica services. The
+failures are most likely that rollout rather than the sizing, but this was not
+confirmed.
+
 *tare: the weighing term for subtracting the container's own weight.*
 
 ## What it prints
@@ -265,7 +302,9 @@ PODS  REASON
 what the recommendations take away, `raise` is what the starved containers need
 added, and the two are never netted. `idle` is kept out of `lower` because its
 own evidence says `IDLE_NOT_RULED_OUT`; the node replay leaves it at its current
-requests for the same reason. `unknown` counts containers whose memory tare
+requests for the same reason. `unverified`, when present, is the same for rows whose
+reduction cannot be shown safe (no saturation signal, or under an hour of
+samples): listed, never summed, never written by `-o patch`. `unknown` counts containers whose memory tare
 cannot size: `16Mi→?` above is `checkout`, OOMKilled at its limit. Usage above
 the limit that killed a container is never observed, so its peak is a lower
 bound on demand and not a measurement of it. tare says so, prints `?`, and
@@ -444,7 +483,12 @@ all, infers the ceiling from a memory plateau instead.
 **Requests and limits get different answers.** A request sized to a percentile
 must not double as a limit that throttles every burst. And a limit sized to
 steady state throttles every restart: measured on real workloads, a Tomcat draws
-**19.7x** more CPU booting than running.
+**19.7x** more CPU booting than running. tare never lowers a CPU limit and never
+adds one (`CPU_LIMIT_HELD`), because nothing averaged can show that a lower
+limit covers a container's bursts (see the Online Boutique table above). The
+scheduler reserves the request, not the limit, so the savings come from
+requests. A CPU limit only goes up, when a measured boot needs more than it
+allows.
 
 **It says when it cannot see.** Metrics differ between clusters. CFS throttle
 counters only exist for containers that already have a CPU limit; PSI exists for

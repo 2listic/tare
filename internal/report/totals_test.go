@@ -44,3 +44,21 @@ func TestIdleIsNotSummedIntoTheReduction(t *testing.T) {
 			s.IdleCPUMillicores, s.IdleWorkloads)
 	}
 }
+
+// The lab's boutique namespace, minutes old, was all UNVERIFIED and still made
+// "requests lowered on 12" in the summary while -o patch wrote none of them.
+func TestUnverifiedIsNotSummedIntoTheReduction(t *testing.T) {
+	fs := []analyze.Finding{
+		{Verdict: analyze.Waste, Pods: 1, CPURequest: 200, RecCPU: 100, MemRequest: 1 << 28, RecMem: 1 << 27},
+		{Verdict: analyze.Unverified, Pods: 1, CPURequest: 100, RecCPU: 10, MemRequest: 1 << 26, RecMem: 1 << 24},
+	}
+	s := Totals(fs)
+	if s.CPUMillicores != 100 || s.Workloads != 1 {
+		t.Errorf("reduction = %dm over %d containers, want 100m over 1: UNVERIFIED must not be in it",
+			s.CPUMillicores, s.Workloads)
+	}
+	if s.UnverifiedWorkloads != 1 || s.UnverifiedCPUMillicores != 90 {
+		t.Errorf("unverified = %dm over %d, want 90m over 1, counted apart so it stays visible",
+			s.UnverifiedCPUMillicores, s.UnverifiedWorkloads)
+	}
+}

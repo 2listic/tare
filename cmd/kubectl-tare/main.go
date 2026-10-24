@@ -333,7 +333,11 @@ func replayNodes(ctx context.Context, kc *discover.Client, inv discover.Inventor
 func signalGaps(src metrics.Source, kc *discover.Client) []analyze.SignalGap {
 	gaps := analyze.SummariseHealth(src.Health())
 	for _, w := range kc.Warnings() {
-		gaps = append(gaps, analyze.SignalGap{Signal: "rbac", Status: analyze.GapDenied, Detail: w})
+		g := analyze.SignalGap{Signal: "rbac", Status: analyze.GapDenied, Detail: w}
+		if !kc.Denied(w) {
+			g.Signal, g.Status = "kube-api", analyze.GapQueryFailed
+		}
+		gaps = append(gaps, g)
 	}
 	return gaps
 }

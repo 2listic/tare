@@ -1,6 +1,7 @@
 package report
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -124,5 +125,35 @@ func TestScrubberHidesPrometheusEndpointInErrors(t *testing.T) {
 	}
 	if got := scrub("context deadline exceeded"); got != "context deadline exceeded" {
 		t.Errorf("text with no endpoint was changed: %q", got)
+	}
+}
+
+// Checking a list of fields passes for any field nobody thought to list, which
+// is how PDB names, HPA names and the pin reasons all reached a redacted lab
+// report. This reads every field of the report instead, so a field added
+// later is covered without anyone remembering to.
+func TestRedactionLeavesNoNameAnywhereInTheReport(t *testing.T) {
+	r := redactable()
+	r.Findings[0].Constraints.HPAName = "ledger-hpa"
+	r.Findings[0].Constraints.VPAName = "ledger-vpa"
+	r.DrainBlockers = []string{"PodDisruptionBudget payments/ledger-pdb requires all 2 of its pods healthy"}
+	r.Nodes.PinReasons = map[string]int{
+		"PodDisruptionBudget payments/ledger-pdb allows no eviction, so its node cannot be drained": 2,
+		"has a nodeSelector": 3,
+	}
+	Redact(r)
+	out := fmt.Sprintf("%+v", *r)
+	for _, secret := range []string{"payments", "ledger-api", "ledger-pdb", "ledger-hpa", "ledger-vpa", "ip-10-0-3-41", "monitoring", "prometheus-operated"} {
+		if strings.Contains(out, secret) {
+			t.Errorf("%q survived redaction", secret)
+		}
+	}
+	if r.Nodes.PinReasons["has a nodeSelector"] != 3 {
+		t.Errorf("a pin reason with no name in it was lost: %v", r.Nodes.PinReasons)
+	}
+	// The header and the "using" line on stderr hash the endpoint
+	// independently; if they disagree the reader sees two Prometheuses.
+	if want := HashName("monitoring") + "/" + HashName("prometheus-operated"); !strings.Contains(r.Source, want) {
+		t.Errorf("source %q does not carry %q, the hash the using line prints", r.Source, want)
 	}
 }
