@@ -37,6 +37,11 @@ func NewProm(baseURL string) *Prom { return New(NewHTTPTransport(baseURL)) }
 
 func (p *Prom) Describe() string { return p.transport.Describe() }
 
+// ScrubErrors rewrites every query error with scrub before any caller sees it.
+func (p *Prom) ScrubErrors(scrub func(string) string) {
+	p.transport = scrubbed{p.transport, scrub}
+}
+
 type promResponse struct {
 	Status string `json:"status"`
 	Error  string `json:"error"`

@@ -39,13 +39,14 @@ func Render(out, diag io.Writer, r *report.Report, format string, verbose bool) 
 			Missing       []analyze.SignalGap  `json:"missingSignals"`
 			Coverage      string               `json:"coverage,omitempty"`
 			Demo          bool                 `json:"demo,omitempty"`
-		}{r.Findings, r.Nodes, r.Commitment, r.DrainBlockers, r.Missing, r.Coverage, r.Demo})
+			Footprint     *jsonFootprint       `json:"footprint,omitempty"`
+		}{r.Findings, r.Nodes, r.Commitment, r.DrainBlockers, r.Missing, r.Coverage, r.Demo, footprintJSON(r)})
 	case "html":
 		return writeHTML(out, r)
 	case "table":
 		p.printCompact(r)
 		if verbose {
-			p.printExplanations(r)
+			p.printExplanations(r, false)
 		} else {
 			p.compactHint()
 		}
@@ -58,10 +59,11 @@ func Render(out, diag io.Writer, r *report.Report, format string, verbose bool) 
 		p.printVerdicts(r.Findings)
 		p.printTotals(r.Findings)
 		p.printNodes(r)
+		p.printFootprint(r)
 		p.printDrainBlockers(r.DrainBlockers)
 		p.printCommitment(r.Commitment)
 		if verbose {
-			p.printExplanations(r)
+			p.printExplanations(r, true)
 		} else {
 			// stderr, so a redirected report stays pure data.
 			fmt.Fprintln(p.diag, "run with --explain for the reasoning behind every code above")
@@ -69,6 +71,23 @@ func Render(out, diag io.Writer, r *report.Report, format string, verbose bool) 
 		return nil
 	}
 	return UnknownFormat(format)
+}
+
+// jsonFootprint carries the factors beside the figures, so a consumer can
+// never read a kgCO2e value without the coefficient it was multiplied by.
+type jsonFootprint struct {
+	NodeWatts      float64               `json:"nodeWatts"`
+	GridGCO2PerKWh float64               `json:"gridGCO2ePerKWh,omitempty"`
+	GridSource     string                `json:"gridSource,omitempty"`
+	Rows           []report.FootprintRow `json:"rows"`
+}
+
+func footprintJSON(r *report.Report) *jsonFootprint {
+	rows := report.Footprint(r)
+	if rows == nil {
+		return nil
+	}
+	return &jsonFootprint{r.Factors.NodeWatts, r.Factors.GridGCO2PerKWh, r.Factors.GridSource, rows}
 }
 
 // Formats are every output format, the interactive one included, in the order

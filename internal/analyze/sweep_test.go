@@ -41,6 +41,9 @@ var scenarios = []scenario{
 			if d.MemGrowthPerHour > 0 && d.DeployEvery == 0 {
 				return analyze.Leaking
 			}
+			if d.Shape == simulate.NoRequests {
+				return analyze.Unset
+			}
 			return analyze.Waste
 		},
 	},

@@ -34,11 +34,13 @@ import (
 // stay in -o wide and the JSON; in the compact view they would bury the codes
 // that are news.
 var impliedCodes = map[analyze.Code]bool{
-	analyze.CPUUnderused: true, // WASTE with a smaller number
-	analyze.MemUnderused: true,
-	analyze.CPUFloor:     true, // the recommendation is the minimum, visibly
-	analyze.MemFloor:     true,
-	analyze.BestEffort:   true, // the current value reads "unset"
+	analyze.CPUUnderused:      true, // WASTE with a smaller number
+	analyze.MemUnderused:      true,
+	analyze.CPULimitUnderused: true, // compact view shows requests; -o wide and --explain carry limit reasons
+	analyze.MemLimitUnderused: true,
+	analyze.CPUFloor:          true, // the recommendation is the minimum, visibly
+	analyze.MemFloor:          true,
+	analyze.BestEffort:        true, // the current value reads "unset"
 }
 
 const maxWhyCodes = 2
@@ -51,7 +53,7 @@ func (p *printer) printCompact(r *report.Report) {
 	p.printCompactFindings(shown, r.BySavings)
 
 	fmt.Fprintln(p.diag)
-	p.printSummary(r)
+	p.printSummary(r, len(shown))
 	p.printWarnings(r)
 	if len(hidden) > 0 {
 		fmt.Fprintf(p.diag, "not listed: %s (--verdict %s)\n",
@@ -63,11 +65,19 @@ func (p *printer) printCompact(r *report.Report) {
 // Nodes lead because they are the only figure that maps to a bill; request
 // changes follow, signed, and never called "reclaimed": a lowered request
 // frees nothing anyone pays for until a node goes away.
-func (p *printer) printSummary(r *report.Report) {
+func (p *printer) printSummary(r *report.Report, listed int) {
 	s := report.Totals(r.Findings)
-	line := fmt.Sprintf("%d containers over %s:", len(r.Findings), r.WindowUsed)
+	head := fmt.Sprintf("%d containers", len(r.Findings))
+	if listed != len(r.Findings) {
+		head = fmt.Sprintf("%d containers (%d listed)", len(r.Findings), listed)
+	}
+	line := fmt.Sprintf("%s over %s:", head, r.WindowUsed)
 	if nodes, freed := nodeCells(r); nodes != "" {
-		line += fmt.Sprintf(" nodes freed %s of %s;", freed, nodes)
+		line += fmt.Sprintf(" nodes freed %s of %s", freed, nodes)
+		if f, ok := report.TareFootprint(r); ok {
+			line += fmt.Sprintf(" (%s kWh/yr, %s kgCO2e/yr at your factors)", footprintKWh(f), footprintKg(f))
+		}
+		line += ";"
 	}
 	line += fmt.Sprintf(" requests lowered on %d (%s CPU, %s mem)",
 		s.Workloads, CPUDelta(-s.CPUMillicores), MemDelta(-s.MemBytes))
@@ -108,9 +118,11 @@ func (p *printer) printWarnings(r *report.Report) {
 	if r.WindowUsed != r.Window {
 		add("WINDOW_SHORT", r.Window)
 	}
-	if r.CoverageTotal > 0 {
-		add("METRICS_COVERAGE", fmt.Sprintf("%d of %d containers have no series, listed as NO-DATA",
-			r.CoverageMissing, r.CoverageTotal))
+	// Counted before the display filters: r.Findings may be a --top or
+	// --verdict cut that no longer holds the NO-DATA rows this describes.
+	if c := r.CoverageCounts; c.Total > 0 {
+		add("METRICS_COVERAGE", fmt.Sprintf("%d of %d pod containers have no series (%s)",
+			c.Missing, c.Total, c.Split()))
 	}
 	for _, g := range r.Missing {
 		add("SIGNAL_"+g.Status, string(g.Signal)+": "+g.Detail)
@@ -164,19 +176,20 @@ func (p *printer) printWarnings(r *report.Report) {
 		return
 	}
 	w := tabwriter.NewWriter(p.diag, 0, 0, 2, ' ', 0)
-	width := termWidth() - len("warning  SIGNAL_NOT_MEASURED") - 2
 	for _, x := range ws {
-		fmt.Fprintf(w, "warning\t%s\t%s\n", x.code, Clip(x.detail, width))
+		fmt.Fprintf(w, "warning	%s	%s\n", x.code, x.detail)
 	}
 	w.Flush()
 }
 
 // compactRows drops the verdicts that ask nothing of the reader. They are
 // counted in a comment rather than vanishing, and an explicit --verdict lists
-// every row it selected.
+// every row it selected. UNSET containers reserve nothing today, so nothing is
+// being reduced and listing 35 near-identical "unset→" rows buries the findings
+// that need a decision.
 func compactRows(fs []analyze.Finding) (shown, hidden []analyze.Finding) {
 	for _, f := range fs {
-		if f.Verdict == analyze.Healthy || f.Verdict == analyze.NoData {
+		if f.Verdict == analyze.Healthy || f.Verdict == analyze.NoData || f.Verdict == analyze.Unset {
 			hidden = append(hidden, f)
 		} else {
 			shown = append(shown, f)

@@ -132,7 +132,7 @@ func buildHTMLView(r *report.Report) htmlView {
 	}
 
 	if r.NodeNote == "" {
-		v.Nodes = nodeLines(r.Nodes)
+		v.Nodes = append(nodeLines(r.Nodes), footprintLines(r)...)
 	}
 	return v
 }

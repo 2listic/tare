@@ -43,7 +43,11 @@ func Redact(r *Report) {
 	for i := range r.Findings {
 		f := &r.Findings[i]
 		add(f.Namespace)
-		add(f.Workload)
+		if _, name, ok := strings.Cut(f.Workload, "/"); ok {
+			add(name)
+		} else {
+			add(f.Workload)
+		}
 		add(f.Container)
 		add(f.Image)
 		for _, n := range f.Nodes {
@@ -75,7 +79,11 @@ func Redact(r *Report) {
 	for i := range r.Findings {
 		f := &r.Findings[i]
 		f.Namespace = rep(f.Namespace)
-		f.Workload = rep(f.Workload)
+		if kind, name, ok := strings.Cut(f.Workload, "/"); ok {
+			f.Workload = kind + "/" + rep(name)
+		} else {
+			f.Workload = rep(f.Workload)
+		}
 		f.Container = rep(f.Container)
 		f.Image = rep(f.Image)
 		f.Nodes = repEach(rep, f.Nodes)
@@ -105,15 +113,15 @@ func Redact(r *Report) {
 	// invites a reader to go looking for a namespace called 3f2a91c4.
 	// Single-spaced: the meta section is a table now, and two consecutive
 	// spaces are its column separator.
-	r.Source = redactSource(rep(r.Source)) + " | names redacted"
+	r.Source = RedactSource(rep(r.Source)) + " | names redacted"
 	r.Redacted = true
 }
 
-// redactSource hides where the data came from while keeping what kind of place
+// RedactSource hides where the data came from while keeping what kind of place
 // it was. The endpoint names a namespace and a service, or a hostname, none of
 // which appear anywhere else in the report and all of which describe the
 // employer rather than the workload.
-func redactSource(s string) string {
+func RedactSource(s string) string {
 	const proxy = "apiserver-proxy://"
 	if rest, ok := strings.CutPrefix(s, proxy); ok {
 		ns, svcPort, found := strings.Cut(rest, "/")
@@ -178,4 +186,37 @@ func repEach(rep func(string) string, in []string) []string {
 func hashName(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])[:8]
+}
+
+// HashName returns the stable 8-character hash Redact uses for a cluster name.
+func HashName(s string) string {
+	return hashName(s)
+}
+
+var urlToken = regexp.MustCompile(`[a-z][a-z0-9+.-]*://[^\s"]+`)
+
+// Scrubber returns what --redact does to a free-text error before it reaches
+// stderr. Errors are the one output Redact never sees, and the ones from a
+// Prometheus query carry the endpoint twice over: as the source tare
+// describes, and inside client-go's own text, which quotes the proxied URL
+// with the namespaces of the PromQL in its query string, or names the service
+// and namespace that refused it. Every URL is reduced the way the source line
+// is, and each of names is hashed the way the "using" line hashes it, so the
+// two agree.
+func Scrubber(names ...string) func(string) string {
+	hide := map[string]bool{}
+	for _, n := range names {
+		if n != "" {
+			hide[n] = true
+		}
+	}
+	return func(s string) string {
+		s = urlToken.ReplaceAllStringFunc(s, RedactSource)
+		return nameToken.ReplaceAllStringFunc(s, func(tok string) string {
+			if hide[tok] {
+				return hashName(tok)
+			}
+			return tok
+		})
+	}
 }

@@ -57,6 +57,9 @@ func TestNoRequestsIsNeverToldToShrink(t *testing.T) {
 			t.Errorf("%s has no reservation at all and was reported IDLE: there is nothing to reclaim, "+
 				"and the advice reads as delete it", name)
 		}
+		if f.Verdict != analyze.Unset {
+			t.Errorf("%s has no requests or limits: verdict = %s, want UNSET", name, f.Verdict)
+		}
 		// Reclaiming from nothing is the same error stated as a number.
 		if c, m := f.CPURequest-f.RecCPU, f.MemRequest-f.RecMem; c > 0 || m > 0 {
 			t.Errorf("%s claims a saving of %dm / %d bytes against requests of zero", name, c, m)
