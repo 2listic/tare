@@ -210,7 +210,7 @@ func runCluster(sub string, o *options, namespaces []string) error {
 	if err != nil {
 		return fail(err)
 	}
-	coverage, covMissing := coverageNote(containers, obs)
+	coverage, covCounts := coverageNote(containers, obs)
 
 	constraints := kc.LoadConstraints(ctx, namespaces)
 	// Listing nodes is a cluster-scoped read a namespace-scoped user may not
@@ -230,9 +230,7 @@ func runCluster(sub string, o *options, namespaces []string) error {
 	rep.Nodes, rep.Commitment, rep.DrainBlockers = replayNodes(ctx, kc, inv, findings, namespaces)
 	// After every cluster read, so a refusal anywhere above is in the report.
 	rep.Missing = signalGaps(src, kc)
-	if covMissing > 0 {
-		rep.CoverageMissing, rep.CoverageTotal = covMissing, len(containers)
-	}
+	rep.CoverageCounts = covCounts
 	if prom, ok := src.(*metrics.Prom); ok && o.output == "tui" {
 		rep.Usage = promUsage(prom, containers, window)
 	}
@@ -332,8 +330,15 @@ func signalGaps(src metrics.Source, kc *discover.Client) []analyze.SignalGap {
 // observation. It is worth a line in the header because every other total in
 // the report is computed over the containers that had data, and a backend
 // scraping two namespaces out of forty passes every signal check there is.
-func coverageNote(containers []discover.Container, obs map[metrics.Key]*metrics.Observation) (string, int) {
-	var missing int
+//
+// Pods and rows are different units: one NO-DATA row can stand for several
+// uncovered replicas, and an uncovered pod whose siblings were scraped is no
+// row at all. So the split is counted here, per pod and grouped the way
+// analyze groups rows, before any display filter can cut the rows down.
+func coverageNote(containers []discover.Container, obs map[metrics.Key]*metrics.Observation) (string, report.Coverage) {
+	type row struct{ ns, workload, container string }
+	missingIn, covered := map[row]int{}, map[row]bool{}
+	var cov report.Coverage
 	for _, c := range containers {
 		// An entry is not the same as data. kube-state-metrics publishes a
 		// series for every container in the cluster whether or not anything
@@ -341,17 +346,27 @@ func coverageNote(containers []discover.Container, obs map[metrics.Key]*metrics.
 		// still arrives here with an observation attached and nothing in it.
 		// Samples counts memory buckets, which is what every recommendation is
 		// actually built from.
+		k := row{c.Namespace, c.Workload, c.Name}
 		o := obs[metrics.Key{Namespace: c.Namespace, Pod: c.Pod, Container: c.Name}]
 		if o == nil || o.Samples == 0 {
-			missing++
+			cov.Missing++
+			missingIn[k]++
+		} else {
+			covered[k] = true
 		}
 	}
-	if missing == 0 {
-		return "", 0
+	if cov.Missing == 0 {
+		return "", cov
 	}
-	return fmt.Sprintf("metrics cover %d of %d pod containers; the other %d have no series in this backend "+
-		"(a workload with no covered pods appears as NO-DATA; one with other pods covered is sized from those pods)",
-		len(containers)-missing, len(containers), missing), missing
+	cov.Total = len(containers)
+	for k, n := range missingIn {
+		if !covered[k] {
+			cov.Dark += n
+			cov.DarkRows++
+		}
+	}
+	return fmt.Sprintf("metrics cover %d of %d pod containers; the other %d have no series in this backend (%s)",
+		cov.Total-cov.Missing, cov.Total, cov.Missing, cov.Split()), cov
 }
 
 // commands are the subcommands; "report" is the default.
@@ -440,7 +455,11 @@ func emit(r *report.Report, format string, verbose bool) error {
 // query goes through the API server proxy so no port forward is needed.
 func buildSource(ctx context.Context, kc *discover.Client, promURL string, redact bool) (metrics.Source, error) {
 	if promURL != "" {
-		return metrics.NewProm(promURL), nil
+		prom := metrics.NewProm(promURL)
+		if redact {
+			prom.ScrubErrors(report.Scrubber())
+		}
+		return prom, nil
 	}
 
 	prom, c, others, err := discoverProm(ctx, kc)
@@ -457,6 +476,9 @@ func buildSource(ctx context.Context, kc *discover.Client, promURL string, redac
 				"  or set TARE_PROMETHEUS in the environment.")
 	}
 
+	if redact {
+		prom.ScrubErrors(report.Scrubber(c.Namespace, c.Service))
+	}
 	fmt.Fprintf(os.Stderr, "using %s\n", formatCandidate(c, redact))
 	if others > 0 {
 		fmt.Fprintf(os.Stderr, "  (%d other candidates found; pass --prometheus to choose a different one)\n", others)

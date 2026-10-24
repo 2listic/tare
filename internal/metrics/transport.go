@@ -52,3 +52,27 @@ func (t *HTTPTransport) Get(ctx context.Context, path string, params url.Values)
 	defer resp.Body.Close()
 	return io.ReadAll(resp.Body)
 }
+
+// scrubbed passes every error through scrub, so a source built under
+// --redact cannot print the endpoint it was asked to hide, whichever caller
+// ends up printing the error. The original stays reachable for errors.Is.
+type scrubbed struct {
+	Transport
+	scrub func(string) string
+}
+
+func (t scrubbed) Get(ctx context.Context, path string, params url.Values) ([]byte, error) {
+	b, err := t.Transport.Get(ctx, path, params)
+	if err != nil {
+		return nil, scrubbedError{t.scrub(err.Error()), err}
+	}
+	return b, nil
+}
+
+type scrubbedError struct {
+	msg string
+	err error
+}
+
+func (e scrubbedError) Error() string { return e.msg }
+func (e scrubbedError) Unwrap() error { return e.err }

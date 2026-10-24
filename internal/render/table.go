@@ -114,15 +114,11 @@ func (p *printer) printWarnings(r *report.Report) {
 	if r.WindowUsed != r.Window {
 		add("WINDOW_SHORT", r.Window)
 	}
-	if r.CoverageTotal > 0 {
-		noData := report.Tally(r.Findings)[analyze.NoData]
-		detail := fmt.Sprintf("%d of %d pod containers have no series (%d NO-DATA workloads; the rest have other pods covered)",
-			r.CoverageMissing, r.CoverageTotal, noData)
-		if r.CoverageMissing == noData {
-			detail = fmt.Sprintf("%d of %d pod containers have no series (%d NO-DATA)",
-				r.CoverageMissing, r.CoverageTotal, noData)
-		}
-		add("METRICS_COVERAGE", detail)
+	// Counted before the display filters: r.Findings may be a --top or
+	// --verdict cut that no longer holds the NO-DATA rows this describes.
+	if c := r.CoverageCounts; c.Total > 0 {
+		add("METRICS_COVERAGE", fmt.Sprintf("%d of %d pod containers have no series (%s)",
+			c.Missing, c.Total, c.Split()))
 	}
 	for _, g := range r.Missing {
 		add("SIGNAL_"+g.Status, string(g.Signal)+": "+g.Detail)

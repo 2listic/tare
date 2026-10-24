@@ -35,10 +35,8 @@ type Report struct {
 	// kubelet has stopped reporting, produces a report that looks complete and
 	// silently describes a fraction of the cluster. Those containers do appear,
 	// as NO-DATA rows, but nothing else in the report adds them up.
-	Coverage string
-	// CoverageMissing of CoverageTotal containers had no series. Zero total
-	// means full coverage.
-	CoverageMissing, CoverageTotal int
+	Coverage       string
+	CoverageCounts Coverage
 
 	// Redacted marks a report whose names were replaced with hashes, so every
 	// renderer can say so rather than leave a reader hunting for a namespace

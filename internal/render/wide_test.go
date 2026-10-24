@@ -409,7 +409,7 @@ func TestCompactCollapsesUnsetAndCountsListedRows(t *testing.T) {
 	noData := r.Findings[0]
 	noData.Verdict, noData.Container = analyze.NoData, "ghost"
 	r.Findings = append(r.Findings, unset, noData)
-	r.CoverageMissing, r.CoverageTotal = 9, 75
+	r.CoverageCounts = report.Coverage{Missing: 9, Total: 75, Dark: 1, DarkRows: 1}
 
 	out, stderr := renderCompact(t, r)
 	if strings.Contains(out, "node-agent") {
@@ -418,7 +418,7 @@ func TestCompactCollapsesUnsetAndCountsListedRows(t *testing.T) {
 	if !strings.Contains(stderr, "3 containers (1 listed) over 2w:") {
 		t.Errorf("summary does not report total vs listed containers:\n%s", stderr)
 	}
-	if !strings.Contains(stderr, "9 of 75 pod containers have no series (1 NO-DATA workloads; the rest have other pods covered)") {
+	if !strings.Contains(stderr, "9 of 75 pod containers have no series (1 in 1 NO-DATA row; 8 in rows sized from their other pods)") {
 		t.Errorf("METRICS_COVERAGE warning does not distinguish pod containers from NO-DATA workloads:\n%s", stderr)
 	}
 	if !strings.Contains(stderr, "not listed: 1 UNSET, 1 NO-DATA") {
@@ -442,5 +442,18 @@ func TestExplainPrintsCommitmentTableAndOnlyApplicableLegend(t *testing.T) {
 	}
 	if strings.Contains(out, "CPU_OVERCOMMIT_HEAVY: looks empty") {
 		t.Errorf("table --explain printed legend for CPU_OVERCOMMIT_HEAVY when no node has it:\n%s", out)
+	}
+}
+
+// The coverage warning describes the cluster, not the rows a --top or
+// --verdict left standing: cutting the NO-DATA row out of view must not turn
+// it into "0 NO-DATA".
+func TestCoverageWarningIgnoresDisplayFilters(t *testing.T) {
+	r := sampleReport()
+	r.Findings = r.Findings[:1]
+	r.CoverageCounts = report.Coverage{Missing: 2, Total: 37, Dark: 1, DarkRows: 1}
+	_, stderr := renderCompact(t, r)
+	if !strings.Contains(stderr, "2 of 37 pod containers have no series (1 in 1 NO-DATA row; 1 in rows sized from their other pods)") {
+		t.Errorf("coverage warning changed with the filtered rows:\n%s", stderr)
 	}
 }

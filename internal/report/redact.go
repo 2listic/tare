@@ -192,3 +192,31 @@ func hashName(s string) string {
 func HashName(s string) string {
 	return hashName(s)
 }
+
+var urlToken = regexp.MustCompile(`[a-z][a-z0-9+.-]*://[^\s"]+`)
+
+// Scrubber returns what --redact does to a free-text error before it reaches
+// stderr. Errors are the one output Redact never sees, and the ones from a
+// Prometheus query carry the endpoint twice over: as the source tare
+// describes, and inside client-go's own text, which quotes the proxied URL
+// with the namespaces of the PromQL in its query string, or names the service
+// and namespace that refused it. Every URL is reduced the way the source line
+// is, and each of names is hashed the way the "using" line hashes it, so the
+// two agree.
+func Scrubber(names ...string) func(string) string {
+	hide := map[string]bool{}
+	for _, n := range names {
+		if n != "" {
+			hide[n] = true
+		}
+	}
+	return func(s string) string {
+		s = urlToken.ReplaceAllStringFunc(s, RedactSource)
+		return nameToken.ReplaceAllStringFunc(s, func(tok string) string {
+			if hide[tok] {
+				return hashName(tok)
+			}
+			return tok
+		})
+	}
+}
