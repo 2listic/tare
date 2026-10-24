@@ -64,6 +64,10 @@ type Report struct {
 	// opens. Nil when there is nothing to query; UsageNote says why.
 	Usage     func(analyze.Finding) (cpu, mem metrics.Series, err error)
 	UsageNote string
+
+	// Factors convert the node delta into energy and emissions; zero when
+	// the reader supplied none, and then no footprint is printed.
+	Factors Factors
 }
 
 // NodesNotComputed is why there is no node count to show, or "" when there is one.
@@ -72,6 +76,11 @@ func NodesNotComputed(r *Report) string {
 		return r.NodeNote
 	}
 	if !r.Nodes.Trustworthy {
+		// A Result nobody filled in is untrustworthy with no reason given,
+		// and an empty reason here reads as "computed".
+		if r.Nodes.SelfCheck == "" {
+			return "the node replay did not run"
+		}
 		return r.Nodes.SelfCheck
 	}
 	return ""

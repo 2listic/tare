@@ -457,3 +457,25 @@ func TestCoverageWarningIgnoresDisplayFilters(t *testing.T) {
 		t.Errorf("coverage warning changed with the filtered rows:\n%s", stderr)
 	}
 }
+
+// The footprint section only exists when asked for, carries its factors on
+// the line under it, and marks tare's row as a lower bound like FREED.
+func TestFootprintSection(t *testing.T) {
+	if out := renderTable(t, packedReport(), false); strings.Contains(out, "section=footprint") {
+		t.Error("footprint section printed with no factors given")
+	}
+	r := packedReport()
+	r.Factors = report.Factors{NodeWatts: 100}
+	out := renderTable(t, r, false)
+	sec := out[strings.Index(out, "# section=footprint"):]
+	if !strings.Contains(sec, "# factors: node_watts=100 grid_gco2e_kwh=unset") {
+		t.Errorf("factors line missing:\n%s", sec)
+	}
+	if !strings.Contains(strings.Join(strings.Fields(sec), " "), "packed_after >=2 tare >=1752 ?") {
+		t.Errorf("tare row should be >=2 nodes, >=1752 kWh, ? kgCO2e:\n%s", sec)
+	}
+	_, diag := renderCompact(t, r)
+	if !strings.Contains(diag, "(>=1752 kWh/yr, ? kgCO2e/yr at your factors)") {
+		t.Errorf("summary line does not carry the footprint:\n%s", diag)
+	}
+}

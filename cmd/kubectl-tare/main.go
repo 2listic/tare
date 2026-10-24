@@ -36,6 +36,10 @@ type options struct {
 	top                                      int
 	bySavings, all, explain, demo, redact    bool
 	showVersion                              bool
+	nodeWatts                                float64
+	gridIntensity                            string
+	grid                                     float64
+	gridSource                               string
 
 	// diff only
 	repo, kustomize, prBody string
@@ -67,6 +71,8 @@ func defineFlags(fs *flag.FlagSet) *options {
 	fs.BoolVar(&o.write, "write", false, "actually modify the files under --repo (default is to show what would change)")
 	fs.StringVar(&o.kustomize, "kustomize", "", "directory to write strategic-merge patches into, for repositories managed with Kustomize")
 	fs.StringVar(&o.prBody, "pr-body", "", "write the pull request body, with the evidence, to this file instead of stdout")
+	fs.Float64Var(&o.nodeWatts, "node-watts", 0, "power saved per node removed, in watts, to express the node delta as energy (-o wide footprint section). Use the node's idle draw, not its loaded draw: the workload moves to another node and takes its dynamic power with it. Multiply by PUE yourself to include facility overhead")
+	fs.StringVar(&o.gridIntensity, "grid-intensity", "", "grid carbon intensity where the nodes run, to express the energy as emissions: a number in gCO2e/kWh, or a country (italy, france, united-kingdom, DEU) for its latest annual average from Ember's yearly data. Needs --node-watts")
 	fs.Var(durationValue{&o.window}, "window",
 		"observation window: 30m, 12h, 7d, 2w. Longer is better; most clusters keep about 15 days.")
 	return o
@@ -117,6 +123,14 @@ func run() error {
 	if err := checkCombination(sub, o.output, o.demo, o.redact, set); err != nil {
 		return err
 	}
+	if err := checkFactors(sub, o.nodeWatts, set); err != nil {
+		return err
+	}
+	if o.gridIntensity != "" {
+		if o.grid, o.gridSource, err = report.ParseGrid(o.gridIntensity); err != nil {
+			return err
+		}
+	}
 	// Also before any cluster call: a mistyped --repo used to be found only
 	// after the whole run, minutes of Prometheus queries later.
 	if sub == "diff" {
@@ -153,6 +167,7 @@ func splitNamespaces(flagValue string) []string {
 // cluster would remove pods from nodes they are still occupying and
 // manufacture free capacity out of a --top flag.
 func (o *options) applyView(rep *report.Report) {
+	rep.Factors = report.Factors{NodeWatts: o.nodeWatts, GridGCO2PerKWh: o.grid, GridSource: o.gridSource}
 	rep.VerdictFiltered, rep.BySavings = o.verdicts != "", o.bySavings
 	rep.Findings = report.FilterVerdicts(rep.Findings, o.verdicts)
 	if o.bySavings {
@@ -436,6 +451,26 @@ func checkCombination(sub, output string, demo, redact bool, set map[string]bool
 	}
 	if redact {
 		return fmt.Errorf("--redact cannot be used with diff: the manifests carry the real names")
+	}
+	return nil
+}
+
+// checkFactors rejects footprint factors that would print a figure meaning
+// nothing. A grid intensity with no wattage has nothing to multiply, and
+// accepting it silently would print no footprint to a reader who asked for
+// one.
+func checkFactors(sub string, watts float64, set map[string]bool) error {
+	if sub != "report" && (set["node-watts"] || set["grid-intensity"]) {
+		return fmt.Errorf("--node-watts and --grid-intensity only apply to report")
+	}
+	if watts < 0 {
+		return fmt.Errorf("--node-watts cannot be negative")
+	}
+	if set["node-watts"] && watts == 0 {
+		return fmt.Errorf("--node-watts 0 would report every freed node as saving nothing; omit the flag instead")
+	}
+	if set["grid-intensity"] && !set["node-watts"] {
+		return fmt.Errorf("--grid-intensity needs --node-watts: emissions are energy times intensity, and tare does not measure node power")
 	}
 	return nil
 }

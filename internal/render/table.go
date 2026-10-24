@@ -73,7 +73,11 @@ func (p *printer) printSummary(r *report.Report, listed int) {
 	}
 	line := fmt.Sprintf("%s over %s:", head, r.WindowUsed)
 	if nodes, freed := nodeCells(r); nodes != "" {
-		line += fmt.Sprintf(" nodes freed %s of %s;", freed, nodes)
+		line += fmt.Sprintf(" nodes freed %s of %s", freed, nodes)
+		if f, ok := report.TareFootprint(r); ok {
+			line += fmt.Sprintf(" (%s kWh/yr, %s kgCO2e/yr at your factors)", footprintKWh(f), footprintKg(f))
+		}
+		line += ";"
 	}
 	line += fmt.Sprintf(" requests lowered on %d (%s CPU, %s mem)",
 		s.Workloads, CPUDelta(-s.CPUMillicores), MemDelta(-s.MemBytes))

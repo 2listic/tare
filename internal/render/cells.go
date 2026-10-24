@@ -9,6 +9,7 @@ import (
 	"github.com/mfranzon/tare/internal/analyze"
 	"github.com/mfranzon/tare/internal/ceilings"
 	"github.com/mfranzon/tare/internal/packing"
+	"github.com/mfranzon/tare/internal/report"
 )
 
 // termWidth is the terminal width to lay the table out for. COLUMNS is what a
@@ -181,4 +182,37 @@ func freedLabel(p packing.Result) string {
 		freed = ">=" + freed
 	}
 	return freed
+}
+
+func footprintNodes(f report.FootprintRow) string {
+	return lowerBound(f, strconv.Itoa(f.Nodes))
+}
+
+func footprintKWh(f report.FootprintRow) string {
+	return lowerBound(f, fmt.Sprintf("%.0f", f.KWhYear))
+}
+
+// footprintKg is "?" without a grid intensity: unknown, never zero.
+func footprintKg(f report.FootprintRow) string {
+	if f.KgCO2eYear == nil {
+		return "?"
+	}
+	return lowerBound(f, fmt.Sprintf("%.0f", *f.KgCO2eYear))
+}
+
+func lowerBound(f report.FootprintRow, v string) string {
+	if f.LowerBound {
+		return ">=" + v
+	}
+	return v
+}
+
+// factorsNote is the provenance line every footprint figure is printed with.
+func factorsNote(f report.Factors) string {
+	grid := "unset"
+	if f.GridGCO2PerKWh > 0 {
+		grid = strconv.FormatFloat(f.GridGCO2PerKWh, 'f', -1, 64) + " grid_source=" + f.GridSource
+	}
+	return fmt.Sprintf("node_watts=%s grid_gco2e_kwh=%s; node_watts supplied by the user; operational energy of removed nodes only, embodied carbon excluded",
+		strconv.FormatFloat(f.NodeWatts, 'f', -1, 64), grid)
 }
