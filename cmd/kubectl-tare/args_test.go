@@ -92,3 +92,29 @@ func TestIgnoredCombinationsAreRejected(t *testing.T) {
 		}
 	}
 }
+
+func TestCheckFactors(t *testing.T) {
+	for _, tc := range []struct {
+		sub   string
+		watts float64
+		set   []string
+		ok    bool
+	}{
+		{"report", 0, nil, true},
+		{"report", 90, []string{"node-watts"}, true},
+		{"report", 90, []string{"node-watts", "grid-intensity"}, true},
+		{"report", 0, []string{"grid-intensity"}, false},
+		{"report", 0, []string{"node-watts"}, false},
+		{"report", -5, []string{"node-watts"}, false},
+		{"check", 90, []string{"node-watts"}, false},
+		{"diff", 90, []string{"node-watts"}, false},
+	} {
+		set := map[string]bool{}
+		for _, s := range tc.set {
+			set[s] = true
+		}
+		if err := checkFactors(tc.sub, tc.watts, set); (err == nil) != tc.ok {
+			t.Errorf("%s watts=%v set=%v: err=%v, want ok=%v", tc.sub, tc.watts, tc.set, err, tc.ok)
+		}
+	}
+}

@@ -101,3 +101,28 @@ func TestRedactionPreservesCustomResourceKinds(t *testing.T) {
 		t.Errorf("custom controller kind was hashed in reason text: %q", r.Findings[0].Reasons[0].Text)
 	}
 }
+
+// The strings are what tare printed against the lab cluster under --redact
+// when the proxied query failed: the "using" line was hashed and these were not.
+func TestScrubberHidesPrometheusEndpointInErrors(t *testing.T) {
+	scrub := Scrubber("monitoring", "prometheus-operated")
+	for _, raw := range []string{
+		"querying apiserver-proxy://monitoring/prometheus-operated:http-web: unknown (get services http:prometheus-operated:http-web)",
+		`querying apiserver-proxy://monitoring/prometheus-operated:http-web: Get "https://192.168.1.122:6443/api/v1/namespaces/monitoring/services/http:prometheus-operated:http-web/proxy/api/v1/query?query=sum+by+%28pod%29+%28x%7Bnamespace%3D~%22payments%22%7D%29": context deadline exceeded`,
+		`services "http:prometheus-operated:http-web" is forbidden: User "system:serviceaccount:default:x" cannot get resource "services/proxy" in API group "" in the namespace "monitoring"`,
+	} {
+		got := scrub(raw)
+		for _, leak := range []string{"monitoring", "prometheus-operated", "192.168.1.122", "payments"} {
+			if strings.Contains(got, leak) {
+				t.Errorf("%q survives scrubbing:\n%s", leak, got)
+			}
+		}
+		// The hashes must match the "using" line, or the reader sees two endpoints.
+		if !strings.Contains(got, HashName("monitoring")) && !strings.Contains(got, HashName("192.168.1.122")) {
+			t.Errorf("scrubbed text carries neither hash of the using line:\n%s", got)
+		}
+	}
+	if got := scrub("context deadline exceeded"); got != "context deadline exceeded" {
+		t.Errorf("text with no endpoint was changed: %q", got)
+	}
+}

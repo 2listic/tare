@@ -74,6 +74,9 @@ func (p *printer) explainNodes(r *report.Report) {
 	for _, l := range nodeLines(r.Nodes) {
 		fmt.Fprintf(p.out, "  %s\n", l)
 	}
+	for _, l := range footprintLines(r) {
+		fmt.Fprintf(p.out, "  %s\n", l)
+	}
 }
 
 func (p *printer) explainCommitment(cs []packing.Commitment, wide bool) {

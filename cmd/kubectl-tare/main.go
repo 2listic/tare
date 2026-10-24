@@ -36,6 +36,10 @@ type options struct {
 	top                                      int
 	bySavings, all, explain, demo, redact    bool
 	showVersion                              bool
+	nodeWatts                                float64
+	gridIntensity                            string
+	grid                                     float64
+	gridSource                               string
 
 	// diff only
 	repo, kustomize, prBody string
@@ -67,6 +71,8 @@ func defineFlags(fs *flag.FlagSet) *options {
 	fs.BoolVar(&o.write, "write", false, "actually modify the files under --repo (default is to show what would change)")
 	fs.StringVar(&o.kustomize, "kustomize", "", "directory to write strategic-merge patches into, for repositories managed with Kustomize")
 	fs.StringVar(&o.prBody, "pr-body", "", "write the pull request body, with the evidence, to this file instead of stdout")
+	fs.Float64Var(&o.nodeWatts, "node-watts", 0, "power saved per node removed, in watts, to express the node delta as energy (-o wide footprint section). Use the node's idle draw, not its loaded draw: the workload moves to another node and takes its dynamic power with it. Multiply by PUE yourself to include facility overhead")
+	fs.StringVar(&o.gridIntensity, "grid-intensity", "", "grid carbon intensity where the nodes run, to express the energy as emissions: a number in gCO2e/kWh, or a country (italy, france, united-kingdom, DEU) for its latest annual average from Ember's yearly data. Needs --node-watts")
 	fs.Var(durationValue{&o.window}, "window",
 		"observation window: 30m, 12h, 7d, 2w. Longer is better; most clusters keep about 15 days.")
 	return o
@@ -117,6 +123,14 @@ func run() error {
 	if err := checkCombination(sub, o.output, o.demo, o.redact, set); err != nil {
 		return err
 	}
+	if err := checkFactors(sub, o.nodeWatts, set); err != nil {
+		return err
+	}
+	if o.gridIntensity != "" {
+		if o.grid, o.gridSource, err = report.ParseGrid(o.gridIntensity); err != nil {
+			return err
+		}
+	}
 	// Also before any cluster call: a mistyped --repo used to be found only
 	// after the whole run, minutes of Prometheus queries later.
 	if sub == "diff" {
@@ -153,6 +167,7 @@ func splitNamespaces(flagValue string) []string {
 // cluster would remove pods from nodes they are still occupying and
 // manufacture free capacity out of a --top flag.
 func (o *options) applyView(rep *report.Report) {
+	rep.Factors = report.Factors{NodeWatts: o.nodeWatts, GridGCO2PerKWh: o.grid, GridSource: o.gridSource}
 	rep.VerdictFiltered, rep.BySavings = o.verdicts != "", o.bySavings
 	rep.Findings = report.FilterVerdicts(rep.Findings, o.verdicts)
 	if o.bySavings {
@@ -210,7 +225,7 @@ func runCluster(sub string, o *options, namespaces []string) error {
 	if err != nil {
 		return fail(err)
 	}
-	coverage, covMissing := coverageNote(containers, obs)
+	coverage, covCounts := coverageNote(containers, obs)
 
 	constraints := kc.LoadConstraints(ctx, namespaces)
 	// Listing nodes is a cluster-scoped read a namespace-scoped user may not
@@ -230,9 +245,7 @@ func runCluster(sub string, o *options, namespaces []string) error {
 	rep.Nodes, rep.Commitment, rep.DrainBlockers = replayNodes(ctx, kc, inv, findings, namespaces)
 	// After every cluster read, so a refusal anywhere above is in the report.
 	rep.Missing = signalGaps(src, kc)
-	if covMissing > 0 {
-		rep.CoverageMissing, rep.CoverageTotal = covMissing, len(containers)
-	}
+	rep.CoverageCounts = covCounts
 	if prom, ok := src.(*metrics.Prom); ok && o.output == "tui" {
 		rep.Usage = promUsage(prom, containers, window)
 	}
@@ -332,8 +345,15 @@ func signalGaps(src metrics.Source, kc *discover.Client) []analyze.SignalGap {
 // observation. It is worth a line in the header because every other total in
 // the report is computed over the containers that had data, and a backend
 // scraping two namespaces out of forty passes every signal check there is.
-func coverageNote(containers []discover.Container, obs map[metrics.Key]*metrics.Observation) (string, int) {
-	var missing int
+//
+// Pods and rows are different units: one NO-DATA row can stand for several
+// uncovered replicas, and an uncovered pod whose siblings were scraped is no
+// row at all. So the split is counted here, per pod and grouped the way
+// analyze groups rows, before any display filter can cut the rows down.
+func coverageNote(containers []discover.Container, obs map[metrics.Key]*metrics.Observation) (string, report.Coverage) {
+	type row struct{ ns, workload, container string }
+	missingIn, covered := map[row]int{}, map[row]bool{}
+	var cov report.Coverage
 	for _, c := range containers {
 		// An entry is not the same as data. kube-state-metrics publishes a
 		// series for every container in the cluster whether or not anything
@@ -341,17 +361,27 @@ func coverageNote(containers []discover.Container, obs map[metrics.Key]*metrics.
 		// still arrives here with an observation attached and nothing in it.
 		// Samples counts memory buckets, which is what every recommendation is
 		// actually built from.
+		k := row{c.Namespace, c.Workload, c.Name}
 		o := obs[metrics.Key{Namespace: c.Namespace, Pod: c.Pod, Container: c.Name}]
 		if o == nil || o.Samples == 0 {
-			missing++
+			cov.Missing++
+			missingIn[k]++
+		} else {
+			covered[k] = true
 		}
 	}
-	if missing == 0 {
-		return "", 0
+	if cov.Missing == 0 {
+		return "", cov
 	}
-	return fmt.Sprintf("metrics cover %d of %d pod containers; the other %d have no series in this backend "+
-		"(a workload with no covered pods appears as NO-DATA; one with other pods covered is sized from those pods)",
-		len(containers)-missing, len(containers), missing), missing
+	cov.Total = len(containers)
+	for k, n := range missingIn {
+		if !covered[k] {
+			cov.Dark += n
+			cov.DarkRows++
+		}
+	}
+	return fmt.Sprintf("metrics cover %d of %d pod containers; the other %d have no series in this backend (%s)",
+		cov.Total-cov.Missing, cov.Total, cov.Missing, cov.Split()), cov
 }
 
 // commands are the subcommands; "report" is the default.
@@ -425,6 +455,26 @@ func checkCombination(sub, output string, demo, redact bool, set map[string]bool
 	return nil
 }
 
+// checkFactors rejects footprint factors that would print a figure meaning
+// nothing. A grid intensity with no wattage has nothing to multiply, and
+// accepting it silently would print no footprint to a reader who asked for
+// one.
+func checkFactors(sub string, watts float64, set map[string]bool) error {
+	if sub != "report" && (set["node-watts"] || set["grid-intensity"]) {
+		return fmt.Errorf("--node-watts and --grid-intensity only apply to report")
+	}
+	if watts < 0 {
+		return fmt.Errorf("--node-watts cannot be negative")
+	}
+	if set["node-watts"] && watts == 0 {
+		return fmt.Errorf("--node-watts 0 would report every freed node as saving nothing; omit the flag instead")
+	}
+	if set["grid-intensity"] && !set["node-watts"] {
+		return fmt.Errorf("--grid-intensity needs --node-watts: emissions are energy times intensity, and tare does not measure node power")
+	}
+	return nil
+}
+
 // emit renders one report in the requested format. Every format goes through
 // here so that adding one cannot quietly skip the parts of the report that say
 // what the run could not see.
@@ -440,7 +490,11 @@ func emit(r *report.Report, format string, verbose bool) error {
 // query goes through the API server proxy so no port forward is needed.
 func buildSource(ctx context.Context, kc *discover.Client, promURL string, redact bool) (metrics.Source, error) {
 	if promURL != "" {
-		return metrics.NewProm(promURL), nil
+		prom := metrics.NewProm(promURL)
+		if redact {
+			prom.ScrubErrors(report.Scrubber())
+		}
+		return prom, nil
 	}
 
 	prom, c, others, err := discoverProm(ctx, kc)
@@ -457,6 +511,9 @@ func buildSource(ctx context.Context, kc *discover.Client, promURL string, redac
 				"  or set TARE_PROMETHEUS in the environment.")
 	}
 
+	if redact {
+		prom.ScrubErrors(report.Scrubber(c.Namespace, c.Service))
+	}
 	fmt.Fprintf(os.Stderr, "using %s\n", formatCandidate(c, redact))
 	if others > 0 {
 		fmt.Fprintf(os.Stderr, "  (%d other candidates found; pass --prometheus to choose a different one)\n", others)

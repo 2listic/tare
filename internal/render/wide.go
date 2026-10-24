@@ -288,6 +288,29 @@ func (p *printer) printNodes(r *report.Report) {
 	}
 }
 
+// printFootprint converts each replay stage's FREED into energy and emissions
+// with the reader's own factors, and prints the factors under it so the
+// figure never travels without its coefficient. Nothing at all when no
+// factors were given: an unasked-for section of dashes is noise.
+func (p *printer) printFootprint(r *report.Report) {
+	if !r.Factors.Set() {
+		return
+	}
+	w := p.section("footprint", "STAGE", "NODES_FREED", "CREDIT", "KWH_YEAR", "KGCO2E_YEAR")
+	rows := report.Footprint(r)
+	if rows == nil {
+		row(w, "not_computed", "-", "-", "-", "-")
+		w.Flush()
+		fmt.Fprintln(p.out, "# not computed: no node count to convert, see section=nodes")
+		return
+	}
+	for _, f := range rows {
+		row(w, f.Stage, footprintNodes(f), f.Credit, footprintKWh(f), footprintKg(f))
+	}
+	w.Flush()
+	fmt.Fprintf(p.out, "# factors: %s\n", factorsNote(r.Factors))
+}
+
 // printDrainBlockers reports the budgets that make a drain impossible. A
 // cluster can have three nodes' worth of slack and free none of them.
 func (p *printer) printDrainBlockers(why []string) {

@@ -268,6 +268,36 @@ not something the replay can say.
 
 tare reports nodes, not currency: only you know what your nodes cost.
 
+The same goes for energy and carbon. Give tare your own factors and `-o wide`
+adds a `footprint` section that multiplies each stage's `FREED` by them:
+
+```sh
+kubectl tare report -o wide --node-watts 90 --grid-intensity 250
+kubectl tare report -o wide --node-watts 90 --grid-intensity italy   # Ember annual average
+```
+
+```
+# section=footprint
+STAGE         NODES_FREED  CREDIT         KWH_YEAR  KGCO2E_YEAR
+packed_today  1            cluster_slack  788       197
+packed_after  >=2          tare           >=1577    >=394
+# factors: node_watts=90 grid_gco2e_kwh=250 grid_source=user; node_watts supplied by the user; operational energy of removed nodes only, embodied carbon excluded
+```
+
+`--node-watts` is what goes away with one node, which is its idle draw and not
+its loaded one: the workload moves to another node and takes its dynamic power
+with it. Fold in PUE yourself if you count facility overhead. `--grid-intensity`
+is gCO2e/kWh where the nodes run, or a country (`italy`, `united-kingdom`,
+`DEU`) for its latest annual figure from
+[Ember's Yearly Electricity Data](https://ember-energy.org/data/yearly-electricity-data/)
+(CC-BY-4.0), printed as `grid_source=ember_<year>_<ISO3>`. That is an annual,
+location-based grid average: if the nodes run in a cloud region, the
+provider's figure for that region is better, and a renewable-power contract
+changes what a company may report. Without it `KGCO2E_YEAR` is `?`. Nothing here
+is measured. It is a node count times your coefficients, it is real only if the
+nodes are actually removed, and it is not an emissions disclosure. On a fixed
+node pool it is zero, because the nodes keep running.
+
 The three node counts are kept apart on purpose. A cluster that is merely not
 tightly packed can free nodes today without changing a single request, and that
 saving is real but it is not tare's. Only the difference between packing
@@ -309,7 +339,7 @@ every node it could not use, every budget that blocks a drain is a `warning`
 line on stderr, once, however many containers it touches.
 
 `-o wide` is the whole record: `meta`, `signals`, `findings` (with limits and
-pressure), `evidence`, `totals`, `nodes`, `node_pins`, `drain_blockers`,
+pressure), `evidence`, `totals`, `nodes`, `footprint` (only with `--node-watts`), `node_pins`, `drain_blockers`,
 `commitment`. The `evidence` section is one row per piece of evidence behind a
 finding, keyed by a stable `CODE`:
 
