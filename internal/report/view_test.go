@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mfranzon/tare/internal/analyze"
+	"github.com/2listic/tare/internal/analyze"
 )
 
 // TestCheckVerdictsRejectsAMisspelling: a --verdict value naming no verdict

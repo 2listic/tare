@@ -3,7 +3,7 @@ package report
 import (
 	"testing"
 
-	"github.com/mfranzon/tare/internal/analyze"
+	"github.com/2listic/tare/internal/analyze"
 )
 
 // The savings total must not hide the containers that need more: summing only

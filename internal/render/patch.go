@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/gitops"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/gitops"
 )
 
 func Cores(m int64) string {

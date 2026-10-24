@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/render"
-	"github.com/mfranzon/tare/internal/report"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/render"
+	"github.com/2listic/tare/internal/report"
 )
 
 // The tests use the same two-week window the CLI defaults to. A shorter one is

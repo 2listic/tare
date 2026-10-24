@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mfranzon/tare/internal/ceilings"
-	"github.com/mfranzon/tare/internal/metrics"
+	"github.com/2listic/tare/internal/ceilings"
+	"github.com/2listic/tare/internal/metrics"
 )
 
 // A large share of real ceilings are not in the pod spec at all: they live in

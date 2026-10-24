@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/metrics"
-	"github.com/mfranzon/tare/internal/packing"
-	"github.com/mfranzon/tare/internal/report"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/metrics"
+	"github.com/2listic/tare/internal/packing"
+	"github.com/2listic/tare/internal/report"
 )
 
 func renderHTML(t *testing.T, r *report.Report) string {

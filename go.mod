@@ -1,4 +1,4 @@
-module github.com/mfranzon/tare
+module github.com/2listic/tare
 
 go 1.27.0
 

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mfranzon/tare/internal/ceilings"
-	"github.com/mfranzon/tare/internal/discover"
+	"github.com/2listic/tare/internal/ceilings"
+	"github.com/2listic/tare/internal/discover"
 )
 
 const mib = 1 << 20

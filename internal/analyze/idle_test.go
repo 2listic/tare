@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/simulate"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/simulate"
 )
 
 // The idle verdict is the only one whose action is deletion, so it is tested

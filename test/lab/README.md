@@ -3,6 +3,8 @@
 Cluster: k3d `tare-test` on host `msi` (192.168.1.122), k3s v1.35.8+k3s1,
 1 server + 2 agents, cgroup v2, containerd 2.2.7.
 
+`HANDS-ON.md` is a 75-minute session for colleagues on this lab.
+
 | endpoint | url |
 | --- | --- |
 | Kubernetes API | https://192.168.1.122:6443 (context `k3d-tare-test`) |

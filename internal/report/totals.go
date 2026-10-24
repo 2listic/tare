@@ -3,7 +3,7 @@ package report
 import (
 	"sort"
 
-	"github.com/mfranzon/tare/internal/analyze"
+	"github.com/2listic/tare/internal/analyze"
 )
 
 // Savings is what a reader actually wants from a cluster-wide run: not three

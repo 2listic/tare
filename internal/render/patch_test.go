@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/report"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/report"
 )
 
 // A Job's spec.template is immutable, so a patch against it is rejected by the

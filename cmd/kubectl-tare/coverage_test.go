@@ -3,9 +3,9 @@ package main
 import (
 	"testing"
 
-	"github.com/mfranzon/tare/internal/discover"
-	"github.com/mfranzon/tare/internal/metrics"
-	"github.com/mfranzon/tare/internal/report"
+	"github.com/2listic/tare/internal/discover"
+	"github.com/2listic/tare/internal/metrics"
+	"github.com/2listic/tare/internal/report"
 )
 
 // Three uncovered replicas of one workload are one NO-DATA row, not three, and

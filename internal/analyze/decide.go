@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/mfranzon/tare/internal/ceilings"
-	"github.com/mfranzon/tare/internal/metrics"
+	"github.com/2listic/tare/internal/ceilings"
+	"github.com/2listic/tare/internal/metrics"
 )
 
 // pinnedAtLimit is how close CPU p95 must sit to the limit before usage counts

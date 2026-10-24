@@ -6,8 +6,8 @@ import (
 	"io"
 	"strings"
 
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/report"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/report"
 )
 
 // The HTML report exists for the case the terminal cannot serve: the person who

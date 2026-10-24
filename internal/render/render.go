@@ -11,9 +11,9 @@ import (
 	"io"
 	"strings"
 
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/packing"
-	"github.com/mfranzon/tare/internal/report"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/packing"
+	"github.com/2listic/tare/internal/report"
 )
 
 // Render writes r in every non-interactive format: the data to out, and the

@@ -6,9 +6,9 @@
 package report
 
 import (
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/metrics"
-	"github.com/mfranzon/tare/internal/packing"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/metrics"
+	"github.com/2listic/tare/internal/packing"
 )
 
 // Report is everything a renderer needs, so that the table, the JSON and the

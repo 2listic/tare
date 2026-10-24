@@ -3,7 +3,7 @@ package packing
 import (
 	"testing"
 
-	"github.com/mfranzon/tare/internal/discover"
+	"github.com/2listic/tare/internal/discover"
 )
 
 func limited(name, on string, req, lim int64, memReq, memLim int64) discover.Pod {

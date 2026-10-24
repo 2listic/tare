@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mfranzon/tare/internal/discover"
-	"github.com/mfranzon/tare/internal/metrics"
-	"github.com/mfranzon/tare/internal/render"
+	"github.com/2listic/tare/internal/discover"
+	"github.com/2listic/tare/internal/metrics"
+	"github.com/2listic/tare/internal/render"
 )
 
 // runCheck answers, before any report is produced, what this cluster can and

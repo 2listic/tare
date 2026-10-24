@@ -3,8 +3,8 @@ package report
 import (
 	"testing"
 
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/discover"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/discover"
 )
 
 func TestSizerSumsContainersOfAWorkload(t *testing.T) {

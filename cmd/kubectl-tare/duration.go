@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mfranzon/tare/internal/render"
+	"github.com/2listic/tare/internal/render"
 )
 
 // durationValue accepts day and week suffixes on top of Go's own units.

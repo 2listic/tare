@@ -10,10 +10,10 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/metrics"
-	"github.com/mfranzon/tare/internal/render"
-	"github.com/mfranzon/tare/internal/report"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/metrics"
+	"github.com/2listic/tare/internal/render"
+	"github.com/2listic/tare/internal/report"
 )
 
 // The interactive report. It exists because -v is all-or-nothing: on a cluster

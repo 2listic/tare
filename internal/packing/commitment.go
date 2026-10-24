@@ -3,7 +3,7 @@ package packing
 import (
 	"sort"
 
-	"github.com/mfranzon/tare/internal/discover"
+	"github.com/2listic/tare/internal/discover"
 )
 
 // Commitment is what a node has promised, against what it has.

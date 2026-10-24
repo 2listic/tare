@@ -3,7 +3,7 @@ package analyze
 import (
 	"fmt"
 
-	"github.com/mfranzon/tare/internal/metrics"
+	"github.com/2listic/tare/internal/metrics"
 )
 
 // has reports whether a signal backed this finding.

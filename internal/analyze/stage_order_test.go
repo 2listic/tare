@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/discover"
-	"github.com/mfranzon/tare/internal/metrics"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/discover"
+	"github.com/2listic/tare/internal/metrics"
 )
 
 // runOne analyzes a single container with every signal present.

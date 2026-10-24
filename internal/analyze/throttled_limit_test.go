@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/discover"
-	"github.com/mfranzon/tare/internal/metrics"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/discover"
+	"github.com/2listic/tare/internal/metrics"
 )
 
 // guaranteedCache reproduces tare-lab's guaranteed-cache as measured on msi on

@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mfranzon/tare/internal/ceilings"
-	"github.com/mfranzon/tare/internal/discover"
-	"github.com/mfranzon/tare/internal/metrics"
+	"github.com/2listic/tare/internal/ceilings"
+	"github.com/2listic/tare/internal/discover"
+	"github.com/2listic/tare/internal/metrics"
 )
 
 func inv(nodes ...discover.Node) discover.Inventory {

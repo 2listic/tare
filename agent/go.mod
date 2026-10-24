@@ -1,4 +1,4 @@
-module github.com/mfranzon/tare/agent
+module github.com/2listic/tare/agent
 
 go 1.27.0
 

@@ -1,9 +1,9 @@
 package report
 
 import (
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/discover"
-	"github.com/mfranzon/tare/internal/packing"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/discover"
+	"github.com/2listic/tare/internal/packing"
 )
 
 // Sizer turns per-container recommendations into per-pod requests.

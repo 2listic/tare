@@ -3,7 +3,7 @@ package analyze
 import (
 	"fmt"
 
-	"github.com/mfranzon/tare/internal/discover"
+	"github.com/2listic/tare/internal/discover"
 )
 
 // The gap between what a manifest says and what Kubernetes did with it.

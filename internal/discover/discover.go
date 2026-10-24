@@ -20,7 +20,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/mfranzon/tare/internal/ceilings"
+	"github.com/2listic/tare/internal/ceilings"
 )
 
 // Container is one container of one pod, joined to the workload that owns it.

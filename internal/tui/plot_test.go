@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mfranzon/tare/internal/metrics"
+	"github.com/2listic/tare/internal/metrics"
 )
 
 func series(vs ...float64) metrics.Series {

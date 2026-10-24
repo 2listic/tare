@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/ceilings"
-	"github.com/mfranzon/tare/internal/packing"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/ceilings"
+	"github.com/2listic/tare/internal/packing"
 )
 
 func redactable() *Report {
