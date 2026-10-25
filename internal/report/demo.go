@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/metrics"
-	"github.com/mfranzon/tare/internal/simulate"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/metrics"
+	"github.com/2listic/tare/internal/simulate"
 )
 
 // Demo builds a report from the simulator instead of a cluster.

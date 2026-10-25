@@ -12,13 +12,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/discover"
-	"github.com/mfranzon/tare/internal/metrics"
-	"github.com/mfranzon/tare/internal/packing"
-	"github.com/mfranzon/tare/internal/render"
-	"github.com/mfranzon/tare/internal/report"
-	"github.com/mfranzon/tare/internal/tui"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/discover"
+	"github.com/2listic/tare/internal/metrics"
+	"github.com/2listic/tare/internal/packing"
+	"github.com/2listic/tare/internal/render"
+	"github.com/2listic/tare/internal/report"
+	"github.com/2listic/tare/internal/tui"
 )
 
 func main() {
@@ -333,7 +333,11 @@ func replayNodes(ctx context.Context, kc *discover.Client, inv discover.Inventor
 func signalGaps(src metrics.Source, kc *discover.Client) []analyze.SignalGap {
 	gaps := analyze.SummariseHealth(src.Health())
 	for _, w := range kc.Warnings() {
-		gaps = append(gaps, analyze.SignalGap{Signal: "rbac", Status: analyze.GapDenied, Detail: w})
+		g := analyze.SignalGap{Signal: "rbac", Status: analyze.GapDenied, Detail: w}
+		if !kc.Denied(w) {
+			g.Signal, g.Status = "kube-api", analyze.GapQueryFailed
+		}
+		gaps = append(gaps, g)
 	}
 	return gaps
 }

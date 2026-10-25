@@ -73,6 +73,43 @@ tare                                                      384Mi   256Mi heap + 1
 tare reads the flag, reports it as the finding, and refuses to recommend below
 it. Sizing from observed usage alone cannot get there, however the floor is set.
 
+## Applied to a real application, then measured
+
+We applied tare's own patch to Google's
+[Online Boutique](https://github.com/GoogleCloudPlatform/microservices-demo)
+(v0.10.3, eleven services, locust load) and measured the shop afterwards. The
+probe made 300 product-page requests from a pod outside the patch. The same
+cluster ran every phase, each for 20 minutes.
+
+| sizing | users | errors | restarts | p95 | p99 |
+|---|---|---|---|---|---|
+| original manifests | 100 | 0.03% | 0 | 26-29ms | 52-54ms |
+| original manifests | 200 | 0.03-0.04% | 0 | 22-49ms | 52-78ms |
+| requests **and CPU limits** sized from usage | 100 | 0.03% | 0 | 113ms | 181ms |
+| requests **and CPU limits** sized from usage | 200 | 0.02% | 0 | **896ms** | **1115ms** |
+| tare: requests sized, CPU limits held | 100 | 0.27%¹ | 0 | 10ms | 29ms |
+| tare: requests sized, CPU limits held | 200 | 0.04% | 0 | 14ms | 46ms |
+
+The third and fourth rows are what an earlier tare recommended. Every check
+that looks at errors and restarts passes them. Latency got 18x worse at twice
+the load, because CFS enforces a CPU limit every 100ms and averaged usage cannot
+see the bursts that happen inside one period. tare now never lowers or adds a
+CPU limit (`CPU_LIMIT_HELD`), and the last two rows are the result. CPU
+requests went down by about 85%, about 1.3 cores, and memory requests by about
+1GiB. Latency stayed at baseline, with no service throttled above 1.4%.
+
+Read the 85% as a measure of how generous Boutique's demo manifests are, not
+as what tare will save you. Lower requests turn into money only when the
+autoscaler can remove nodes, and on this three-node cluster none could be.
+The runs lasted minutes, so they say nothing about a memory request that holds
+for an hour and fails over a week. The full record, including the earlier
+version that took the shop down, is in [KNOWN-FAILURES.md](KNOWN-FAILURES.md)
+(53).
+
+¹ This phase included the rollout of eleven single-replica services. The
+failures are most likely that rollout rather than the sizing, but this was not
+confirmed.
+
 *tare: the weighing term for subtracting the container's own weight.*
 
 ## What it prints
@@ -109,8 +146,25 @@ Prometheus you already have.
 
 ## Install
 
-tare is one static binary with no runtime dependencies. It is not published to a
-module proxy yet, so build it from this tree:
+tare is one static binary with no runtime dependencies. Linux and macOS:
+
+```sh
+os=$(uname -s | tr '[:upper:]' '[:lower:]')
+arch=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
+curl -fsSL "https://github.com/2listic/tare/releases/latest/download/kubectl-tare_${os}_${arch}.tar.gz" | tar xz kubectl-tare
+sudo install kubectl-tare /usr/local/bin/
+sudo ln -sf kubectl-tare /usr/local/bin/kubectl_complete-tare
+```
+
+Windows: `kubectl-tare_windows_amd64.zip` from the
+[releases page](https://github.com/2listic/tare/releases), with
+`kubectl-tare.exe` put anywhere on `PATH`. Every release has a `checksums.txt`.
+On macOS, an archive downloaded through a browser is quarantined and the binary
+will not start until you run `xattr -d com.apple.quarantine kubectl-tare`;
+`curl` does not set the flag.
+
+With Go installed, `go install github.com/2listic/tare/cmd/kubectl-tare@latest`
+works too. From this tree:
 
 ```sh
 ./tools/build.sh                                 # this machine, into bin/
@@ -124,12 +178,6 @@ tab completion for subcommands, flags, formats, verdicts and namespaces wherever
 kubectl's own completion is enabled. The build is stamped with a version;
 `kubectl tare version` prints it, and it is the first thing to quote when a
 number looks wrong.
-
-Building for someone else's laptop:
-
-```sh
-./tools/build.sh linux/amd64 darwin/arm64 darwin/amd64
-```
 
 ## First run
 ```sh
@@ -254,7 +302,9 @@ PODS  REASON
 what the recommendations take away, `raise` is what the starved containers need
 added, and the two are never netted. `idle` is kept out of `lower` because its
 own evidence says `IDLE_NOT_RULED_OUT`; the node replay leaves it at its current
-requests for the same reason. `unknown` counts containers whose memory tare
+requests for the same reason. `unverified`, when present, is the same for rows whose
+reduction cannot be shown safe (no saturation signal, or under an hour of
+samples): listed, never summed, never written by `-o patch`. `unknown` counts containers whose memory tare
 cannot size: `16Mi→?` above is `checkout`, OOMKilled at its limit. Usage above
 the limit that killed a container is never observed, so its peak is a lower
 bound on demand and not a measurement of it. tare says so, prints `?`, and
@@ -433,7 +483,12 @@ all, infers the ceiling from a memory plateau instead.
 **Requests and limits get different answers.** A request sized to a percentile
 must not double as a limit that throttles every burst. And a limit sized to
 steady state throttles every restart: measured on real workloads, a Tomcat draws
-**19.7x** more CPU booting than running.
+**19.7x** more CPU booting than running. tare never lowers a CPU limit and never
+adds one (`CPU_LIMIT_HELD`), because nothing averaged can show that a lower
+limit covers a container's bursts (see the Online Boutique table above). The
+scheduler reserves the request, not the limit, so the savings come from
+requests. A CPU limit only goes up, when a measured boot needs more than it
+allows.
 
 **It says when it cannot see.** Metrics differ between clusters. CFS throttle
 counters only exist for containers that already have a CPU limit; PSI exists for
@@ -589,184 +644,25 @@ and many containers are younger than that.
 - Report on init containers or native sidecars.
 - Account for pod-level resources (Kubernetes 1.34+).
 
-## Hands-on session
+## Known gaps
 
-About 75 minutes, for a group of colleagues on the office network. Part 1 needs
-no cluster. Parts 2 and 3 use the shared lab cluster described in
-`test/lab/README.md`: k3d `tare-test` on `msi` (192.168.1.122), context
-`k3d-tare-test`, Grafana on :30030.
+These can make a recommendation wrong without the report saying so. The full
+record, with how each was found, is in `KNOWN-FAILURES.md`.
 
-**Ground rules for the lab.** It is shared, and it is running a long stability
-experiment. tare only reads, so `report`, `check` and `diff` are always safe.
-Do not run the output of `-o patch`. Do not `kubectl apply`, `edit` or `delete`
-anything in `tare-lab`. Use `diff --write` only on your own scratch copy of the
-manifests (part 3), never on this repository.
-
-### Before the session (each person, 10 minutes)
-
-```sh
-git clone <this repo> tare && cd tare
-./tools/build.sh                      # needs Go 1.27; produces bin/kubectl-tare
-export PATH=$PWD/bin:$PATH            # now `kubectl tare` works
-kubectl tare version
-kubectl tare report --demo            # must print a table; no cluster involved
-```
-
-Get the lab kubeconfig from whoever runs the session, then check you can reach
-it:
-
-```sh
-kubectl --context k3d-tare-test get pods -n tare-lab
-```
-
-`jq` and a browser are useful but not required.
-
-### Part 1: read a report without a cluster (15 minutes)
-
-```sh
-kubectl tare report --demo
-kubectl tare report --demo --explain | less
-```
-
-The demo is the real analyzer run over simulated series, so every verdict is
-computed, not canned. Answer from the output alone:
-
-1. `leaky-service` and `slow-growth` have no arrow in `CPU` or `MEM`. Why does
-   tare refuse to give them a size?
-2. `hidden-ceiling-jvm` uses 240Mi at peak, yet the recommendation is 368Mi.
-   Where does the extra come from, given that the pod spec sets no heap flag?
-3. Applying the `no-limits-api` recommendation changes more than its size. What
-   else changes?
-4. `dormant-sidecar` is `IDLE`. What would you check before deleting it?
-5. The summary line says nothing about nodes freed. Why not?
-
-<details><summary>Answers</summary>
-
-1. `MEM_LEAK`: memory grew 25.6x (leaky-service) and 3.0x (slow-growth) across
-   the window. No size holds a leak, so the recommendation is withheld rather
-   than invented.
-2. `CEILING observed-plateau`: memory sits flat far below its limit, which for a
-   JVM usually means a heap cap set in the image or a ConfigMap. tare infers the
-   ceiling and raises the number (`MEM_RAISED_BY_CEILING`) instead of trusting
-   usage.
-3. `CPU_LIMIT_WOULD_BE_ADDED` and `MEM_LIMIT_WOULD_BE_ADDED`: the manifest sets
-   no limits, so applying this introduces throttling at quota and makes the
-   container OOMKillable at a cap. That is a behaviour change, not a resize.
-4. `IDLE_NOT_RULED_OUT`: hot standby, DR replica, a controller waiting on a rare
-   event, a job with a period longer than the window. tare sees CPU and memory,
-   not intent. Ask the owner first.
-5. `NODES_NOT_COMPUTED` on stderr: the demo has no real nodes, and a node count
-   from imaginary nodes would be the misleading number tare exists to avoid.
-
-</details>
-
-Then try the machine-readable side:
-
-```sh
-# every finding and the evidence codes behind it
-kubectl tare report --demo -o wide | sed -n '/section=evidence/,/^$/p'
-# the same reasons with raw numbers
-kubectl tare report --demo -o json | jq '.findings[] | {workload: .Workload, verdict: .Verdict}'
-```
-
-### Part 2: the lab cluster (20 minutes)
-
-```sh
-kubectl config use-context k3d-tare-test
-kubectl tare check
-kubectl tare report -n tare-lab
-kubectl tare report -n tare-lab --explain | less
-kubectl tare report -n tare-lab -o tui      # enter on a row plots it over the window
-kubectl tare report -n tare-lab -o html > lab.html && open lab.html
-```
-
-Several people querying at once all go through the API server proxy to one
-Prometheus. If a run times out, add `--timeout 5m`.
-
-1. In `check`, read the `history` and `coverage` lines. How much history does
-   the lab have, and what does that do to every finding?
-2. `cpu-hog` sits flat at 100m of usage. A usage-based right-sizer would call
-   that correctly sized. What does tare see that usage cannot show?
-3. Open `cpu-hog` in Grafana (container CPU for `tare-lab/cpu-hog`) next to its
-   tare row. Which of the two would you show a team to justify raising the limit?
-4. `tomcat-lowxmx` is nearly idle, so why is its memory recommendation 384Mi
-   and not something close to its 95Mi of usage?
-5. `guaranteed-cache` uses about 27m against a 100m limit, yet tare keeps the
-   limit at 100m. Why?
-
-<details><summary>Answers</summary>
-
-1. On 2026-10-11 it was 6h, because the lab machine was off for two weeks.
-   Every finding is at most `medium` confidence, and the report says
-   `WINDOW_SHORT`. Six hours cannot show a daily cycle. Keep that in mind for
-   part 3.
-2. `CPU_PRESSURE` of about 0.9 s/s: its tasks were ready to run and waiting 90%
-   of the time. `LIMIT_NOT_NODE` adds that the node was about 8% busy, so the
-   wait comes from its own limit, not from the machine.
-3. Discussion. The Grafana graph shows a flat line; only the pressure figure
-   shows that the line is a ceiling.
-4. `JAVA_OPTS=-Xmx256m`. A 256Mi heap plus metaspace, code cache and thread
-   stacks comes to about 384Mi. Usage is what an idle JVM touched, not what it
-   will allocate under load.
-5. `CPU_LIMIT_HELD_THROTTLED`: the limit throttled it in about 88% of scheduling
-   periods. Usage is averaged over seconds, while CFS enforces the quota every
-   100ms, so a limit sized from averaged usage would throttle it harder.
-
-</details>
-
-### Part 3: from finding to pull request (20 minutes)
-
-Work on a throwaway copy of the lab manifests, never on this repository:
-
-```sh
-cp -r test/lab /tmp/tare-handson && cd /tmp/tare-handson
-git init -q && git add . && git commit -qm "lab manifests as deployed"
-
-kubectl tare diff -n tare-lab --repo .                          # dry run: what would change
-kubectl tare diff -n tare-lab --repo . --write --pr-body pr.md  # edit the files
-git diff
-less pr.md
-```
-
-Check that the diff touches only resource values, keeps comments and formatting
-intact, and that `pr.md` lists what tare deliberately left alone and why.
-
-Now review it as if a colleague had opened this pull request. **Find the hunks
-you would reject.** There are at least three, and tare gives none of them a
-low-confidence warning.
-
-<details><summary>Answers</summary>
-
-- **`diurnal-web` in `longrun.yaml`:** memory 256Mi to 16Mi and CPU limit
-  1000m to 562m, sized from 6h of a workload whose load follows the day. The
-  window has not seen a peak. The report flags `WINDOW_SHORT` once, but the diff
-  does not repeat it at the hunk.
-- **`overcommitter` in `commitment.yaml`:** limits go from 14 cores and 6Gi to
-  10m and 20Mi. The findings table showed `16Mi→16Mi`, because it displays
-  requests, so the largest change in the PR was never visible in the report. Read
-  `-o wide` before you trust a diff.
-- **`cpu-hog`:** 115m is a guess. The container was pinned at its 100m limit the
-  whole time, so its real demand was never observed, and any number above 100m
-  is a step chosen without evidence. tare does say this for memory after an
-  OOMKill (`16Mi→?`), but not yet for CPU.
-- Also worth discussing: the `commitment.yaml` container with no `resources` at
-  all gains a full block, which moves it out of BestEffort. The PR body says so;
-  the diff alone does not.
-
-These are known open issues, not mistakes in your setup.
-
-</details>
-
-### Discussion (10 minutes)
-
-- Which of our clusters could run this today? Run `kubectl tare check` there
-  (read-only) and see what is missing.
-- Which finding would you act on without asking anyone, and which would you
-  never apply without the owner?
-- What would make a pull request from tare mergeable in your team?
-
-To report a number that looks wrong, include `kubectl tare version` and the
-output of the same run with `--redact`.
+- **A node with dead PSI reads as calm.** Some kubelets emit all-zero pressure
+  series on hosts without kernel PSI support. tare catches this when the whole
+  cluster is affected and withholds pressure. It does not catch one such node
+  in an otherwise healthy cluster: containers there look unpressured and can be
+  called `WASTE`. Check that your nodes' kernels have PSI enabled before acting
+  on a shrink.
+- **Stale metrics are not flagged.** A container whose metrics stopped partway
+  through the window is sized from what is left, and nothing says the data is
+  old. Confidence drops only because there are fewer samples.
+- **The 16Mi memory floor has no derivation.** On many reports it decides more
+  memory rows than the evidence does. Treat a memory recommendation at 16Mi as
+  "lower than now", not as a number.
+- **A cyclic leak and a too-small container look the same.** If a container
+  OOMKills inside the window, tare can say growth is not ruled out, and no more.
 
 ## Development
 
@@ -785,6 +681,14 @@ workload survives.
 extracted from 39 public Helm charts. See `test/corpus/README.md`.
 
 Design decisions and their reasoning are in `docs/plan.md`.
+
+A release is built from a clean tree and published locally, with no CI
+involved:
+
+```sh
+./tools/release.sh v0.1.0              # test, build every platform into dist/
+./tools/release.sh v0.1.0 --publish    # then tag HEAD, push the tag, create the GitHub release
+```
 
 ## License
 

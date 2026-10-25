@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mfranzon/tare/internal/packing"
-	"github.com/mfranzon/tare/internal/report"
+	"github.com/2listic/tare/internal/packing"
+	"github.com/2listic/tare/internal/report"
 )
 
 // nodeLines is the node block as text, so the table and the HTML report cannot

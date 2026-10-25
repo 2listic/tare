@@ -18,7 +18,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mfranzon/tare/internal/analyze"
+	"github.com/2listic/tare/internal/analyze"
 )
 
 // Change is one container's resource edit, already filtered to what tare will

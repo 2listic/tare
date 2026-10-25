@@ -6,7 +6,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/mfranzon/tare/internal/discover"
+	"github.com/2listic/tare/internal/discover"
 )
 
 const gib = 1 << 30

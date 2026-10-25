@@ -12,9 +12,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/mfranzon/tare/internal/ceilings"
-	"github.com/mfranzon/tare/internal/discover"
-	"github.com/mfranzon/tare/internal/metrics"
+	"github.com/2listic/tare/internal/ceilings"
+	"github.com/2listic/tare/internal/discover"
+	"github.com/2listic/tare/internal/metrics"
 )
 
 // Verdict is the headline classification of a container.
@@ -102,6 +102,7 @@ func RunWithCluster(containers []discover.Container, obs map[metrics.Key]*metric
 		applyConstraints(f, c)
 		f.reconcileFloors(th)
 		applySignalGaps(f)
+		holdTooYoung(f, th)
 		out = append(out, *f)
 	}
 	sortFindings(out)

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mfranzon/tare/internal/discover"
+	"github.com/2listic/tare/internal/discover"
 )
 
 // Patchable reports whether tare will stand behind writing this finding's

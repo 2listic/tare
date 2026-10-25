@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mfranzon/tare/internal/analyze"
+	"github.com/2listic/tare/internal/analyze"
 )
 
 const deployYAML = `# Owned by the checkout team. Ping #checkout before changing.

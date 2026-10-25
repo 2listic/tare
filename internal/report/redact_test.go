@@ -1,12 +1,13 @@
 package report
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/ceilings"
-	"github.com/mfranzon/tare/internal/packing"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/ceilings"
+	"github.com/2listic/tare/internal/packing"
 )
 
 func redactable() *Report {
@@ -108,21 +109,51 @@ func TestScrubberHidesPrometheusEndpointInErrors(t *testing.T) {
 	scrub := Scrubber("monitoring", "prometheus-operated")
 	for _, raw := range []string{
 		"querying apiserver-proxy://monitoring/prometheus-operated:http-web: unknown (get services http:prometheus-operated:http-web)",
-		`querying apiserver-proxy://monitoring/prometheus-operated:http-web: Get "https://192.168.1.122:6443/api/v1/namespaces/monitoring/services/http:prometheus-operated:http-web/proxy/api/v1/query?query=sum+by+%28pod%29+%28x%7Bnamespace%3D~%22payments%22%7D%29": context deadline exceeded`,
+		`querying apiserver-proxy://monitoring/prometheus-operated:http-web: Get "https://192.0.2.10:6443/api/v1/namespaces/monitoring/services/http:prometheus-operated:http-web/proxy/api/v1/query?query=sum+by+%28pod%29+%28x%7Bnamespace%3D~%22payments%22%7D%29": context deadline exceeded`,
 		`services "http:prometheus-operated:http-web" is forbidden: User "system:serviceaccount:default:x" cannot get resource "services/proxy" in API group "" in the namespace "monitoring"`,
 	} {
 		got := scrub(raw)
-		for _, leak := range []string{"monitoring", "prometheus-operated", "192.168.1.122", "payments"} {
+		for _, leak := range []string{"monitoring", "prometheus-operated", "192.0.2.10", "payments"} {
 			if strings.Contains(got, leak) {
 				t.Errorf("%q survives scrubbing:\n%s", leak, got)
 			}
 		}
 		// The hashes must match the "using" line, or the reader sees two endpoints.
-		if !strings.Contains(got, HashName("monitoring")) && !strings.Contains(got, HashName("192.168.1.122")) {
+		if !strings.Contains(got, HashName("monitoring")) && !strings.Contains(got, HashName("192.0.2.10")) {
 			t.Errorf("scrubbed text carries neither hash of the using line:\n%s", got)
 		}
 	}
 	if got := scrub("context deadline exceeded"); got != "context deadline exceeded" {
 		t.Errorf("text with no endpoint was changed: %q", got)
+	}
+}
+
+// Checking a list of fields passes for any field nobody thought to list, which
+// is how PDB names, HPA names and the pin reasons all reached a redacted lab
+// report. This reads every field of the report instead, so a field added
+// later is covered without anyone remembering to.
+func TestRedactionLeavesNoNameAnywhereInTheReport(t *testing.T) {
+	r := redactable()
+	r.Findings[0].Constraints.HPAName = "ledger-hpa"
+	r.Findings[0].Constraints.VPAName = "ledger-vpa"
+	r.DrainBlockers = []string{"PodDisruptionBudget payments/ledger-pdb requires all 2 of its pods healthy"}
+	r.Nodes.PinReasons = map[string]int{
+		"PodDisruptionBudget payments/ledger-pdb allows no eviction, so its node cannot be drained": 2,
+		"has a nodeSelector": 3,
+	}
+	Redact(r)
+	out := fmt.Sprintf("%+v", *r)
+	for _, secret := range []string{"payments", "ledger-api", "ledger-pdb", "ledger-hpa", "ledger-vpa", "ip-10-0-3-41", "monitoring", "prometheus-operated"} {
+		if strings.Contains(out, secret) {
+			t.Errorf("%q survived redaction", secret)
+		}
+	}
+	if r.Nodes.PinReasons["has a nodeSelector"] != 3 {
+		t.Errorf("a pin reason with no name in it was lost: %v", r.Nodes.PinReasons)
+	}
+	// The header and the "using" line on stderr hash the endpoint
+	// independently; if they disagree the reader sees two Prometheuses.
+	if want := HashName("monitoring") + "/" + HashName("prometheus-operated"); !strings.Contains(r.Source, want) {
+		t.Errorf("source %q does not carry %q, the hash the using line prints", r.Source, want)
 	}
 }

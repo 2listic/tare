@@ -13,11 +13,11 @@ detection, which needs a limit that genuinely moves.
 
 ## Setup
 
-Cluster: k3d `tare-test` on msi. Prometheus is on a **30Gi local-path PVC** with
+Cluster: k3d `tare-test` on the lab host. Prometheus is on a **30Gi local-path PVC** with
 30d retention. It was previously on `emptyDir`, which meant any pod restart
 would erase the history the experiment exists to collect.
 
-Snapshots run hourly from cron on msi:
+Snapshots run hourly from cron on the lab host:
 
     17 * * * * $HOME/tare-longrun/snapshot.sh
 
@@ -151,7 +151,7 @@ changed something observable.
 ## Restarted again 2026-09-15: three dead measurements and a bug in tare
 
 Attempt 2 collected for twelve hours and was discarded. Details and the archived
-data are in `~/tare-longrun/attempt2-saturation-ratchet/WHY.md` on msi. In short:
+data are in `~/tare-longrun/attempt2-saturation-ratchet/WHY.md` on the lab host. In short:
 
 - tare clamped **all four** recommendations to their current values whenever a
   container was `SATURATED`, whichever resource was actually starved. A
@@ -230,12 +230,12 @@ simulation result into evidence.
 
 ## Stopped 2026-09-19 16:0x UTC: attempt 5 ended, two real failures
 
-The hourly cron was removed and attempt 5's data archived on msi to
+The hourly cron was removed and attempt 5's data archived on the lab host to
 `~/tare-longrun/attempt5-data/` (88 snapshots, 793 rows, 2026-09-15 23:07 to
 2026-09-19 13:17, plus `FINAL-stability.txt`). The cluster and its workloads are
 untouched and still running; only the snapshot cron is gone. To resume:
 
-    ssh msi '(crontab -l 2>/dev/null; echo "17 * * * * \$HOME/tare-longrun/snapshot.sh >/dev/null 2>&1") | crontab -'
+    ssh <lab-host> '(crontab -l 2>/dev/null; echo "17 * * * * \$HOME/tare-longrun/snapshot.sh >/dev/null 2>&1") | crontab -'
 
 **This is the first attempt that produced a clean answer to its own question.** The load generator worked, both cronjobs ran, the
 windows filled, and confidence climbed to `high`. Two stated failure criteria

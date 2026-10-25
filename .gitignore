@@ -1,2 +1,6 @@
 bin/
 .demo/
+__pycache__/
+dist/
+agent/agent
+agent/tare-agent

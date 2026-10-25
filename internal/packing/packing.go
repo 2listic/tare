@@ -18,7 +18,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/mfranzon/tare/internal/discover"
+	"github.com/2listic/tare/internal/discover"
 )
 
 // Result is the outcome of a replay.

@@ -3,7 +3,7 @@ package report
 import (
 	"testing"
 
-	"github.com/mfranzon/tare/internal/packing"
+	"github.com/2listic/tare/internal/packing"
 )
 
 func footprintReport(f Factors) *Report {

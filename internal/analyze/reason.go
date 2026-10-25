@@ -44,15 +44,19 @@ const (
 	// CPULimitThrottled: the current CPU limit is already throttling the
 	// container, so it is not lowered, whatever averaged usage says.
 	CPULimitThrottled Code = "CPU_LIMIT_HELD_THROTTLED"
-	CeilingBlocked    Code = "CEILING_UNRESOLVED"
-	UnschedulableCPU  Code = "UNSCHEDULABLE_CPU"
-	UnschedulableMem  Code = "UNSCHEDULABLE_MEM"
+	// CPULimitHeld: a CPU limit is never lowered or added, because averaged
+	// usage cannot show that a lower one covers the container's bursts.
+	CPULimitHeld     Code = "CPU_LIMIT_HELD"
+	CeilingBlocked   Code = "CEILING_UNRESOLVED"
+	UnschedulableCPU Code = "UNSCHEDULABLE_CPU"
+	UnschedulableMem Code = "UNSCHEDULABLE_MEM"
 	// MemDemandCensored: OOMKilled, and nothing measured says how much more it
 	// needs, so memory is left as it is rather than given a number.
 	MemDemandCensored Code = "MEM_DEMAND_CENSORED"
 
 	// What the run could not see.
 	NoSaturationSignal Code = "NO_SATURATION_SIGNAL"
+	TooFewSamples      Code = "TOO_FEW_SAMPLES"
 	NoOOMHistory       Code = "NO_OOM_HISTORY"
 	NoMemTrendOnRaise  Code = "NO_MEM_TREND_ON_RAISE"
 	NoMemP95           Code = "NO_MEM_P95"

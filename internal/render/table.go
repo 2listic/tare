@@ -7,8 +7,8 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/report"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/report"
 )
 
 // The default report is what fits on a screen: one row per finding somebody
@@ -90,6 +90,9 @@ func (p *printer) printSummary(r *report.Report, listed int) {
 	}
 	if s.IdleWorkloads > 0 {
 		line += fmt.Sprintf("; %d IDLE not counted", s.IdleWorkloads)
+	}
+	if s.UnverifiedWorkloads > 0 {
+		line += fmt.Sprintf("; %d UNVERIFIED not counted", s.UnverifiedWorkloads)
 	}
 	fmt.Fprintln(p.diag, line)
 }

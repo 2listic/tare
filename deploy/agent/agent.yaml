@@ -1,0 +1,60 @@
+# tare-agent: per-container CPU wait on nodes without PSI. Proof of concept.
+# Applied by a cluster admin; tare never installs it.
+#
+#   kubectl apply -f deploy/agent/agent.yaml
+#
+# There is no published image yet: build it with `docker build -t tare-agent:poc agent/`
+# and import it into each node's container runtime.
+#
+# Why each permission:
+#   hostPID       cgroup.procs holds host PIDs and /proc must be the host's
+#   hostNetwork   the kernel's taskstats netlink family only answers in the
+#                 initial network namespace
+#   privileged    for now. What is needed: CAP_NET_ADMIN (taskstats exit events,
+#                 SO_RCVBUFFORCE) and read access to every task's /proc entry
+#   no API token  the agent never talks to the Kubernetes API
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tare-agent
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: tare-agent
+  namespace: tare-agent
+  labels: {app: tare-agent}
+spec:
+  selector:
+    matchLabels: {app: tare-agent}
+  template:
+    metadata:
+      labels: {app: tare-agent}
+    spec:
+      hostPID: true
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 5
+      tolerations: [{operator: Exists}]
+      containers:
+      - name: agent
+        image: tare-agent:poc
+        imagePullPolicy: Never          # imported into the nodes, not pulled
+        args: ["-listen=:9105"]
+        ports: [{name: metrics, containerPort: 9105}]
+        readinessProbe:
+          httpGet: {path: /healthz, port: 9105}
+        resources:
+          requests: {cpu: 20m, memory: 32Mi}
+          limits: {memory: 128Mi}
+        securityContext:
+          privileged: true
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - {name: cgroup, mountPath: /sys/fs/cgroup, readOnly: true}
+      volumes:
+      - name: cgroup
+        hostPath: {path: /sys/fs/cgroup}

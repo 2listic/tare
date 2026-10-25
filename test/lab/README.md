@@ -1,13 +1,15 @@
 # tare test lab
 
-Cluster: k3d `tare-test` on host `msi` (192.168.1.122), k3s v1.35.8+k3s1,
+Cluster: k3d `tare-test` on a single Linux host, `$LAB` below, k3s v1.35.8+k3s1,
 1 server + 2 agents, cgroup v2, containerd 2.2.7.
+
+`HANDS-ON.md` is a 75-minute session for colleagues on this lab.
 
 | endpoint | url |
 | --- | --- |
-| Kubernetes API | https://192.168.1.122:6443 (context `k3d-tare-test`) |
-| Prometheus | http://192.168.1.122:30090 |
-| Grafana | http://192.168.1.122:30030 (admin/admin) |
+| Kubernetes API | https://$LAB:6443 (context `k3d-tare-test`) |
+| Prometheus | http://$LAB:30090 |
+| Grafana | http://$LAB:30030 |
 
 Monitoring is `kube-prometheus-stack` (alertmanager disabled, 30d retention,
 15s scrape) in namespace `monitoring`.
@@ -94,7 +96,7 @@ client outweighs the server, nothing downstream means anything.
 
 ## Verified first end-to-end run (2026-09-14)
 
-    kubectl tare report --prometheus http://192.168.1.122:30090 \
+    kubectl tare report --prometheus http://$LAB:30090 \
       --namespace tare-lab --window 1h -v
 
 All three planted findings were produced correctly:

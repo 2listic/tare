@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mfranzon/tare/internal/ceilings"
-	"github.com/mfranzon/tare/internal/discover"
+	"github.com/2listic/tare/internal/ceilings"
+	"github.com/2listic/tare/internal/discover"
 )
 
 func gpuNode(name, product string, memGiB int64) discover.Node {

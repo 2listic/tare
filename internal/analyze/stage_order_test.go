@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/discover"
-	"github.com/mfranzon/tare/internal/metrics"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/discover"
+	"github.com/2listic/tare/internal/metrics"
 )
 
 // runOne analyzes a single container with every signal present.
@@ -129,18 +129,20 @@ func TestPinnedAtLimitNeedsCPUStarvation(t *testing.T) {
 }
 
 // Lowered limits must carry a reason just as lowered requests do, including on
-// IDLE containers where classifyWaste does not run.
+// IDLE containers where classifyWaste does not run. A CPU limit is never
+// lowered, so on both the memory limit carries the reason and the CPU limit
+// stays where it is.
 func TestLoweredLimitsCarryReasons(t *testing.T) {
 	t.Run("waste container", func(t *testing.T) {
 		f := runOne(t, container("Burstable", 100, 500, 256*mib, 1024*mib), metrics.Observation{
-			CPUUsageP95: 0.001, CPUUsageMax: 0.005,
+			CPUUsageP95: 0.001, CPUUsageMax: 0.005, CPUStartupMax: 0.005,
 			MemWorkingSet: 63 * mib, MemP95: 60 * mib,
 		}, analyze.Cluster{})
-		if f.RecCPULimit >= 500 || f.RecMemLimit >= 1024*mib {
-			t.Fatalf("fixture drifted: limits not lowered (%dm, %s)", f.RecCPULimit, analyze.HumanBytes(f.RecMemLimit))
+		if f.RecMemLimit >= 1024*mib {
+			t.Fatalf("fixture drifted: memory limit not lowered (%s)", analyze.HumanBytes(f.RecMemLimit))
 		}
-		if !hasCode(f, analyze.CPULimitUnderused) {
-			t.Errorf("lowered CPU limit has no %s reason: %v", analyze.CPULimitUnderused, f.Reasons)
+		if f.RecCPULimit != 500 || hasCode(f, analyze.CPULimitUnderused) {
+			t.Errorf("CPU limit 500m became %dm: %v", f.RecCPULimit, f.Reasons)
 		}
 		if !hasCode(f, analyze.MemLimitUnderused) {
 			t.Errorf("lowered memory limit has no %s reason: %v", analyze.MemLimitUnderused, f.Reasons)
@@ -148,7 +150,7 @@ func TestLoweredLimitsCarryReasons(t *testing.T) {
 	})
 	t.Run("idle container", func(t *testing.T) {
 		obs := metrics.Observation{
-			CPUUsageP95: 0.0002, CPUUsageMax: 0.0004,
+			CPUUsageP95: 0.0002, CPUUsageMax: 0.0004, CPUStartupMax: 0.0004,
 			MemWorkingSet: 10 * mib, MemP95: 10 * mib,
 			MemEarly: 10 * mib, MemLate: 10 * mib,
 			Samples: 60000,
@@ -158,8 +160,8 @@ func TestLoweredLimitsCarryReasons(t *testing.T) {
 		if f.Verdict != analyze.Idle {
 			t.Fatalf("fixture drifted: want IDLE, got %s", f.Verdict)
 		}
-		if !hasCode(f, analyze.CPULimitUnderused) || !hasCode(f, analyze.MemLimitUnderused) {
-			t.Errorf("IDLE container with lowered limits is missing limit reasons: %v", f.Reasons)
+		if f.RecCPULimit != 100 || !hasCode(f, analyze.MemLimitUnderused) {
+			t.Errorf("IDLE container: CPU limit %dm, want 100m held, and a %s reason: %v", f.RecCPULimit, analyze.MemLimitUnderused, f.Reasons)
 		}
 	})
 }

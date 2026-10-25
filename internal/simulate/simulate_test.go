@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mfranzon/tare/internal/metrics"
+	"github.com/2listic/tare/internal/metrics"
 )
 
 const gib = 1 << 30

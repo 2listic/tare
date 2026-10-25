@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/ceilings"
-	"github.com/mfranzon/tare/internal/discover"
-	"github.com/mfranzon/tare/internal/metrics"
-	"github.com/mfranzon/tare/internal/simulate"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/ceilings"
+	"github.com/2listic/tare/internal/discover"
+	"github.com/2listic/tare/internal/metrics"
+	"github.com/2listic/tare/internal/simulate"
 )
 
 var origin = time.Date(2026, 3, 2, 0, 0, 0, 0, time.UTC) // a Monday

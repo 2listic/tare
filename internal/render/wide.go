@@ -7,9 +7,9 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/packing"
-	"github.com/mfranzon/tare/internal/report"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/packing"
+	"github.com/2listic/tare/internal/report"
 )
 
 // The terminal report is a sequence of tables and nothing else.
@@ -208,6 +208,10 @@ func (p *printer) printTotals(fs []analyze.Finding) {
 	if s.IdleWorkloads > 0 {
 		row(w, "idle", strconv.Itoa(s.IdleWorkloads), CPUDelta(-s.IdleCPUMillicores), MemDelta(-s.IdleMemBytes),
 			"not_in_lower:"+string(analyze.IdleCaveat))
+	}
+	if s.UnverifiedWorkloads > 0 {
+		row(w, "unverified", strconv.Itoa(s.UnverifiedWorkloads), CPUDelta(-s.UnverifiedCPUMillicores), MemDelta(-s.UnverifiedMemBytes),
+			"not_in_lower:"+string(analyze.Unverified))
 	}
 	if s.MemUnknown > 0 {
 		row(w, "unknown", strconv.Itoa(s.MemUnknown), "-", "?", string(analyze.MemDemandCensored))

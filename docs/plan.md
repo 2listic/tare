@@ -75,7 +75,7 @@ it, and the observational ceiling inference cannot distinguish a capped heap
 from genuinely steady demand (the consequence of being wrong is bounded, and
 documented where it is implemented).
 
-**A long-running stability experiment is collecting on msi.** See
+**A long-running stability experiment is collecting on the lab cluster.** See
 `test/longrun/README.md`. It has no end date and nothing will notify you. The
 clock was **restarted 2026-09-14 21:55 UTC** after the load generator was found
 to be generating no measurable load; day 7 and day 14 count from then.
@@ -840,7 +840,7 @@ inventory and a pod list and touches no cluster.
 ## Live validation on the lab cluster (2026-09-19)
 
 The long run was stopped and attempt 5's data archived to
-`~/tare-longrun/attempt5-data/` on msi (88 snapshots, 793 rows,
+`~/tare-longrun/attempt5-data/` on the lab cluster (88 snapshots, 793 rows,
 2026-09-15 23:07 to 2026-09-19 13:17). The new code was then run against the
 live k3d cluster with `--window 4d`.
 
@@ -943,7 +943,7 @@ experiment exists to measure, and it holds.
 
 ## Pivot: self-hosted inference serving (2026-09-19)
 
-Direction set by Marco: point tare at LLM inference on Kubernetes - vLLM,
+Next direction: point tare at LLM inference on Kubernetes - vLLM,
 Ollama, TGI, llama.cpp - rather than at general web workloads. First pass is
 shipped and verified on the lab cluster. 206 tests across 8 packages.
 
@@ -1012,7 +1012,7 @@ using GPU fields added to the node inventory (`nvidia.com/gpu` capacity, plus
 
 ### Verified on the lab cluster, against pods that never started
 
-`test/lab/inference.yaml` plants three workloads on msi. Every finding below was
+`test/lab/inference.yaml` plants three workloads on the lab cluster. Every finding below was
 produced while the vLLM pod sat in `ImagePullBackOff`, which is the claim in
 executable form - the tool reads the configuration, not the behaviour:
 
@@ -1026,7 +1026,7 @@ executable form - the tool reads the configuration, not the behaviour:
 - and on all three, "configured as an inference server but requests no GPU"
 
 The lab cluster has no GPU exposed to k3d, so the fit check itself is covered
-only by unit tests. msi does have an RTX 3060 (6GB); exposing it needs the
+only by unit tests. The lab host does have an RTX 3060 (6GB); exposing it needs the
 NVIDIA container runtime and device plugin, and that is the next honest step,
 because a 6GB card refusing an 8B fp16 model is exactly the refusal this pass
 was written to produce.
@@ -1041,7 +1041,7 @@ throughout; only running it against a cluster showed the output.
 
 ## Refocus: optimising a fixed node pool (2026-09-19, third pass)
 
-Direction from Marco after the inference pass: rethink around the hardware
+Direction after the inference pass: rethink around the hardware
 actually available, and make tare useful to someone who wants to optimise the
 cluster they have. That is the right correction, for a reason this document
 had already established and then walked past.
@@ -1372,7 +1372,7 @@ write a change that would silently demote a Guaranteed pod to Burstable.
 
 ### Verified end to end
 
-A git repository was built on msi from the live lab manifests, `tare diff
+A git repository was built on the lab cluster from the live lab manifests, `tare diff
 --write` was run against the cluster, and the result inspected with `git diff`:
 5 files changed, 28 insertions, 18 deletions, every file still parsing, comments
 and inline notes intact, and the BestEffort pod correctly gaining a resources
@@ -1749,7 +1749,7 @@ and a per-type figure would need exactly that.
 
 ### Revision: grid intensity by country (2026-10-19)
 
-Marco asked for `--grid-intensity italy` instead of a number, taking the
+The ask was for `--grid-intensity italy` instead of a number, taking the
 middle of the ranges in a table given in chat. Those ranges were from memory
 and wrong: France 41 not 50-80, Germany 330 not 350-450, Poland 591 not
 600-750 (Ember 2025). Shipping their midpoints would have embedded

@@ -1,0 +1,429 @@
+#!/usr/bin/env python3
+"""compare-pressure: tare-agent's CPU wait judged the way tare judges PSI.
+
+Reads Prometheus only. Works with or without PSI on the cluster: without it,
+only the agent's rules are shown. For every container it builds 5-minute
+stretches of
+
+  wait       CPU wait from tare-agent (tare_cpu_wait_seconds_total), s/s
+  usage      CPU usage from the kubelet (container_cpu_usage_seconds_total), cores
+  slowdown   wait / usage: seconds of waiting per second of running
+  psi        PSI waiting from the kubelet (container_pressure_cpu_waiting_seconds_total), s/s
+
+and decides, per stretch, whether the container was stalled by each rule:
+
+  psi                PSI > 0.03 (tare's pressure threshold, on 5-minute means)
+  relative-slowdown  slowdown >= 2 x the container's own normal and wait >= 0.01,
+                     or slowdown >= 1. Normal = 10th percentile of its slowdown
+                     over the window (stretches with wait >= 0.001)
+  fixed-slowdown     slowdown >= 0.488 and wait >= 0.01
+  absolute-wait      wait >= 0.0435
+
+Each rule then gives each container the verdict tare's pressure check gives:
+
+  SATURATED    stalled in at least --share of its stretches (default 5%) and its
+               peak CPU reached half of its request or limit: tare would never
+               lower its CPU
+  NOT-STARVED  otherwise: pressure does not stop a reduction, and tare would go on
+               to its other checks (IDLE, WASTE, OK, UNSET, ...). Stalled as often
+               but using under half its allocation is also NOT-STARVED, with the
+               evidence code NODE_CONTENTION (as in tare): the node was busy, a
+               bigger request would not help
+  UNVERIFIED   too little data (fewer than 12 stretches), or, for the agent rules,
+               the agent accounted under half of the container's CPU time (not
+               checked for idle containers: never above MIN_USAGE cores)
+
+These are not tare's final verdicts. Pressure only decides whether a container is
+SATURATED (CPU starved) and whether a WASTE or OK becomes UNVERIFIED (no usable
+pressure signal); tare's other verdicts (LEAKING, BLOCKED, IDLE, WASTE, UNSET, OK,
+CONFLICT, NO-DATA) come from memory, usage and the manifests, and would be the same
+with either pressure source.
+
+Standard library only (Python >= 3.9).
+
+  compare-pressure --prometheus http://prometheus:9090 --window 1d
+  compare-pressure --prometheus http://localhost:9090 --window 2h --namespace shop,payments
+  compare-pressure ... --stretches stretches.csv    # every stretch, for your own analysis
+"""
+import argparse
+import csv
+import hashlib
+import json
+import math
+import re
+import sys
+import time
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+
+STEP = 300  # seconds: one stretch
+
+PSI_THRESHOLD = 0.03       # tare's Thresholds.PSIWaiting
+IDLE_FLOOR = 0.01          # s/s of wait below which a stretch is never stalled (slowdown rules)
+MIN_USAGE = 0.005          # cores: below this the slowdown is not defined
+BASELINE_MIN_WAIT = 0.001  # stretches with less wait do not shape the normal
+MIN_STRETCHES = 12
+MIN_COVERAGE = 0.5
+MIN_UTIL = 0.5             # tare's Thresholds.MinSaturationUtil
+
+# Verdicts of the pressure check. NOT-STARVED is not tare's OK: it means pressure
+# does not stop a reduction, and tare's other checks decide the final verdict.
+SATURATED, NOT_STARVED, UNVERIFIED = "SATURATED", "NOT-STARVED", "UNVERIFIED"
+
+RULES = ["psi", "relative-slowdown", "fixed-slowdown", "absolute-wait"]
+AGENT_RULES = RULES[1:]
+CODE = {"psi": "CPU_PRESSURE", "relative-slowdown": "CPU_WAIT_RELATIVE",
+        "fixed-slowdown": "CPU_WAIT_SLOWDOWN", "absolute-wait": "CPU_WAIT_ABSOLUTE"}
+
+
+def stalled(rule, s, w, normal, psi):
+    """Whether one stretch is stalled under a rule. s is None when the container was idle."""
+    if rule == "psi":
+        return psi is not None and psi > PSI_THRESHOLD
+    if rule == "absolute-wait":
+        return w >= 0.0435
+    if s is None:
+        return False
+    if rule == "fixed-slowdown":
+        return s >= 0.488 and w >= IDLE_FLOOR
+    if rule == "relative-slowdown":
+        return (normal is not None and s >= 2 * normal and w >= IDLE_FLOOR) or s >= 1.0
+    raise ValueError(rule)
+
+
+# ------------------------------------------------------------------ Prometheus
+
+class Prom:
+    def __init__(self, url, timeout):
+        self.url, self.timeout = url.rstrip("/"), timeout
+
+    def _get(self, path, params):
+        q = urllib.parse.urlencode(params)
+        with urllib.request.urlopen(f"{self.url}{path}?{q}", timeout=self.timeout) as r:
+            body = json.load(r)
+        if body.get("status") != "success":
+            raise RuntimeError(body.get("error", body))
+        return body["data"]["result"]
+
+    def instant(self, expr, at):
+        return self._get("/api/v1/query", {"query": expr, "time": at})
+
+    def range(self, expr, start, end):
+        return self._get("/api/v1/query_range", {"query": expr, "start": start, "end": end, "step": STEP})
+
+    def total(self, expr, at):
+        r = self.instant(expr, at)
+        return float(r[0]["value"][1]) if r else 0.0
+
+
+def key(metric):
+    return metric.get("namespace", ""), metric.get("pod", ""), metric.get("container", "")
+
+
+def by_key_range(result):
+    out = {}
+    for r in result:
+        pts = {}
+        for ts, v in r["values"]:
+            f = float(v)
+            if math.isfinite(f):
+                pts[int(float(ts))] = f
+        out[key(r["metric"])] = pts
+    return out
+
+
+def by_key_instant(result):
+    out = {}
+    for r in result:
+        f = float(r["value"][1])
+        if math.isfinite(f):
+            out[key(r["metric"])] = f
+    return out
+
+
+def queries(sel, kubelet):
+    usage = f"container_cpu_usage_seconds_total{{{sel}{kubelet}}}"
+    names = f"max by (id, namespace, pod, container) ({usage} * 0 + 1)"
+
+    def agent(metric):
+        # The agent labels its series with `id` (the container's cgroup path);
+        # the kubelet's series carry the same `id`, which gives the names.
+        return (f"sum by (namespace, pod, container) (sum by (id) (rate({metric}[5m])) "
+                f"* on (id) group_left (namespace, pod, container) {names})")
+    return {
+        "wait": agent("tare_cpu_wait_seconds_total"),
+        "run": agent("tare_cpu_run_seconds_total"),
+        "usage": f"sum by (namespace, pod, container) (max by (id, namespace, pod, container) (rate({usage}[5m])))",
+        "psi": (f"max by (namespace, pod, container) "
+                f"(rate(container_pressure_cpu_waiting_seconds_total{{{sel}{kubelet}}}[5m]))"),
+    }
+
+
+# ------------------------------------------------------------------ analysis
+
+def quantile(values, q):
+    """Linearly interpolated quantile, None for no values."""
+    v = sorted(values)
+    if not v:
+        return None
+    pos = q * (len(v) - 1)
+    lo = int(pos)
+    return v[lo] if lo + 1 >= len(v) else v[lo] + (pos - lo) * (v[lo + 1] - v[lo])
+
+
+def analyse(k, wait, run, usage, psi):
+    """One container: its stretches, its normal slowdown, coverage, and per-rule shares."""
+    rows, for_normal, cov = [], [], []
+    for ts in sorted(set(wait) & set(usage)):
+        w, u = wait[ts], usage[ts]
+        s = w / u if u > MIN_USAGE else None
+        if s is not None:
+            if w >= BASELINE_MIN_WAIT:
+                for_normal.append(s)
+            if ts in run:
+                cov.append(run[ts] / u)
+        rows.append({"ts": ts, "wait": w, "usage": u, "slowdown": s, "psi": psi.get(ts)})
+    c = {"key": k, "rows": rows, "normal": quantile(for_normal, 0.10), "coverage": quantile(cov, 0.5),
+         "busy": any(r["slowdown"] is not None for r in rows),
+         "stretches": len(rows), "psi_stretches": sum(1 for r in rows if r["psi"] is not None)}
+    for r in rows:
+        for rule in RULES:
+            r[rule] = stalled(rule, r["slowdown"], r["wait"], c["normal"], r["psi"])
+    for rule in RULES:
+        n = c["psi_stretches"] if rule == "psi" else c["stretches"]
+        c["share", rule] = sum(r[rule] for r in rows) / n if n else None
+    return c
+
+
+def judge(c, rule, share_min):
+    """tare's pressure verdict for one container under one rule: (verdict, evidence codes)."""
+    if rule == "psi":
+        if not c["psi_stretches"]:
+            return "-", []
+        if c["psi_stretches"] < MIN_STRETCHES:
+            return UNVERIFIED, ["FEW_STRETCHES"]
+    else:
+        if c["stretches"] < MIN_STRETCHES:
+            return UNVERIFIED, ["FEW_STRETCHES"]
+        # an idle container (no stretch above MIN_USAGE) has no coverage to check
+        if c["busy"] and (c["coverage"] is None or c["coverage"] < MIN_COVERAGE):
+            return UNVERIFIED, ["LOW_COVERAGE"]
+    if c["share", rule] < share_min:
+        return NOT_STARVED, []
+    if c["util"] is not None and c["util"] < MIN_UTIL:
+        return NOT_STARVED, ["NODE_CONTENTION"]
+    return SATURATED, [CODE[rule]]
+
+
+def workload(pod):
+    """Deployment pods drop their ReplicaSet and pod hashes, StatefulSet and DaemonSet pods their suffix."""
+    for pattern in (r"^(.*)-[0-9a-f]{8,10}-[0-9a-z]{5}$", r"^(.*)-[0-9a-z]{5}$", r"^(.*)-\d+$"):
+        m = re.match(pattern, pod)
+        if m:
+            return m.group(1)
+    return pod
+
+
+def duration(text):
+    m = re.fullmatch(r"(\d+)([mhdw])", text)
+    if not m:
+        raise argparse.ArgumentTypeError("use e.g. 30m, 12h, 7d, 2w")
+    return int(m.group(1)) * {"m": 60, "h": 3600, "d": 86400, "w": 604800}[m.group(2)]
+
+
+def human(seconds):
+    for unit, n in (("w", 604800), ("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds % n == 0:
+            return f"{seconds // n}{unit}"
+    return f"{seconds}s"
+
+
+def hash_name(s):
+    """The stable 8-character hash tare's --redact uses, so the two outputs match.
+    Stable, not secret: a guessed name can be confirmed."""
+    return s if len(s) <= 2 else hashlib.sha256(s.encode()).hexdigest()[:8]
+
+
+def redact_source(url):
+    """The Prometheus URL with its host hashed, its port kept and its path dropped, as tare does."""
+    u = urllib.parse.urlsplit(url)
+    if not u.hostname:
+        return url
+    host = hash_name(u.hostname) + (f":{u.port}" if u.port else "")
+    return urllib.parse.urlunsplit((u.scheme, host, "", "", ""))
+
+
+def table(rows, header):
+    widths = [max(len(str(x)) for x in col) for col in zip(header, *rows)]
+    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+    return "\n".join(fmt.format(*map(str, r)).rstrip() for r in [header, *rows])
+
+
+# ------------------------------------------------------------------ main
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
+    ap.add_argument("--prometheus", required=True, help="Prometheus base URL, e.g. http://localhost:9090")
+    ap.add_argument("--window", type=duration, default=duration("1d"), help="how far back to look (default 1d)")
+    ap.add_argument("--end", help="end of the window: Unix time or 2026-10-21T16:36:00Z (default: now)")
+    ap.add_argument("--namespace", help="comma-separated namespaces (default: all)")
+    ap.add_argument("--share", type=float, default=0.05,
+                    help="share of stalled stretches that makes a container SATURATED (default 0.05)")
+    ap.add_argument("--kubelet-job", default="kubelet",
+                    help='Prometheus job of the kubelet\'s cAdvisor endpoint (default "kubelet"; "" for any job)')
+    ap.add_argument("--all", action="store_true",
+                    help="list every container, also those NOT-STARVED under every rule")
+    ap.add_argument("--stretches", help="write every stretch of every container to this CSV file")
+    ap.add_argument("--redact", action="store_true",
+                    help="replace namespace, pod, workload and container names and the Prometheus host with "
+                         "stable hashes (the same as tare's --redact), in the output and the --stretches file")
+    ap.add_argument("--timeout", type=int, default=300, help="seconds per Prometheus query (default 300)")
+    a = ap.parse_args()
+
+    if a.end is None:
+        end = int(time.time())
+    elif a.end.isdigit():
+        end = int(a.end)
+    else:
+        end = int(datetime.fromisoformat(a.end.replace("Z", "+00:00")).timestamp())
+    end -= end % STEP
+    start, win = end - a.window, human(a.window)
+    sel = 'container!="",container!="POD"'
+    if a.namespace:
+        sel = f'namespace=~"{"|".join(n.strip() for n in a.namespace.split(","))}",{sel}'
+    kubelet = f',job="{a.kubelet_job}"' if a.kubelet_job else ""
+    p = Prom(a.prometheus, a.timeout)
+    rn = hash_name if a.redact else (lambda s: s)
+    source = redact_source(a.prometheus) if a.redact else a.prometheus
+    warnings = []
+
+    data = {}
+    for name, expr in queries(sel, kubelet).items():
+        try:
+            data[name] = by_key_range(p.range(expr, start, end))
+        except Exception as e:  # noqa: BLE001 - reported, not swallowed
+            # the query and the error can carry the namespaces and the Prometheus URL
+            sys.exit(f"error: query {name} failed" + ("" if a.redact else f": {e}\n  {expr}"))
+    if not data["wait"]:
+        if not data["usage"]:
+            sys.exit("error: no container CPU usage in this window for the selection: check --namespace, "
+                     "--kubelet-job and --end")
+        if not p.instant("count(tare_cpu_wait_seconds_total)", end):
+            sys.exit("error: no tare_cpu_wait_seconds_total series at the end of the window: "
+                     "is tare-agent deployed and scraped by this Prometheus?")
+        sys.exit("error: tare-agent series exist but none matches a container: the kubelet's cAdvisor series "
+                 "must keep the `id` label, and --kubelet-job must name the kubelet's job")
+    have_psi = bool(data["psi"])
+    if not have_psi:
+        warnings.append(("SIGNAL_ABSENT", "psi: not exported by this cluster, only the agent's rules are shown"))
+    rules = RULES if have_psi else AGENT_RULES
+
+    # tare's utilisation gate: peak 1-minute usage over the CPU limit, else the request
+    usage = f"container_cpu_usage_seconds_total{{{sel}{kubelet}}}"
+    peak = by_key_instant(p.instant(
+        f"max by (namespace, pod, container) (max_over_time(rate({usage}[1m])[{win}:1m]))", end))
+    alloc = {}
+    for res in ("requests", "limits"):  # limits overwrite requests, as in tare
+        try:
+            alloc.update({k: v for k, v in by_key_instant(p.instant(
+                f'max by (namespace, pod, container) (max_over_time('
+                f'kube_pod_container_resource_{res}{{{sel},resource="cpu"}}[{win}]))', end)).items() if v > 0})
+        except Exception:  # noqa: BLE001 - kube-state-metrics is optional
+            pass
+    if not alloc:
+        warnings.append(("SIGNAL_ABSENT", "kube_pod_container_resource_requests: no CPU requests, "
+                                          "so NODE_CONTENTION cannot be told apart"))
+
+    containers = []
+    for k, wait in data["wait"].items():
+        c = analyse(k, wait, data["run"].get(k, {}), data["usage"].get(k, {}), data["psi"].get(k, {}))
+        c["util"] = peak[k] / alloc[k] if k in peak and k in alloc else None
+        c["verdict"] = {rule: judge(c, rule, a.share) for rule in rules}
+        containers.append(c)
+
+    # the agent's self-checks over the window
+    nodes = p.total("count(tare_agent_build_info)", end)
+    exits = p.total(f"sum(increase(tare_agent_exits_total[{win}]))", end)
+    for metric, code, limit in (("tare_agent_exits_layout_unknown_total", "AGENT_LAYOUT_UNKNOWN", 0),
+                                ("tare_agent_netlink_drops_total", "AGENT_DROPS", 0),
+                                ("tare_agent_exits_unattributed_total", "AGENT_UNATTRIBUTED", 0.05 * exits)):
+        v = p.total(f"sum(increase({metric}[{win}]))", end)
+        if exits and v > limit:
+            warnings.append((code, f"{v:.0f} of {exits:.0f} exit records in the window ({metric})"))
+    low = sum(1 for c in containers if c["coverage"] is not None and c["coverage"] < MIN_COVERAGE)
+    if low:
+        warnings.append(("AGENT_LOW_COVERAGE", f"{low} containers: the agent accounted under half of their CPU "
+                                               "time, so the agent's verdicts on them are UNVERIFIED"))
+
+    # findings: containers where some rule says more than a plain NOT-STARVED
+    severity = {SATURATED: 0, UNVERIFIED: 1, NOT_STARVED: 2, "-": 3}
+    shown = [c for c in containers if a.all
+             or any(v != NOT_STARVED or codes for v, codes in c["verdict"].values() if v != "-")]
+    shown.sort(key=lambda c: (min(severity[v] for v, _ in c["verdict"].values()), c["key"]))
+    header = [r.upper() for r in rules] + ["NAMESPACE", "WORKLOAD", "CONTAINER", "STALLED", "NORMAL", "COVER", "WHY"]
+    rows = []
+    for c in shown:
+        codes = []
+        for rule in rules:
+            codes += [x for x in c["verdict"][rule][1] if x not in codes]
+        if have_psi:
+            psi_v, rel_v = c["verdict"]["psi"][0], c["verdict"]["relative-slowdown"][0]
+            if psi_v == SATURATED and rel_v == NOT_STARVED:
+                codes.append("PSI_ONLY")
+            if rel_v == SATURATED and psi_v == NOT_STARVED:
+                codes.append("AGENT_ONLY")
+        ns, pod, ctr = c["key"]
+        stalled_share = "/".join("-" if c["share", r] is None else f"{100 * c['share', r]:.0f}%" for r in rules)
+        rows.append([c["verdict"][r][0] for r in rules] + [
+            rn(ns), rn(workload(pod)), rn(ctr), stalled_share,
+            "-" if c["normal"] is None else f"{c['normal']:.3f}",
+            "-" if c["coverage"] is None else f"{c['coverage']:.2f}",
+            ",".join(codes[:2]) + (f",+{len(codes) - 2}" if len(codes) > 2 else "") or "-"])  # as tare does
+
+    print(f"using {source}: tare-agent on {nodes:.0f} nodes, PSI {'present' if have_psi else 'absent'}, "
+          f"{win} ending {datetime.fromtimestamp(end, timezone.utc):%Y-%m-%dT%H:%MZ}"
+          + (" | names redacted" if a.redact else ""))
+    print("# section=findings")
+    print(table(rows, header))
+    print()
+
+    sat = ", ".join(f"{r} {sum(1 for c in containers if c['verdict'][r][0] == SATURATED)}" for r in rules)
+    print(f"{len(containers)} containers ({len(rows)} listed) over {win}: SATURATED by {sat}")
+    if have_psi:
+        for rule in AGENT_RULES:
+            judged = [c for c in containers if c["verdict"]["psi"][0] in (SATURATED, NOT_STARVED)
+                      and c["verdict"][rule][0] in (SATURATED, NOT_STARVED)]
+            pairs = [(r["psi"] is not None and r["psi"] > PSI_THRESHOLD, r[rule])
+                     for c in judged for r in c["rows"] if r["psi"] is not None]
+            if not pairs:
+                continue
+            same = sum(1 for c in judged if c["verdict"][rule][0] == c["verdict"]["psi"][0])
+            print(f"agreement  {rule}: same verdict as psi on {same} of {len(judged)} containers; "
+                  f"same call on {100 * sum(x == y for x, y in pairs) / len(pairs):.1f}% of {len(pairs)} stretches "
+                  f"({sum(x and not y for x, y in pairs)} psi only, {sum(y and not x for x, y in pairs)} {rule} only)")
+    for code, text in warnings:
+        print(f"warning  {code:<20} {text}")
+    if not a.all:
+        print("not listed: containers NOT-STARVED under every rule (--all)")
+    print(f"STALLED: share of 5-minute stretches stalled, per rule in column order; NORMAL: the container's normal "
+          f"slowdown; COVER: share of its CPU time the agent saw")
+
+    if a.stretches:
+        with open(a.stretches, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["namespace", "pod", "container", "time", "wait", "usage", "slowdown", "psi", "normal", *rules])
+            for c in containers:
+                for r in c["rows"]:
+                    w.writerow([*map(rn, c["key"]), datetime.fromtimestamp(r["ts"], timezone.utc).isoformat(),
+                                f"{r['wait']:.6f}", f"{r['usage']:.6f}",
+                                "" if r["slowdown"] is None else f"{r['slowdown']:.6f}",
+                                "" if r["psi"] is None else f"{r['psi']:.6f}",
+                                "" if c["normal"] is None else f"{c['normal']:.6f}",
+                                *[int(r[rule]) for rule in rules]])
+        print(f"stretches written to {a.stretches}")
+
+
+if __name__ == "__main__":
+    main()

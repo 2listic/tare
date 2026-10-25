@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mfranzon/tare/internal/metrics"
-	"github.com/mfranzon/tare/internal/render"
+	"github.com/2listic/tare/internal/metrics"
+	"github.com/2listic/tare/internal/render"
 )
 
 const (

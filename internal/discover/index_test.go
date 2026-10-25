@@ -7,9 +7,11 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 )
@@ -158,5 +160,31 @@ func TestUnreadableTemplatesWarnRatherThanFail(t *testing.T) {
 	}
 	if len(c.Warnings()) != 1 {
 		t.Fatalf("warnings = %v, want one line naming what was lost", c.Warnings())
+	}
+}
+
+// A --timeout that expired mid-run was printed as "SIGNAL_DENIED rbac", which
+// sends the reader to fix permissions they already have. Only the API
+// server's own refusal is a denial.
+func TestOnlyAForbiddenReadIsCalledDenied(t *testing.T) {
+	for _, tc := range []struct {
+		err    error
+		denied bool
+	}{
+		{apierrors.NewForbidden(schema.GroupResource{Group: "apps", Resource: "deployments"}, "", fmt.Errorf("no")), true},
+		{context.DeadlineExceeded, false},
+	} {
+		cs := fake.NewSimpleClientset(deploymentWithPods(1)...)
+		cs.PrependReactor("list", "deployments", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, tc.err
+		})
+		c := &Client{cs: cs}
+		if _, err := c.Containers(context.Background(), nil); err != nil {
+			t.Fatal(err)
+		}
+		ws := c.Warnings()
+		if len(ws) != 1 || c.Denied(ws[0]) != tc.denied {
+			t.Errorf("%v: warnings %v, denied %v, want denied %v", tc.err, ws, len(ws) == 1 && c.Denied(ws[0]), tc.denied)
+		}
 	}
 }
