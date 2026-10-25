@@ -1,8 +1,8 @@
 # Hands-on session
 
-About 75 minutes, for a group of colleagues on the office network. Part 1 needs
+About 75 minutes, for a group of colleagues on a shared network. Part 1 needs
 no cluster. Parts 2 and 3 use the shared lab cluster described in
-`test/lab/README.md`: k3d `tare-test` on `msi` (192.168.1.122), context
+`test/lab/README.md`: k3d `tare-test` on the lab host, context
 `k3d-tare-test`, Grafana on :30030.
 
 **Ground rules for the lab.** It is shared, and it is running a long stability

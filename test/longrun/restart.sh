@@ -16,6 +16,7 @@ set -u
 export PATH="$HOME/.local/bin:$PATH"
 DIR="$HOME/tare-longrun"
 NS=tare-lab
+PROM="${PROM:-http://localhost:30090}"
 FAIL=0
 TS=$(date -u +%Y%m%dT%H%M%SZ)
 # REASON is recorded in the archived run's WHY.md. Set it when the reason is
@@ -107,7 +108,7 @@ RC=$(kubectl -n "$NS" get pod "$POD1" -o jsonpath='{.status.containerStatuses[0]
 [ "$RC" = "0" ]        && ok "container did not restart" || bad "container restarted $RC times"
 
 say "7. the load generator is actually loading something"
-Q() { curl -s --get "http://192.168.1.122:30090/api/v1/query" --data-urlencode "query=$1" \
+Q() { curl -s --get "$PROM/api/v1/query" --data-urlencode "query=$1" \
       | python3 -c 'import sys,json;d=json.load(sys.stdin)["data"]["result"];print(round(sum(float(r["value"][1]) for r in d)*1000,1) if d else 0)'; }
 SRV=$(Q 'sum(rate(container_cpu_usage_seconds_total{namespace="tare-lab",pod=~"diurnal-web.*",container="nginx"}[5m]))')
 CLI=$(Q 'sum(rate(container_cpu_usage_seconds_total{namespace="tare-lab",pod=~"load-generator.*",container="gen"}[5m]))')
@@ -182,4 +183,4 @@ echo "Clock started $(date -u). First snapshot taken; cron installed at :17."
 echo "  48h check:  $(date -u -d '+2 days' +%Y-%m-%d)"
 echo "  day 7:      $(date -u -d '+7 days' +%Y-%m-%d)"
 echo "  day 14:     $(date -u -d '+14 days' +%Y-%m-%d)"
-echo "  analyse:    ssh msi 'python3 ~/tare-longrun/stability.py'"
+echo "  analyse:    ssh <lab-host> 'python3 ~/tare-longrun/stability.py'"

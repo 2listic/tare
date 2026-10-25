@@ -757,7 +757,7 @@ saturation path never saw either one, because their pressure was low against
 their allocation and read as node contention. This is defect 2 at a shorter
 timescale.
 
-**Caught by:** running the post-review build on msi on 2026-10-11 and
+**Caught by:** running the post-review build on the lab cluster on 2026-10-11 and
 reading the patch script's comments against its numbers.
 
 **Fixed by:** a CPU limit that throttled the container above `ThrottleRatio`
@@ -944,7 +944,7 @@ hashed the namespace and kept the PDB name, and JSON carried `"HPAName":
 for the same endpoint. The test enumerated the fields it checked, so every
 field nobody listed passed.
 
-**Caught by:** the 2026-10-24 pre-release run on msi, grepping every redacted
+**Caught by:** the 2026-10-24 pre-release run on the lab cluster, grepping every redacted
 output for every pod, node, container and image name in the cluster.
 
 **Fixed by:** PDB names read out of the sentences that carry them, HPA and VPA
@@ -964,7 +964,7 @@ container was throttled in 89% of periods by bursts the average hides. The
 stall was its own quota. `throttled_limit_test.go` had documented this very
 container "reading as node contention" without anyone testing the reason.
 
-**Caught by:** the 2026-10-24 pre-release run on msi.
+**Caught by:** the 2026-10-24 pre-release run on the lab cluster.
 
 **Fixed by:** pressure on a throttle-stalled container is not attributed to the
 node. `TestThrottledPressureIsNotBlamedOnTheNode`, both directions.
@@ -979,7 +979,7 @@ up: p95 0m while `kubectl top` showed 29-51m. `low` confidence was the only
 caveat, and nothing that acts on a row reads confidence. `diff --write` wrote a
 10m CPU *limit* into eight Go and Node services of Google's Online Boutique.
 
-**Caught by:** deploying a third-party application on msi and running tare at
+**Caught by:** deploying a third-party application on the lab cluster and running tare at
 once, which is what a first-time user does.
 
 **Fixed by:** under `MinSamplesForSizing` (240, an hour at a 15s scrape) a

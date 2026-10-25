@@ -47,7 +47,7 @@ type Thresholds struct {
 	// of data.
 	MinSamplesForInference int
 	// MinSamplesForSizing: below it a reduction is not proposed at all. A
-	// container minutes old has not met its own load yet; on msi a frontend
+	// container minutes old has not met its own load yet; on the lab cluster a frontend
 	// 3.5 minutes old read p95 0m while drawing 50m, and was told 10m.
 	MinSamplesForSizing int
 	// MinSaturationUtil guards every pressure-based saturation verdict: the

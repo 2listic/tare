@@ -268,7 +268,7 @@ func sizeCPULimit(f *Finding, th Thresholds, cpuStarved bool, recCPU, cpuCap int
 	// quota every 100ms and the finest CPU signal here is a rate averaged over
 	// a minute, so a container that needs 50m for a few milliseconds per
 	// request reads as using 5m, and a limit sized from that stretches every
-	// such burst across several periods. On msi Online Boutique ran at
+	// such burst across several periods. On the lab cluster Online Boutique ran at
 	// baseline error rate under tare's limits, restarted nothing, and served
 	// its product page at 4x the p95 latency, 18x at twice the load. Lowering
 	// a limit saves nothing the scheduler sees - it reserves the request - so

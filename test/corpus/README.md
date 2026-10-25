@@ -15,7 +15,7 @@ measurement.
 
 ## Rebuilding
 
-    ssh msi 'helm template ...' > charts.yaml      # see the header of mkcorpus
+    helm template ... > charts.yaml      # see the header of mkcorpus
     go run ./tools/mkcorpus helm-public < charts.yaml > test/corpus/specs.jsonl
 
 Records are deduplicated by (image, command, args, env): charts share sidecars,

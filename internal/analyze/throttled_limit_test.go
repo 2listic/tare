@@ -9,7 +9,7 @@ import (
 	"github.com/2listic/tare/internal/metrics"
 )
 
-// guaranteedCache reproduces tare-lab's guaranteed-cache as measured on msi on
+// guaranteedCache reproduces tare-lab's guaranteed-cache as measured on the lab cluster on
 // 2026-10-11: a 100m limit throttling it in 82% of periods at its worst, while
 // its averaged CPU peaked at 25m. Its pressure was low enough relative to its
 // allocation that it read as node contention, so it was never SATURATED, and
@@ -94,7 +94,7 @@ func hasCode(f analyze.Finding, c analyze.Code) bool {
 	return false
 }
 
-// guaranteed-cache on msi carried NODE_CONTENTION ("contention on the node
+// guaranteed-cache on the lab cluster carried NODE_CONTENTION ("contention on the node
 // rather than a shortage of its own") and LIMIT_NOT_NODE ("the constraint is
 // this container's own limit, not the machine") on the same row. The pressure
 // is the quota's: only an unthrottled container's stalls can be the node's.
@@ -111,7 +111,7 @@ func TestThrottledPressureIsNotBlamedOnTheNode(t *testing.T) {
 	}
 }
 
-// boutique/frontend on msi, 3.5 minutes old: 14 samples, p95 0m while drawing
+// boutique/frontend on the lab cluster, 3.5 minutes old: 14 samples, p95 0m while drawing
 // 50m, and WASTE 100m→10m that -o patch and diff --write both acted on.
 func TestTooFewSamplesProposesNoReduction(t *testing.T) {
 	for _, tc := range []struct {
@@ -133,7 +133,7 @@ func TestTooFewSamplesProposesNoReduction(t *testing.T) {
 	}
 }
 
-// Online Boutique on msi, twice. Limits sized from steady state with no boot
+// Online Boutique on the lab cluster, twice. Limits sized from steady state with no boot
 // in the window crash-looped cartservice; limits sized from a measured boot
 // raised p95 latency 4x with no error and no restart. Averaged usage cannot
 // show a lower limit is enough, whether or not a boot was seen, so a limit is
