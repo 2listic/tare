@@ -30,6 +30,12 @@ type Report struct {
 	Source        string
 	Window        string
 
+	// KubeContext and Kubeconfig name the cluster the report was measured
+	// on. -o patch writes them into every command, because a script run
+	// later runs against whatever kubectl points at by then.
+	KubeContext string
+	Kubeconfig  string
+
 	// Coverage is how much of the cluster the metrics backend actually saw.
 	// A Prometheus that scrapes a subset of namespaces, or a node whose
 	// kubelet has stopped reporting, produces a report that looks complete and

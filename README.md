@@ -37,7 +37,8 @@ any other signal.
 
 **Why not CPU throttling?** Throttling counters only exist for containers that
 have a CPU limit, and most workloads are deployed without one. On the test
-cluster, **PSI covered 23 of 23 containers; throttling covered 3 of 23.** A
+cluster ([test/lab](test/lab/README.md)), **PSI covered 23 of 23 containers;
+throttling covered 3 of 23.** A
 container without a limit can't be throttled, but it can still wait for a CPU
 that another pod on the node is using, and PSI records that wait.
 
@@ -94,11 +95,13 @@ The third and fourth rows are what an earlier tare recommended. Every check
 that looks at errors and restarts passes them. Latency got 18x worse at twice
 the load, because CFS enforces a CPU limit every 100ms and averaged usage cannot
 see the bursts that happen inside one period. tare now never lowers or adds a
-CPU limit (`CPU_LIMIT_HELD`), and the last two rows are the result. CPU
-requests went down by about 85%, about 1.3 cores, and memory requests by about
-1GiB. Latency stayed at baseline, with no service throttled above 1.4%.
+CPU limit (`CPU_LIMIT_HELD`), and the last two rows are the result: requests
+went down by 1.6 CPU and 1GiB, measured over a 6h window, with every CPU limit
+unchanged. Latency stayed at baseline, with no service throttled above 1.4%.
+The frontend's HPA ran 4 replicas at 200 users where the control ran 3; at the
+smaller request that is still less CPU reserved.
 
-Read the 85% as a measure of how generous Boutique's demo manifests are, not
+Read the cut as a measure of how generous Boutique's demo manifests are, not
 as what tare will save you. Lower requests turn into money only when the
 autoscaler can remove nodes, and on this three-node cluster none could be.
 The runs lasted minutes, so they say nothing about a memory request that holds
@@ -142,7 +145,9 @@ kubectl tare report --explain   # the sentence behind every code
 ```
 
 No agent, no CRD, no changes to your cluster. It reads the Kubernetes API and a
-Prometheus you already have.
+Prometheus you already have. (The repository also holds
+[`agent/`](agent/README.md), an optional proof of concept for nodes without
+PSI. tare does not need it or use it.)
 
 ## Install
 
@@ -163,8 +168,8 @@ On macOS, an archive downloaded through a browser is quarantined and the binary
 will not start until you run `xattr -d com.apple.quarantine kubectl-tare`;
 `curl` does not set the flag.
 
-With Go installed, `go install github.com/2listic/tare/cmd/kubectl-tare@latest`
-works too. From this tree:
+With Go 1.27.3 or newer installed,
+`go install github.com/2listic/tare/cmd/kubectl-tare@latest` works too. From this tree:
 
 ```sh
 ./tools/build.sh                                 # this machine, into bin/
@@ -186,7 +191,7 @@ kubectl tare check
 
 `check` answers, before any report exists, whether this cluster can produce one:
 which reads your token is allowed, whether a Prometheus-compatible endpoint is
-reachable through the API server, which of the nine metric families tare uses
+reachable through the API server, which of the metric families tare uses
 this cluster actually exports, how much history it holds, and how many of your
 containers the backend has series for. Every line says what it costs, because
 "missing" is not actionable:
@@ -432,8 +437,19 @@ without a port-forward. There is no write verb in the file.
 
 ```sh
 kubectl apply -f deploy/rbac.yaml
-kubectl -n kube-system create token tare --duration 1h
+
+# A kubeconfig that uses the service account's token, for this cluster only.
+kubectl config view --minify --raw > tare.kubeconfig
+kubectl --kubeconfig tare.kubeconfig config set-credentials tare \
+  --token="$(kubectl -n kube-system create token tare --duration 1h)"
+kubectl --kubeconfig tare.kubeconfig config set-context --current --user tare
+
+kubectl tare check  --kubeconfig tare.kubeconfig
+kubectl tare report --kubeconfig tare.kubeconfig
 ```
+
+The token expires after an hour; rerun the `set-credentials` line for a new
+one. `tare.kubeconfig` holds a live credential, so keep it out of the repo.
 
 **A narrower token still works.** Every read but the pod list degrades rather
 than failing, and the report says what it lost in the header, in every output

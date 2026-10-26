@@ -1,7 +1,9 @@
 package metrics
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,7 +36,20 @@ func NewHTTPTransport(baseURL string) *HTTPTransport {
 	}
 }
 
-func (t *HTTPTransport) Describe() string { return t.BaseURL }
+// Describe names the endpoint with any password masked. Basic auth in the URL
+// is the only way this transport authenticates, and the description goes into
+// the report header, the JSON, the HTML and the PR body: files people are
+// told to send to someone else.
+func (t *HTTPTransport) Describe() string {
+	if u, err := url.Parse(t.BaseURL); err == nil {
+		return u.Redacted()
+	}
+	return t.BaseURL
+}
+
+// maxResponse bounds one query's body. The largest real answer is one sample
+// per container; a response past this is a misdirected endpoint, not data.
+const maxResponse = 256 << 20
 
 func (t *HTTPTransport) Get(ctx context.Context, path string, params url.Values) ([]byte, error) {
 	u := t.BaseURL + path
@@ -47,10 +62,27 @@ func (t *HTTPTransport) Get(ctx context.Context, path string, params url.Values)
 	}
 	resp, err := t.Client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("querying %s: %w", t.BaseURL, err)
+		// The client's error repeats the full URL, password included.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
+		return nil, fmt.Errorf("querying %s: %w", t.Describe(), err)
 	}
 	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse))
+	if err != nil {
+		return nil, fmt.Errorf("reading from %s: %w", t.Describe(), err)
+	}
+	// Prometheus answers a bad query with a 4xx and a JSON error that the
+	// caller reports better than this could. Anything else that is not a 2xx
+	// - a 401 from an auth proxy, Grafana's HTML login page - used to surface
+	// as "invalid character '<'", which names neither the status nor the fix.
+	if resp.StatusCode/100 != 2 && !bytes.HasPrefix(bytes.TrimSpace(body), []byte(`{"status"`)) {
+		return nil, fmt.Errorf("querying %s: HTTP %s; is this a Prometheus API endpoint, and does it need credentials?",
+			t.Describe(), resp.Status)
+	}
+	return body, nil
 }
 
 // scrubbed passes every error through scrub, so a source built under

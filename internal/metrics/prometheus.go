@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
 	"strconv"
 	"strings"
@@ -74,6 +75,10 @@ func (p *Prom) query(expr string) ([]sample, error) {
 	if err := json.Unmarshal(body, &pr); err != nil {
 		return nil, fmt.Errorf("decoding response: %w", err)
 	}
+	if pr.Status == "" {
+		return nil, fmt.Errorf("%s answered, but not with a Prometheus API response; point --prometheus at the Prometheus itself, not Grafana or a UI",
+			p.transport.Describe())
+	}
 	if pr.Status != "success" {
 		return nil, fmt.Errorf("query failed: %s", pr.Error)
 	}
@@ -85,7 +90,9 @@ func (p *Prom) query(expr string) ([]sample, error) {
 			continue
 		}
 		v, err := strconv.ParseFloat(s, 64)
-		if err != nil || v != v { // reject NaN
+		// NaN and ±Inf are not measurements. An Inf that got through became
+		// a 9223372036854775807m CPU request in a runnable patch.
+		if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
 			continue
 		}
 		out = append(out, sample{labels: r.Metric, value: v})
@@ -143,6 +150,7 @@ func (p *Prom) Observe(namespaces []string, window time.Duration) (map[Key]*Obse
 		}
 	}
 	p.flagDeadPressure(out)
+	dropStartupTrends(out, window, time.Now())
 	dropHalfTrends(out)
 	p.attribute(namespaces, window, out)
 	return out, nil
@@ -400,6 +408,23 @@ func observeQueries(sel string, window time.Duration) []observeQuery {
 	}
 
 	return queries
+}
+
+// dropStartupTrends discards the early half of the memory trend for a pod that
+// started after the window opened. Its early hour is then its own startup, and
+// almost everything uses more memory an hour after boot than during it: a JVM
+// growing its heap to steady state read as a 3x leak, and LEAKING outranks
+// every other verdict and withholds the recommendation. With a one-day window
+// that hit every pod started about a day ago. FirstSeen is sampled every five
+// minutes, so a pod that was already running sits within one step of the
+// window's start; ten minutes leaves room for scrape jitter.
+func dropStartupTrends(out map[Key]*Observation, window time.Duration, now time.Time) {
+	opened := float64(now.Add(-window).Unix())
+	for _, o := range out {
+		if o.FirstSeen > opened+(10*time.Minute).Seconds() {
+			o.MemEarly = 0
+		}
+	}
 }
 
 // dropHalfTrends unmarks a trend that has only one of its two halves. The late

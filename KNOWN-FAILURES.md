@@ -1120,7 +1120,7 @@ read the newest 318. Any rollout does the same, so a team that deploys daily
 never gets more than a day of history, while the header names the window.
 
 **Caught by:** the 2026-10-25 stress pass, comparing a row's sample count with
-`count_over_time` by pod on msi's Prometheus.
+`count_over_time` by pod on the lab cluster's Prometheus.
 
 **Fixed by:** `kube_pod_owner` and `kube_replicaset_owner` over the window
 credit every pod, dead or alive, to its controller, and `aggregate` folds a
@@ -1134,7 +1134,7 @@ week. Without kube-state-metrics the row is measured from live pods as before
 and `pod-owner` is reported missing. Tests: `internal/analyze/history_test.go`,
 `TestOwnersResolveThroughReplicaSets`.
 
-On msi this moved cartservice, currencyservice and recommendationservice from
+On the lab cluster this moved cartservice, currencyservice and recommendationservice from
 OK to UNVERIFIED: their replaced pods carried sustained pressure up to 0.12
 and 19 restarts from when the cluster was crowded onto two nodes. That
 evidence existed all along and was being dropped.

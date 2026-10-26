@@ -41,8 +41,8 @@ func TestPatchAndDiffAgreeOnWhatIsPatchable(t *testing.T) {
 		if ok, _ := analyze.Patchable(f); ok != tc.want {
 			t.Errorf("Patchable(%s %s) = %v, want %v", tc.kind, tc.verdict, ok, tc.want)
 		}
-		out := capture(t, func(p *printer) { p.printPatches([]analyze.Finding{f}) })
-		if got := strings.Contains(out, "kubectl -n prod patch"); got != tc.want {
+		out := capture(t, func(p *printer) { p.printPatches([]analyze.Finding{f}, "", "") })
+		if got := strings.Contains(out, "kubectl -n 'prod' patch"); got != tc.want {
 			t.Errorf("-o patch for %s %s emitted a command = %v, want %v:\n%s", tc.kind, tc.verdict, got, tc.want, out)
 		}
 	}
@@ -63,8 +63,8 @@ func TestPatchOmitsFieldsWithNoRecommendation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := tc.f
 			f.Namespace, f.Workload, f.Container, f.Verdict = "prod", "Deployment/web", "app", analyze.Waste
-			out := capture(t, func(p *printer) { p.printPatches([]analyze.Finding{f}) })
-			if !strings.Contains(out, "kubectl -n prod patch") {
+			out := capture(t, func(p *printer) { p.printPatches([]analyze.Finding{f}, "", "") })
+			if !strings.Contains(out, "kubectl -n 'prod' patch") {
 				t.Fatalf("no patch emitted:\n%s", out)
 			}
 			if strings.Contains(out, `":"0"`) {
@@ -99,7 +99,7 @@ func TestPatchLeavesCensoredMemoryAlone(t *testing.T) {
 		Pods: 1, CPURequest: 50, CPULimit: 100, MemRequest: 16 << 20, MemLimit: 16 << 20,
 		RecCPU: 115, RecCPULimit: 125, RecMem: 16 << 20, RecMemLimit: 16 << 20, MemCensored: true,
 	}}
-	out := capture(t, func(p *printer) { p.printPatches(fs) })
+	out := capture(t, func(p *printer) { p.printPatches(fs, "", "") })
 	if strings.Contains(out, "memory") {
 		t.Errorf("the patch names memory for a container whose memory tare does not know:\n%s", out)
 	}
@@ -108,5 +108,25 @@ func TestPatchLeavesCensoredMemoryAlone(t *testing.T) {
 	}
 	if s := report.Totals(fs); s.MemUnknown != 1 {
 		t.Errorf("memUnknown = %d, want 1: the total must say a container's memory is unknown", s.MemUnknown)
+	}
+}
+
+// TestPatchIsPinnedToItsCluster: a script generated against prod and run after
+// kubectl was switched to staging patched staging, silently, because the
+// workload names matched. Every command must name the context it was measured
+// on, quoted, since a context name is free text.
+func TestPatchIsPinnedToItsCluster(t *testing.T) {
+	f := analyze.Finding{
+		Namespace: "prod", Workload: "Deployment/web", Container: "app", Verdict: analyze.Waste,
+		RecCPU: 100, RecCPULimit: 200, RecMem: 64 << 20, RecMemLimit: 80 << 20,
+	}
+	out := capture(t, func(p *printer) { p.printPatches([]analyze.Finding{f}, "arn:aws:eks:prod's", "/k/config") })
+	want := `kubectl --context 'arn:aws:eks:prod'\''s' --kubeconfig '/k/config' -n 'prod' patch deployment 'web'`
+	if !strings.Contains(out, want) {
+		t.Errorf("command not pinned to its context; want %q in:\n%s", want, out)
+	}
+	unpinned := capture(t, func(p *printer) { p.printPatches([]analyze.Finding{f}, "", "") })
+	if !strings.Contains(unpinned, "whatever kubectl points at") {
+		t.Errorf("an unpinned script must say so:\n%s", unpinned)
 	}
 }

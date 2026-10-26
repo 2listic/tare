@@ -13,6 +13,13 @@
 #   privileged    for now. What is needed: CAP_NET_ADMIN (taskstats exit events,
 #                 SO_RCVBUFFORCE) and read access to every task's /proc entry
 #   no API token  the agent never talks to the Kubernetes API
+#
+# Exposure: /metrics is served on port 9105 of every node's network, over plain
+# HTTP with no authentication, and hostNetwork bypasses NetworkPolicy. Anyone
+# who can reach a node IP can read per-container CPU wait keyed by cgroup path
+# (pod UID and container id). Restrict 9105 at the node firewall or security
+# group to your Prometheus. The tolerations below schedule it on every node,
+# control plane included.
 apiVersion: v1
 kind: Namespace
 metadata:

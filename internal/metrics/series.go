@@ -104,7 +104,7 @@ func (p *Prom) queryRange(ctx context.Context, expr string, start time.Time, ste
 				continue
 			}
 			v, err := strconv.ParseFloat(vs, 64)
-			if err != nil || v != v {
+			if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
 				continue
 			}
 			i := int(math.Round((ts - float64(start.Unix())) / step.Seconds()))

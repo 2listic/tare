@@ -1,6 +1,6 @@
 # tare-agent image: a static Go binary on a distroless base (no shell, no package manager).
 #   docker build -t tare-agent:poc agent/
-FROM golang:1.27 AS build
+FROM golang:1.27.3 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

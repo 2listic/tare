@@ -1,9 +1,28 @@
 # tare test lab
 
-Cluster: k3d `tare-test` on a single Linux host, `$LAB` below, k3s v1.35.8+k3s1,
-1 server + 2 agents, cgroup v2, containerd 2.2.7.
+This is the cluster tare was developed and measured against, and the manifests
+that plant workloads on it. Every "measured on tare's test cluster" figure in
+the main README comes from here. It is a record of the authors' setup, not a
+supported install: nothing below is required to use tare.
 
-`HANDS-ON.md` is a 75-minute session for colleagues on this lab.
+The authors' lab is k3d `tare-test` on a single Linux host (`$LAB` below is that
+host's address), k3s v1.35.8+k3s1, 1 server + 2 agents, cgroup v2, containerd
+2.2.7. To build an equivalent one:
+
+```sh
+k3d cluster create tare-test --agents 2 \
+  --api-port 0.0.0.0:6443 --k3s-arg "--tls-san=$LAB@server:*" \
+  -p 30090:30090@loadbalancer -p 30030:30030@loadbalancer
+helm install kps prometheus-community/kube-prometheus-stack -n monitoring --create-namespace \
+  --set alertmanager.enabled=false \
+  --set prometheus.service.type=NodePort --set prometheus.service.nodePort=30090 \
+  --set grafana.service.type=NodePort --set grafana.service.nodePort=30030
+kubectl apply -f test/lab/workloads.yaml -f test/lab/shapes.yaml
+```
+
+Omit the TLS SAN and the API is unreachable from any other machine with a
+certificate error. tare needs history before it says much: expect `low`
+confidence for the first day.
 
 | endpoint | url |
 | --- | --- |

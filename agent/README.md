@@ -13,9 +13,17 @@ live thread (`/proc/<pid>/task/<tid>/schedstat`); in between, the kernel sends i
 the final counters of every task that exits (taskstats exit notifications), so
 short-lived processes are counted too.
 
-This is a proof of concept. tare does not read the agent's metrics yet. To see how
-they compare with PSI today, use `compare-pressure` (below), which reads Prometheus
-and judges the agent's data the way tare judges PSI.
+This is a proof of concept. tare does not need it, does not install it, and does
+not read the agent's metrics yet.
+
+**Before you deploy it:** it runs privileged, with `hostPID` and `hostNetwork`,
+on every node including the control plane, and serves `/metrics` on port 9105 of
+each node over plain HTTP with no authentication. NetworkPolicy does not apply
+to host-network pods, so restrict 9105 to your Prometheus at the node firewall
+or security group. There is no published image yet; you build it yourself.
+
+To see how its numbers compare with PSI today, use `compare-pressure` (below),
+which reads Prometheus and judges the agent's data the way tare judges PSI.
 
 ## What gets deployed
 

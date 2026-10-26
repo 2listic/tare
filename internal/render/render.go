@@ -22,7 +22,7 @@ func Render(out, diag io.Writer, r *report.Report, format string, verbose bool) 
 	p := &printer{out: out, diag: diag}
 	switch format {
 	case "patch":
-		p.printPatches(r.Findings)
+		p.printPatches(r.Findings, r.KubeContext, r.Kubeconfig)
 		return nil
 	case "json":
 		enc := json.NewEncoder(out)

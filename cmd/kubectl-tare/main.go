@@ -238,7 +238,8 @@ func runCluster(sub string, o *options, namespaces []string) error {
 
 	rep := &report.Report{
 		Findings: findings, Source: src.Describe(), Window: windowNote, Coverage: coverage,
-		WindowUsed: render.HumanDuration(window),
+		WindowUsed:  render.HumanDuration(window),
+		KubeContext: kc.Context, Kubeconfig: o.kubeconfig,
 	}
 	// The node-count delta is computed over the WHOLE cluster, before the
 	// display filters cut the finding list down.

@@ -399,3 +399,81 @@ func TestOwnersResolveThroughReplicaSets(t *testing.T) {
 		}
 	}
 }
+
+// TestNonPrometheusAnswersSayWhatTheyAre: a 401 from an auth proxy, or Grafana
+// at the URL, used to reach the user as "invalid character '<'" or a bare
+// "query failed: ", and a password in the URL was repeated in every error.
+func TestNonPrometheusAnswersSayWhatTheyAre(t *testing.T) {
+	f := newFakeProm(func(string) (string, int) { return "<html>login</html>", 401 })
+	defer f.Close()
+	u := strings.Replace(f.URL, "http://", "http://alice:hunter2@", 1)
+	p := NewProm(u)
+	_, err := p.query("up")
+	if err == nil || !strings.Contains(err.Error(), "401") {
+		t.Errorf("want the HTTP status in the error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "hunter2") || strings.Contains(p.Describe(), "hunter2") {
+		t.Errorf("password leaked: %v / %s", err, p.Describe())
+	}
+
+	f.respond = func(string) (string, int) { return `{"message":"not found"}`, 200 }
+	if _, err := p.query("up"); err == nil || !strings.Contains(err.Error(), "not with a Prometheus API response") {
+		t.Errorf("want a not-Prometheus error, got %v", err)
+	}
+
+	// A bad query is a 400 with Prometheus's own JSON error, which must
+	// still come through rather than be replaced by the status line.
+	f.respond = func(string) (string, int) {
+		return `{"status":"error","errorType":"bad_data","error":"parse error at char 3"}`, 400
+	}
+	if _, err := p.query("up("); err == nil || !strings.Contains(err.Error(), "parse error") {
+		t.Errorf("want Prometheus's own message, got %v", err)
+	}
+}
+
+// TestInfinityIsNotAMeasurement: an Inf sample became a 9223372036854775807m
+// request in a runnable patch. It must be dropped like NaN.
+func TestInfinityIsNotAMeasurement(t *testing.T) {
+	f := newFakeProm(func(string) (string, int) { return vector("app", 0), 200 })
+	defer f.Close()
+	f.respond = func(string) (string, int) {
+		return strings.Replace(vector("app", 0), `"0"`, `"+Inf"`, 1), 200
+	}
+	got, err := NewProm(f.URL).query("x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("+Inf kept as a sample: %+v", got)
+	}
+}
+
+// TestStartupIsNotAnEarlyBaseline: node-agent on the lab cluster was reported
+// LEAKING because the window's first hour landed on its boot, when it used
+// half its steady-state memory. A pod that started inside the window has no
+// baseline hour; one that was already running keeps its trend.
+func TestStartupIsNotAnEarlyBaseline(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	window := 24 * time.Hour
+	opened := float64(now.Add(-window).Unix())
+	booted := &Observation{FirstSeen: opened + 1800, MemEarly: 1 << 20, MemLate: 3 << 20}
+	booted.Mark(SigMemTrend)
+	running := &Observation{FirstSeen: opened + 120, MemEarly: 1 << 20, MemLate: 3 << 20}
+	running.Mark(SigMemTrend)
+	unknown := &Observation{MemEarly: 1 << 20, MemLate: 3 << 20}
+	unknown.Mark(SigMemTrend)
+	out := map[Key]*Observation{{Pod: "booted"}: booted, {Pod: "running"}: running, {Pod: "unknown"}: unknown}
+
+	dropStartupTrends(out, window, now)
+	dropHalfTrends(out)
+
+	if booted.MemEarly != 0 || booted.Has(SigMemTrend) {
+		t.Errorf("a pod booted 30m into the window kept its startup hour as a baseline")
+	}
+	if running.MemEarly == 0 || !running.Has(SigMemTrend) {
+		t.Errorf("a pod running when the window opened lost its trend")
+	}
+	if unknown.MemEarly == 0 {
+		t.Errorf("no FirstSeen is not evidence of a startup; the trend must stand")
+	}
+}

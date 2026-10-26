@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -57,7 +58,16 @@ func main() {
 		}
 		_, _ = w.Write([]byte("ok\n"))
 	})
-	log.Fatal(http.ListenAndServe(*listen, nil))
+	// Timeouts, because the port is on the node's network and unauthenticated:
+	// the default server lets one slow client hold a connection forever.
+	srv := &http.Server{
+		Addr:              *listen,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	log.Fatal(srv.ListenAndServe())
 }
 
 // collector reads every container on each scrape, like the Python exporter.
