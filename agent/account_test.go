@@ -140,3 +140,83 @@ func TestHostChildIsOutsideThroughItsParent(t *testing.T) {
 		t.Errorf("outside=%d unattributed=%d, want 1 0", s.outside, s.unattributed)
 	}
 }
+
+// An exec probe: started by the runtime, so its parent is the shim on the host.
+// By the time its exit record is handled the shim has reaped it. Without its
+// exec event it would be counted as a host process (the test above).
+func shimParent(pid int) (string, bool) {
+	if pid == 9 {
+		return "/system.slice/containerd.service", false // the shim
+	}
+	return "", false // the probe itself is gone
+}
+
+func TestExecProbeIsPlacedThroughItsExec(t *testing.T) {
+	a := newAccount()
+	a.apply(read(map[int]thread{}, nil), always)
+	a.execd(500, appCg, true)
+	a.exit(exitRecord{tid: 501, tgid: 500, ppid: 9, wait: 1, run: 4}, shimParent) // a thread of it
+	a.exit(exitRecord{tid: 500, tgid: 500, ppid: 9, wait: 2, run: 5}, shimParent)
+	got := a.apply(read(map[int]thread{}, nil), always)
+	if want := (pair{3, 9}); got[appCg] != want {
+		t.Errorf("got %v, want %v", got[appCg], want)
+	}
+	if s := a.snapshot(); s.placedByExec != 2 || s.outside != 0 {
+		t.Errorf("placedByExec=%d outside=%d, want 2 0", s.placedByExec, s.outside)
+	}
+}
+
+// Kernels without ac_tgid (4.18) report tgid 0: the main thread is found by its id.
+func TestExecProbeWithoutTgid(t *testing.T) {
+	a := newAccount()
+	a.apply(read(map[int]thread{}, nil), always)
+	a.execd(500, appCg, true)
+	a.exit(exitRecord{tid: 500, ppid: 9, wait: 2, run: 5}, shimParent)
+	if s := a.snapshot(); s.placedByExec != 1 {
+		t.Errorf("placedByExec=%d, want 1", s.placedByExec)
+	}
+}
+
+// What an exec says about a PID stops being true when the PID is reused, the
+// process execs outside any container, or two reads have passed.
+func TestExecIsForgotten(t *testing.T) {
+	tests := []struct {
+		name   string
+		forget func(a *account)
+	}{
+		{"a new process took the PID", func(a *account) { a.forked(500) }},
+		{"it exec'd outside any container", func(a *account) { a.execd(500, "/system.slice/cron.service", false) }},
+		{"two reads passed", func(a *account) {
+			for i := 0; i < 3; i++ {
+				a.apply(read(map[int]thread{}, nil), always)
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := newAccount()
+			a.apply(read(map[int]thread{}, nil), always)
+			a.execd(500, appCg, true)
+			tt.forget(a)
+			a.exit(exitRecord{tid: 500, tgid: 500, ppid: 9, wait: 2, run: 5}, shimParent)
+			if s := a.snapshot(); s.placedByExec != 0 || s.outside != 1 {
+				t.Errorf("placedByExec=%d outside=%d, want 0 1", s.placedByExec, s.outside)
+			}
+		})
+	}
+}
+
+// Where a read saw the task, the read decides: the exec is only a fallback.
+func TestReadsComeBeforeExecs(t *testing.T) {
+	a := newAccount()
+	a.apply(read(map[int]thread{500: {otherCg, 0, 0}}, nil), always)
+	a.execd(500, appCg, true)
+	a.exit(exitRecord{tid: 500, tgid: 500, ppid: 9, wait: 2, run: 5}, shimParent)
+	got := a.apply(read(map[int]thread{}, nil), always)
+	if got[otherCg] != (pair{2, 5}) || got[appCg] != (pair{}) {
+		t.Errorf("got %v", got)
+	}
+	if s := a.snapshot(); s.placedByExec != 0 {
+		t.Errorf("placedByExec=%d, want 0", s.placedByExec)
+	}
+}

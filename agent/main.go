@@ -42,6 +42,14 @@ func main() {
 			log.Printf("exit listener stopped: %v", err)
 		}
 	}()
+	go func() {
+		if err := listenExecs(a, r.cgroupOf); err != nil {
+			// Without exec events, tasks started from outside their container
+			// (exec probes) are placed only if /proc still has them at exit:
+			// tare_agent_execs_total stays at 0 and their containers' coverage drops.
+			log.Printf("exec listener stopped: %v", err)
+		}
+	}()
 
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(&collector{r: r, a: a}, collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
@@ -76,6 +84,14 @@ var (
 		"Exit records whose struct taskstats layout was not recognised.", nil, nil)
 	descDrops = prometheus.NewDesc("tare_agent_netlink_drops_total",
 		"Netlink receive errors (exit records lost).", nil, nil)
+	descExecs = prometheus.NewDesc("tare_agent_execs_total",
+		"Exec events received from the process connector, by where the task was: container or outside.",
+		[]string{"location"}, nil)
+	descExecDrops = prometheus.NewDesc("tare_agent_exec_drops_total",
+		"Process connector receive errors (exec events lost).", nil, nil)
+	descPlacedByExec = prometheus.NewDesc("tare_agent_exits_placed_by_exec_total",
+		"Exit records assigned to a container through the exec event of their process (exec probes and other tasks started from outside).",
+		nil, nil)
 	descReads      = prometheus.NewDesc("tare_agent_reads_total", "Reads of all containers (one per scrape).", nil, nil)
 	descContainers = prometheus.NewDesc("tare_agent_containers",
 		"Containers found, by location: kubepods, or outside (cgroup driver mismatch).", []string{"location"}, nil)
@@ -85,7 +101,8 @@ var (
 
 func (c *collector) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{descWait, descRun, descExits, descUnattr, descOutside, descNever,
-		descLayout, descUnknown, descDrops, descReads, descContainers, descInfo} {
+		descLayout, descUnknown, descDrops, descExecs, descExecDrops, descPlacedByExec, descReads, descContainers,
+		descInfo} {
 		ch <- d
 	}
 }
@@ -106,6 +123,10 @@ func (c *collector) Collect(ch chan<- prometheus.Metric) {
 	counter(descNever, s.neverReceived)
 	counter(descUnknown, s.layoutUnknown)
 	counter(descDrops, s.drops)
+	counter(descExecs, s.execsInContainers, "container")
+	counter(descExecs, s.execs-s.execsInContainers, "outside")
+	counter(descExecDrops, s.execDrops)
+	counter(descPlacedByExec, s.placedByExec)
 	counter(descReads, s.reads)
 	for _, l := range layouts {
 		counter(descLayout, s.layouts[l.name], l.name)

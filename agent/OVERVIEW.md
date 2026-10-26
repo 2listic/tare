@@ -37,6 +37,10 @@ run but waiting for a CPU, summed over **all** of its tasks:
   task that exits (taskstats exit notifications), so short-lived processes are
   counted too.
 
+To place exited tasks in the right container, it also notes the container of every
+program started on the node (process connector exec events). This matters for exec
+probes, which run inside a container but are started from outside it.
+
 It also exports the CPU time it accounted (`tare_cpu_run_seconds_total`), so coverage
 against the kubelet's CPU usage can be checked, and self-checks (unattributed exits,
 unknown kernel record layouts, dropped notifications) that catch the silent failures
@@ -47,21 +51,23 @@ Series are labelled only with the cgroup path (`id`), the same label as the kube
 
 ## How the code works
 
-Four files, one process with two concurrent parts: a **scrape path** that reads the
-live tasks when Prometheus asks, and an **exit listener** that receives the final
-counters of tasks as they exit. Both feed one shared state.
+Five files, one process with three concurrent parts: a **scrape path** that reads the
+live tasks when Prometheus asks, an **exit listener** that receives the final counters
+of tasks as they exit, and an **exec listener** that notes the container of every
+program as it starts. All three feed one shared state.
 
 | file | role |
 |---|---|
 | `main.go` | flags, startup, the HTTP server (`/metrics`, `/healthz`), the Prometheus collector |
 | `cgroups.go` | finds the containers in `/sys/fs/cgroup` and reads their threads from `/proc` |
 | `exits.go` | the netlink listener for taskstats exit records, and their decoding |
+| `procevents.go` | the netlink listener for process connector fork and exec events |
 | `account.go` | merges live and exited tasks into one counter per container |
 
 **Startup (`main.go`).** It opens the host's `/proc`, detects the cgroup version (on
-v2 it walks `/sys/fs/cgroup`, on v1 the `cpu,cpuacct` tree), starts the exit listener
-in the background and serves `/metrics` on port 9105. If the exit listener fails, the
-agent keeps serving the live threads and logs why.
+v2 it walks `/sys/fs/cgroup`, on v1 the `cpu,cpuacct` tree), starts the exit and exec
+listeners in the background and serves `/metrics` on port 9105. If a listener fails,
+the agent keeps serving what it has and logs why.
 
 **Finding containers (`cgroups.go`).** On every scrape it walks the cgroup tree and
 keeps the directories whose path contains a 64-hex container id
@@ -87,12 +93,23 @@ so the agent recognises the layout per record by finding the thread id at the
 expected offset; unknown layouts are counted, not guessed. A receive error means
 records were lost and is counted as a drop.
 
+**Receiving execs (`procevents.go`).** It opens a second netlink socket, on the
+kernel's **process connector**, which announces every fork and exec on the node
+(same permissions as taskstats, and another 64 MB receive buffer). On every exec it
+reads `/proc/<pid>/cgroup` at once, while the program runs, and notes "process →
+container". Exec probes need this: the runtime starts them inside the container, but
+their parent is the runtime's shim on the host. They last a few milliseconds, so no
+scrape sees them, and by the time their exit record is handled the shim has removed
+them from `/proc`. The note is forgotten after two scrapes, when a new process takes
+the same PID (fork event), or when that PID starts a program outside any container.
+
 **Attributing an exit (`account.go`).** An exiting thread has to be placed in a
-container, though it may already be gone from `/proc`. In order: where the thread was
-seen in the last reads; its process; its own `/proc/<pid>/cgroup` (accepted only if
-it is a container cgroup, since on some kernels an exiting task reports a non-pod
-cgroup); finally its parent. Exits of host processes are counted as "outside", the
-ones that cannot be placed at all as "unattributed".
+container, though it may already be gone from `/proc`. In order: where the thread or
+its process was seen in the last reads; the container its process started in (exec
+note); its own `/proc/<pid>/cgroup` (accepted only if it is a container cgroup, since
+on some kernels an exiting task reports a non-pod cgroup); finally its parent. Exits
+of host processes are counted as "outside", the ones that cannot be placed at all as
+"unattributed".
 
 **Merging (`account.go`).** On every scrape, each of a container's threads is in
 exactly one of three groups, and CPU wait is the sum of the three:
@@ -117,7 +134,8 @@ Containers whose cgroup is gone are dropped from the output.
 
 **Exporting (`main.go`).** The collector turns the totals into `tare_cpu_wait_seconds_total`
 and `tare_cpu_run_seconds_total` per `id`, plus the self-checks (`tare_agent_exits_*`,
-`tare_agent_netlink_drops_total`, `tare_agent_containers`, `tare_agent_build_info` with
+`tare_agent_netlink_drops_total`, `tare_agent_execs_total`, `tare_agent_exec_drops_total`,
+`tare_agent_containers`, `tare_agent_build_info` with
 kernel and cgroup version) and the agent's own process and Go runtime metrics.
 
 Everything is computed at scrape time; the agent keeps no history. Rates, coverage and
@@ -143,6 +161,8 @@ the agent.
 
 - Proof of concept: tare does not read it yet; the image is built locally.
 - It must be privileged (`hostPID`, `hostNetwork`, `CAP_NET_ADMIN`).
+- The exec listener is covered by unit tests only: how much coverage it recovers on
+  containers with exec probes, and its cost on busy nodes, have not been measured.
 - It says whether work ran slower, not how much CPU is missing: it cannot size an
   increase.
 - A container that is never quiet has no normal to compare with and must be reported

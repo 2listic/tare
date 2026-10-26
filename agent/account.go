@@ -21,9 +21,16 @@ type exitRecord struct {
 	layout          string // which struct taskstats layout it was decoded with
 }
 
+// started is the container a process was in when it exec'd (process connector).
+type started struct {
+	scope string
+	read  uint64 // the read during which it exec'd
+}
+
 // stats are the agent's self-checks, exported as tare_agent_* counters.
 type stats struct {
 	reads, exits, unattributed, outside, neverReceived, layoutUnknown, drops uint64
+	execs, execsInContainers, execDrops, placedByExec                        uint64
 	layouts                                                                  map[string]uint64
 	containers                                                               map[string]int
 }
@@ -38,6 +45,7 @@ type account struct {
 	prevProcs map[int]string      // the read before: exit attribution looks one read back
 	exited    map[uint32]bool     // tids whose exit record arrived since the last read
 	pending   map[int]placeholder // tid -> placeholder (left /proc, no exit record yet)
+	atExec    map[int]started     // tgid -> container at exec, for tasks no read saw
 	saved     map[string]*pair    // container -> final values of exited tasks
 	st        stats
 }
@@ -45,8 +53,9 @@ type account struct {
 func newAccount() *account {
 	return &account{
 		live: map[int]thread{}, procs: map[int]string{}, prevProcs: map[int]string{},
-		exited: map[uint32]bool{}, pending: map[int]placeholder{}, saved: map[string]*pair{},
-		st: stats{layouts: map[string]uint64{}, containers: map[string]int{}},
+		exited: map[uint32]bool{}, pending: map[int]placeholder{}, atExec: map[int]started{},
+		saved: map[string]*pair{},
+		st:    stats{layouts: map[string]uint64{}, containers: map[string]int{}},
 	}
 }
 
@@ -85,6 +94,13 @@ func (a *account) apply(w walk, exists func(scope string) bool) map[string]pair 
 			a.savedFor(p.cgroup).add(p.wait, p.run)
 			delete(a.pending, tid)
 			a.st.neverReceived++
+		}
+	}
+	// An exec is kept until two reads have passed: a process that lives longer
+	// is in the reads, and the PID may meanwhile belong to someone else.
+	for tgid, s := range a.atExec {
+		if s.read+2 < a.st.reads {
+			delete(a.atExec, tgid)
 		}
 	}
 
@@ -128,9 +144,10 @@ func (a *account) savedFor(scope string) *pair {
 
 // exit records one exit notification. cgroupOf reads a task's container from
 // /proc (it may already be gone). Attribution, in order: where the thread was
-// last seen; its process; its parent. An exiting task can report a cgroup outside
-// any container (cgroup v1, kernel 5.10), so from the task itself only a container
-// cgroup is accepted, otherwise the parent decides.
+// last seen; its process; the container its process exec'd in; its parent. An
+// exiting task can report a cgroup outside any container (cgroup v1, kernel
+// 5.10), so from the task itself only a container cgroup is accepted, otherwise
+// the parent decides.
 func (a *account) exit(r exitRecord, cgroupOf func(pid int) (string, bool)) {
 	tid, tgid, ppid := int(r.tid), int(r.tgid), int(r.ppid)
 
@@ -138,6 +155,14 @@ func (a *account) exit(r exitRecord, cgroupOf func(pid int) (string, bool)) {
 	a.st.exits++
 	a.st.layouts[r.layout]++
 	scope, found := a.lookup(tid, tgid)
+	if !found {
+		// Before /proc and the parent: a task started from outside its container
+		// (an exec probe, parent the runtime's shim) is usually reaped by now,
+		// and its parent would say "host".
+		if scope, found = a.execdAs(tid, tgid); found {
+			a.st.placedByExec++
+		}
+	}
 	a.mu.Unlock()
 
 	if !found {
@@ -190,6 +215,39 @@ func (a *account) lookup(tid, tgid int) (string, bool) {
 	return a.processOf(tid)
 }
 
+// execdAs finds the container a task's process exec'd in. A thread is found by
+// its process; on kernels without ac_tgid (4.18) tgid is 0 and the main thread by
+// its own id. Caller holds mu.
+func (a *account) execdAs(tid, tgid int) (string, bool) {
+	if s, ok := a.atExec[tgid]; ok && tgid != 0 {
+		return s.scope, true
+	}
+	s, ok := a.atExec[tid]
+	return s.scope, ok
+}
+
+// execd records an exec announced by the process connector: the process's
+// container, read from /proc while it runs. A process that exec'd outside any
+// container clears what its PID meant before.
+func (a *account) execd(tgid int, scope string, inContainer bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.st.execs++
+	if !inContainer {
+		delete(a.atExec, tgid)
+		return
+	}
+	a.st.execsInContainers++
+	a.atExec[tgid] = started{scope: scope, read: a.st.reads}
+}
+
+// forked forgets a PID that a new process now holds.
+func (a *account) forked(tgid int) {
+	a.mu.Lock()
+	delete(a.atExec, tgid)
+	a.mu.Unlock()
+}
+
 // processOf finds a process in the last two reads. Caller holds mu.
 func (a *account) processOf(pid int) (string, bool) {
 	if s, ok := a.procs[pid]; ok {
@@ -218,3 +276,6 @@ func (a *account) snapshot() stats {
 // layoutUnknown and drop are counted by the exit listener.
 func (a *account) layoutUnknown() { a.mu.Lock(); a.st.exits++; a.st.layoutUnknown++; a.mu.Unlock() }
 func (a *account) drop()          { a.mu.Lock(); a.st.drops++; a.mu.Unlock() }
+
+// execDrop is counted by the exec listener.
+func (a *account) execDrop() { a.mu.Lock(); a.st.execDrops++; a.mu.Unlock() }
