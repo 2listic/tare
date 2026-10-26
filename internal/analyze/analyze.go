@@ -164,6 +164,9 @@ func aggregate(containers []discover.Container, obs map[metrics.Key]*metrics.Obs
 		f.PSIWaitingPeak = max(f.PSIWaitingPeak, o.PSIWaitingMax)
 		f.Throttle = max(f.Throttle, o.ThrottleAvg)
 		f.ThrottlePeak = max(f.ThrottlePeak, o.ThrottleRatio)
+		if o.Has(metrics.SigCPUWait) {
+			mergeCPUWait(&f.CPUWait, o.CPUWait, !f.hasSignal(metrics.SigCPUWait))
+		}
 		for sig, ok := range o.Have {
 			if ok {
 				if f.Have == nil {
@@ -196,6 +199,27 @@ func aggregate(containers []discover.Container, obs map[metrics.Key]*metrics.Obs
 	}
 
 	return groups
+}
+
+// mergeCPUWait folds one pod's CPU wait into its workload's, worst case per
+// field. The normal shown is the one of the most stalled pod, since that is
+// the pod the verdict is about.
+func mergeCPUWait(dst *metrics.CPUWait, c metrics.CPUWait, first bool) {
+	if first {
+		*dst = c
+		return
+	}
+	if c.Stalled > dst.Stalled {
+		dst.Stalled, dst.Normal, dst.HasNormal = c.Stalled, c.Normal, c.HasNormal
+	}
+	dst.Mean = max(dst.Mean, c.Mean)
+	dst.Stretches = max(dst.Stretches, c.Stretches)
+	switch {
+	case c.Busy && !dst.Busy:
+		dst.Coverage, dst.Busy = c.Coverage, true
+	case c.Busy:
+		dst.Coverage = min(dst.Coverage, c.Coverage)
+	}
 }
 
 type groupKey struct{ ns, workload, container string }

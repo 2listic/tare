@@ -19,16 +19,19 @@ type Code string
 
 const (
 	// Evidence about the container's own behaviour.
-	NoSamples      Code = "NO_SAMPLES"
-	MemLeak        Code = "MEM_LEAK"
-	OOMKilled      Code = "OOMKILLED"
-	LeakMasked     Code = "LEAK_MASKED_BY_RESTART"
-	CPUPressure    Code = "CPU_PRESSURE"
-	CPUThrottled   Code = "CPU_THROTTLED"
-	NodeContention Code = "NODE_CONTENTION"
-	RestartChurn   Code = "RESTART_CHURN"
-	IdleWindow     Code = "IDLE_NO_WORK"
-	IdleCaveat     Code = "IDLE_NOT_RULED_OUT"
+	NoSamples    Code = "NO_SAMPLES"
+	MemLeak      Code = "MEM_LEAK"
+	OOMKilled    Code = "OOMKILLED"
+	LeakMasked   Code = "LEAK_MASKED_BY_RESTART"
+	CPUPressure  Code = "CPU_PRESSURE"
+	CPUThrottled Code = "CPU_THROTTLED"
+	// CPUWaitRelative: starved by tare-agent's CPU wait, where PSI is missing.
+	// The name is agent/compare-pressure's, so the two outputs match.
+	CPUWaitRelative   Code = "CPU_WAIT_RELATIVE"
+	NodeContention    Code = "NODE_CONTENTION"
+	RestartChurn      Code = "RESTART_CHURN"
+	IdleWindow        Code = "IDLE_NO_WORK"
+	IdleCaveat        Code = "IDLE_NOT_RULED_OUT"
 	CPUUnderused      Code = "CPU_UNDERUSED"
 	MemUnderused      Code = "MEM_UNDERUSED"
 	CPULimitUnderused Code = "CPU_LIMIT_UNDERUSED"
@@ -57,6 +60,11 @@ const (
 	NoMemTrendOnRaise  Code = "NO_MEM_TREND_ON_RAISE"
 	NoMemP95           Code = "NO_MEM_P95"
 	NodeUtilUnknown    Code = "NODE_UTIL_UNKNOWN"
+	// CPU wait was measured and not used: the agent saw too little of the
+	// container's CPU time, or the container has too little history for its
+	// own normal.
+	CPUWaitLowCoverage  Code = "CPU_WAIT_LOW_COVERAGE"
+	CPUWaitShortHistory Code = "CPU_WAIT_SHORT_HISTORY"
 
 	// Facts about the workload that bound what may be recommended.
 	VPAManaged      Code = "VPA_MANAGES_WORKLOAD"

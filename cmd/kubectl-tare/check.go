@@ -102,7 +102,11 @@ func runCheck(ctx context.Context, out io.Writer, kc *discover.Client, namespace
 
 	fmt.Fprintln(out, "\nseries")
 	var degraded []string
+	psiOK := false
 	for _, c := range src.Preflight(namespaces, window) {
+		if c.Metric == "container_pressure_cpu_waiting_seconds_total" {
+			psiOK = c.OK()
+		}
 		switch {
 		case c.Err != nil:
 			mark(out, false, c.Metric, c.Err.Error())
@@ -121,6 +125,12 @@ func runCheck(ctx context.Context, out io.Writer, kc *discover.Client, namespace
 		}
 	}
 
+	fmt.Fprintln(out, "\ntare-agent")
+	if !checkAgent(out, src.Agent(namespaces, window), psiOK) {
+		degraded = append(degraded, "tare-agent")
+	}
+
+	fmt.Fprintln(out)
 	if note, ok := checkCoverage(ctx, kc, src, namespaces, all, window); !ok {
 		degraded = append(degraded, "metrics coverage")
 		mark(out, false, "coverage", note)
@@ -177,6 +187,52 @@ func checkCoverage(ctx context.Context, kc *discover.Client, src *metrics.Prom, 
 		"Those arrive as NO-DATA rows rather than as recommendations. Usual causes: Prometheus "+
 		"scrapes a subset of namespaces, a kubelet has stopped reporting, or the pods are newer "+
 		"than the first scrape", have, total, strings.Join(worst, ", ")), false
+}
+
+// checkAgent describes tare-agent, the source of CPU wait where PSI is
+// missing, and reports whether it is in the state the cluster needs.
+//
+// tare never installs it: it is a privileged DaemonSet, and the people who run
+// tare usually cannot deploy one. So this says what is lost without it and
+// who has to act, and stays quiet where PSI makes it unnecessary.
+func checkAgent(out io.Writer, st metrics.AgentStatus, psiOK bool) bool {
+	switch {
+	case st.Err != nil:
+		mark(out, false, "agent", "could not be checked: "+st.Err.Error())
+		return false
+	case st.Nodes == 0 && psiOK:
+		mark(out, true, "agent", "not installed, and not needed: PSI is present")
+		return true
+	case st.Nodes == 0:
+		mark(out, false, "agent", "not installed, and PSI is missing or not believable, so CPU starvation is "+
+			"visible only through CFS throttling, which needs a CPU limit; shrink verdicts elsewhere are UNVERIFIED. "+
+			"A cluster admin can install it: kubectl apply -f deploy/agent/agent.yaml (see agent/README.md)")
+		return false
+	}
+	ok := true
+	mark(out, true, "agent", fmt.Sprintf("reporting from %d node(s)", st.Nodes))
+	if st.Matched == 0 {
+		mark(out, false, "join to containers", "no agent series matches a container in scope. The kubelet's "+
+			"cAdvisor series must keep their `id` label (a metric relabelling may drop it), and kubelet and "+
+			"container runtime must use the same cgroup driver")
+		ok = false
+	} else {
+		mark(out, true, "join to containers", fmt.Sprintf("%d container(s) in scope", st.Matched))
+	}
+	if st.Outside > 0 {
+		mark(out, false, "cgroup driver", fmt.Sprintf("%d container(s) found outside the kubelet's kubepods "+
+			"hierarchy: kubelet and runtime use different cgroup drivers, and their join may fail", st.Outside))
+		ok = false
+	}
+	if len(st.Failing) == 0 {
+		mark(out, true, "self-checks", "passing on every node")
+		return ok
+	}
+	for _, n := range st.Failing {
+		mark(out, false, "self-checks "+n.Instance, strings.Join(n.Problems, "; ")+
+			". CPU wait from this node is not used for the window")
+	}
+	return false
 }
 
 // checkSource resolves the endpoint the same way a report does, so that check

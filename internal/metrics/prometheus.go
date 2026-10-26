@@ -138,6 +138,7 @@ func (p *Prom) Observe(namespaces []string, window time.Duration) (map[Key]*Obse
 		}
 	}
 	p.flagDeadPressure(out)
+	p.observeCPUWait(out, selector(namespaces), window)
 	dropHalfTrends(out)
 	return out, nil
 }

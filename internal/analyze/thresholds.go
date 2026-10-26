@@ -104,6 +104,18 @@ type Thresholds struct {
 	// days, which is the failure mode this project keeps finding: a clean,
 	// confident answer computed from data that was never there.
 	IdleMinCoverage float64
+	// CPUWaitStalledShare: a container is starved by tare-agent's CPU wait when
+	// at least this share of its 5-minute stretches is stalled under the
+	// relative slowdown rule (metrics/cpuwait.go). It plays the role
+	// PSIWaiting plays for PSI, on a different scale.
+	CPUWaitStalledShare float64
+	// CPUWaitMinCoverage: below this share of the container's CPU time
+	// accounted, the agent is not seeing the container's tasks, and no wait
+	// is not evidence of no starvation.
+	CPUWaitMinCoverage float64
+	// CPUWaitMinStretches is the history the rule needs before it is believed:
+	// the normal a stretch is compared with must include quiet periods.
+	CPUWaitMinStretches int
 }
 
 func DefaultThresholds() Thresholds {
@@ -162,5 +174,13 @@ func DefaultThresholds() Thresholds {
 		PlateauHeadroom:        0.70,
 		LimitMoveRatio:         0.20,
 		MinSamplesForInference: 2880, // twelve hours at a 15s scrape
+		// 0.05, as agent/compare-pressure's --share, which is what the rule was
+		// evaluated with on the harness clusters. Unswept in this catalog.
+		CPUWaitStalledShare: 0.05,
+		// 0.5. Measured on the harness: the agent's failures to see a container
+		// sat at 0.01-0.09, healthy fork-heavy containers at 0.66-0.88.
+		CPUWaitMinCoverage: 0.5,
+		// A day of 5-minute stretches, so the normal has seen a night.
+		CPUWaitMinStretches: 288,
 	}
 }

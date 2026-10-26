@@ -34,12 +34,15 @@ const (
 	SigMemTrend    Signal = "memory-trend"
 	SigLimitTrend  Signal = "limit-trend"
 	SigNodeUtil    Signal = "node-utilisation"
+	// SigCPUWait is tare-agent's CPU wait, the saturation signal for nodes
+	// without PSI. See cpuwait.go.
+	SigCPUWait Signal = "cpu-wait"
 )
 
 // SaturationSignals are the ones that reveal a container is being starved.
 // With none of them, a shrink recommendation cannot be made safely: there is
 // no way to tell a comfortable container from a throttled one.
-var SaturationSignals = []Signal{SigPSI, SigThrottle}
+var SaturationSignals = []Signal{SigPSI, SigCPUWait, SigThrottle}
 
 // Key identifies one container of one pod.
 type Key struct {
@@ -96,6 +99,9 @@ type Observation struct {
 
 	OOMEvents float64
 	Restarts  float64
+
+	// CPUWait is tare-agent's view of the container, valid when Has(SigCPUWait).
+	CPUWait CPUWait
 
 	// Samples is populated buckets seen for this container, which drives the
 	// confidence rating.

@@ -61,9 +61,13 @@ type Finding struct {
 	// the pressure pair above.
 	Throttle     float64
 	ThrottlePeak float64
-	OOMKilled    bool
-	Restarts     float64
-	Samples      int
+	// CPUWait is tare-agent's view, the pressure source where PSI is missing.
+	// Across pods it holds the worst stalled share and mean, and the lowest
+	// coverage: one replica the agent cannot see is enough to doubt the rest.
+	CPUWait   metrics.CPUWait
+	OOMKilled bool
+	Restarts  float64
+	Samples   int
 
 	Ceilings []ceilings.Ceiling
 
