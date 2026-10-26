@@ -144,7 +144,73 @@ func (p *Prom) Observe(namespaces []string, window time.Duration) (map[Key]*Obse
 	}
 	p.flagDeadPressure(out)
 	dropHalfTrends(out)
+	p.attribute(namespaces, window, out)
 	return out, nil
+}
+
+// attribute sets Owner on every observation from kube-state-metrics' owner
+// series over the window. A pod owned by a ReplicaSet is credited to the
+// ReplicaSet's own controller, the same walk discover does for live pods, so
+// the two name a workload identically. Not required: without it a workload is
+// measured from its live pods only, which is what tare did before, and the
+// gap is reported.
+func (p *Prom) attribute(namespaces []string, window time.Duration, out map[Key]*Observation) {
+	ns := nsSelector(namespaces)
+	w := durationString(window)
+	// A pod can list owners that are not its controller; only the controller
+	// decides which workload it was.
+	expr := fmt.Sprintf(`max by (namespace,pod,owner_kind,owner_name) (max_over_time(kube_pod_owner{%s}[%s]))`,
+		strings.TrimPrefix(ns+`,owner_is_controller!="false"`, ","), w)
+	pods, err := p.query(expr)
+	h := SignalHealth{Signal: SigOwner, Query: expr, Err: err, Series: len(pods)}
+	if err != nil || len(pods) == 0 {
+		p.health = append(p.health, h)
+		return
+	}
+	// A failure here leaves Deployment pods credited to their ReplicaSet,
+	// which matches no live workload, so they are dropped rather than
+	// misattributed.
+	sets, err := p.query(fmt.Sprintf(
+		`max by (namespace,replicaset,owner_kind,owner_name) (max_over_time(kube_replicaset_owner{%s}[%s]))`, ns, w))
+	if err != nil {
+		h.Err = err
+	}
+	p.health = append(p.health, h)
+
+	rsOwner := map[string]string{}
+	for _, s := range sets {
+		if kind := s.labels["owner_kind"]; kind != "" && kind != "<none>" {
+			rsOwner[s.labels["namespace"]+"/"+s.labels["replicaset"]] = kind + "/" + s.labels["owner_name"]
+		}
+	}
+	owner := map[string]string{}
+	for _, s := range pods {
+		kind, name := s.labels["owner_kind"], s.labels["owner_name"]
+		if kind == "" || kind == "<none>" {
+			continue // a bare pod is its own workload and has no history but its own
+		}
+		k := s.labels["namespace"] + "/" + s.labels["pod"]
+		ref := kind + "/" + name
+		if kind == "ReplicaSet" {
+			if up, ok := rsOwner[s.labels["namespace"]+"/"+name]; ok {
+				ref = up
+			}
+		}
+		owner[k] = ref
+	}
+	for k, o := range out {
+		o.Owner = owner[k.Namespace+"/"+k.Pod]
+	}
+}
+
+// nsSelector is selector without the container matchers, for kube-state-metrics
+// series that carry no container label: container!="" excludes a series that
+// lacks the label entirely.
+func nsSelector(namespaces []string) string {
+	if len(namespaces) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(`namespace=~"%s"`, strings.Join(namespaces, "|"))
 }
 
 // observeQuery is one expression of the Observe set and where its value goes.
@@ -277,6 +343,16 @@ func observeQueries(sel string, window time.Duration) []observeQuery {
 			expr:   fmt.Sprintf(`count_over_time(container_memory_working_set_bytes{%s}[%s])`, sel, w),
 			signal: SigMemory, required: true, reduce: "sum",
 			assign: func(o *Observation, v float64) { o.Samples = int(v) },
+		},
+		{
+			expr:   fmt.Sprintf(`min_over_time(timestamp(container_memory_working_set_bytes{%s})[%s:%s])`, sel, w, step),
+			signal: SigMemory, reduce: "min",
+			assign: func(o *Observation, v float64) { o.FirstSeen = v },
+		},
+		{
+			expr:   fmt.Sprintf(`max_over_time(timestamp(container_memory_working_set_bytes{%s})[%s:%s])`, sel, w, step),
+			signal: SigMemory,
+			assign: func(o *Observation, v float64) { o.LastSeen = v },
 		},
 		{
 			expr:   fmt.Sprintf(`quantile_over_time(0.95, container_memory_working_set_bytes{%s}[%s])`, sel, w),

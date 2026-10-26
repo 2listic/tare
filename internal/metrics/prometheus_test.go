@@ -168,6 +168,9 @@ func TestNamespaceSelectorIsApplied(t *testing.T) {
 		if !strings.Contains(expr, `namespace=~"alpha|beta"`) {
 			t.Errorf("query is not namespace-scoped: %s", truncate(expr))
 		}
+		if isOwnerQuery(expr) {
+			continue // owner series have no container label to exclude
+		}
 		if !strings.Contains(expr, `container!=""`) {
 			t.Errorf("query does not exclude the pod sandbox: %s", truncate(expr))
 		}
@@ -183,6 +186,9 @@ func TestQueriesAreWellFormed(t *testing.T) {
 
 	var peak, p95 string
 	for _, raw := range f.seen {
+		if isOwnerQuery(raw) {
+			continue
+		}
 		e := unwrapReduce(t, raw)
 		if strings.HasPrefix(e, "max_over_time(rate(container_cpu_usage_seconds_total") {
 			peak = e
@@ -208,6 +214,9 @@ func TestQueriesAreWellFormed(t *testing.T) {
 	// peak marks a container starved for one bad minute.
 	var psiPeak, psiAvg int
 	for _, raw := range f.seen {
+		if isOwnerQuery(raw) {
+			continue
+		}
 		e := unwrapReduce(t, raw)
 		if !strings.Contains(e, "container_pressure_cpu_waiting") {
 			continue
@@ -250,7 +259,7 @@ func TestQueriesAreWellFormed(t *testing.T) {
 // unaggregated query is what let a dead container's series win the join.
 func unwrapReduce(t *testing.T, e string) string {
 	t.Helper()
-	for _, op := range []string{"max", "sum"} {
+	for _, op := range []string{"max", "min", "sum"} {
 		prefix := op + " by (namespace,pod,container) ("
 		if strings.HasPrefix(e, prefix) && strings.HasSuffix(e, ")") {
 			return e[len(prefix) : len(e)-1]
@@ -259,6 +268,13 @@ func unwrapReduce(t *testing.T, e string) string {
 	t.Errorf("query is not aggregated by container, so a restarted container's dead "+
 		"series can win the join: %s", truncate(e))
 	return e
+}
+
+// isOwnerQuery reports a kube-state-metrics owner lookup. Those are keyed by pod
+// and owner, not by container, because they attribute pods rather than measure
+// containers.
+func isOwnerQuery(e string) bool {
+	return strings.Contains(e, "kube_pod_owner") || strings.Contains(e, "kube_replicaset_owner")
 }
 
 // TestIncarnationsAreAggregated is the regression test for a leaker that
@@ -277,6 +293,9 @@ func TestIncarnationsAreAggregated(t *testing.T) {
 	}
 	var summed int
 	for _, e := range f.seen {
+		if isOwnerQuery(e) {
+			continue
+		}
 		unwrapReduce(t, e)
 		if strings.HasPrefix(e, "sum by (namespace,pod,container) (count_over_time(container_memory_working_set_bytes") {
 			summed++
@@ -316,6 +335,67 @@ func TestAvailableWindowProbesEachWindowOnce(t *testing.T) {
 		probed[q]++
 		if probed[q] > 1 {
 			t.Errorf("probed twice: %s", q)
+		}
+	}
+}
+
+// TestOwnersResolveThroughReplicaSets: a dead Deployment pod is owned by a
+// ReplicaSet that may itself be gone from the API server, so the walk up to
+// the Deployment has to come from kube-state-metrics too, or the pod is
+// credited to a hash-suffixed name no live workload matches.
+func TestOwnersResolveThroughReplicaSets(t *testing.T) {
+	series := func(rows ...map[string]string) string {
+		var res []any
+		for _, m := range rows {
+			res = append(res, map[string]any{"metric": m, "value": []any{1700000000, "1"}})
+		}
+		b, _ := json.Marshal(map[string]any{"status": "success",
+			"data": map[string]any{"resultType": "vector", "result": res}})
+		return string(b)
+	}
+	f := newFakeProm(nil)
+	defer f.Close()
+	f.respond = func(expr string) (string, int) {
+		if strings.Contains(expr, "container_cpu_usage_seconds_total") {
+			return series(
+				map[string]string{"namespace": "ns", "pod": "web-6d9f-old01", "container": "app"},
+				map[string]string{"namespace": "ns", "pod": "db-0", "container": "db"},
+				map[string]string{"namespace": "ns", "pod": "bare", "container": "c"},
+			), 200
+		}
+		switch {
+		case strings.Contains(expr, "kube_pod_owner"):
+			return series(
+				map[string]string{"namespace": "ns", "pod": "web-6d9f-old01", "owner_kind": "ReplicaSet", "owner_name": "web-6d9f"},
+				map[string]string{"namespace": "ns", "pod": "db-0", "owner_kind": "StatefulSet", "owner_name": "db"},
+				map[string]string{"namespace": "ns", "pod": "bare", "owner_kind": "<none>", "owner_name": "<none>"},
+			), 200
+		case strings.Contains(expr, "kube_replicaset_owner"):
+			return series(map[string]string{"namespace": "ns", "replicaset": "web-6d9f", "owner_kind": "Deployment", "owner_name": "web"}), 200
+		}
+		return emptyVector, 200
+	}
+	p := NewProm(f.URL)
+	obs, err := p.Observe([]string{"ns"}, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for pod, want := range map[string]string{
+		"web-6d9f-old01": "Deployment/web",
+		"db-0":           "StatefulSet/db",
+		"bare":           "",
+	} {
+		o := obs[Key{Namespace: "ns", Pod: pod, Container: map[string]string{"web-6d9f-old01": "app", "db-0": "db", "bare": "c"}[pod]}]
+		if o == nil {
+			t.Fatalf("no observation for %s", pod)
+		}
+		if o.Owner != want {
+			t.Errorf("%s: owner %q, want %q", pod, o.Owner, want)
+		}
+	}
+	for _, h := range p.Health() {
+		if h.Signal == SigOwner && !h.OK() {
+			t.Errorf("owner signal reported unhealthy: %+v", h)
 		}
 	}
 }

@@ -1107,6 +1107,38 @@ rollout disruption rather than sizing, but the locust log was gone before that
 could be checked.
 ---
 
+## 54. A fortnight's report built from the last hour
+
+**Looked like:** `40 containers (21 listed) over 2w`, every row `low`, and
+cpu-hog SATURATED from 318 samples.
+
+**Was actually:** observations were joined to live pods only. A node of the
+lab cluster went NotReady, its pods were rescheduled under new names, and
+every one of those workloads was sized from the hour since. Prometheus held
+about 10,000 samples of cpu-hog across four pods of the same ReplicaSet; tare
+read the newest 318. Any rollout does the same, so a team that deploys daily
+never gets more than a day of history, while the header names the window.
+
+**Caught by:** the 2026-10-25 stress pass, comparing a row's sample count with
+`count_over_time` by pod on msi's Prometheus.
+
+**Fixed by:** `kube_pod_owner` and `kube_replicaset_owner` over the window
+credit every pod, dead or alive, to its controller, and `aggregate` folds a
+dead pod's worst case into its workload's row. Its memory-trend half is not
+used: a dead pod has no late hour. Coverage is samples summed and divided by
+how many pods ran at once (total span over union of spans), because both
+obvious versions were wrong on the same cluster: a plain sum rated three
+DaemonSet pods as three times the evidence, and a union of first-to-last
+spans rated a pod that lived through a week of nightly power-offs as a full
+week. Without kube-state-metrics the row is measured from live pods as before
+and `pod-owner` is reported missing. Tests: `internal/analyze/history_test.go`,
+`TestOwnersResolveThroughReplicaSets`.
+
+On msi this moved cartservice, currencyservice and recommendationservice from
+OK to UNVERIFIED: their replaced pods carried sustained pressure up to 0.12
+and 19 restarts from when the cluster was crowded onto two nodes. That
+evidence existed all along and was being dropped.
+
 ## Open, and not yet solved
 
 **The kubelet can lie about PSI. Mitigated 2026-09-20, not eliminated.**

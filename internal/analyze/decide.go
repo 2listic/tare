@@ -526,9 +526,12 @@ func isIdle(f *Finding, window time.Duration, th Thresholds) *Reason {
 	return &r
 }
 
+// scrapeSeconds is the scrape interval every sample count here assumes.
+const scrapeSeconds = 15
+
 // expectedSamples is what a 15 second scrape interval produces over window.
 func expectedSamples(window time.Duration) int {
-	return int(window.Seconds() / 15)
+	return int(window.Seconds() / scrapeSeconds)
 }
 
 // confidence rates the evidence by sample count against expectedSamples.
