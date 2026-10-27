@@ -20,7 +20,7 @@ not read the agent's metrics yet.
 on every node including the control plane, and serves `/metrics` on port 9105 of
 each node over plain HTTP with no authentication. NetworkPolicy does not apply
 to host-network pods, so restrict 9105 to your Prometheus at the node firewall
-or security group. There is no published image yet; you build it yourself.
+or security group. The image is `ghcr.io/2listic/tare-agent` (linux/amd64, arm64).
 
 To see how its numbers compare with PSI today, use `compare-pressure` (below),
 which reads Prometheus and judges the agent's data the way tare judges PSI.
@@ -45,7 +45,15 @@ Requirements:
 - kube-state-metrics, optional: with it, CPU requests and limits are taken into account.
 - Permission to run a privileged pod with `hostPID` and `hostNetwork` (see below).
 
-## 1. Build the image
+## 1. The image
+
+`deploy/agent/agent.yaml` pulls `ghcr.io/2listic/tare-agent:main`, rebuilt by CI
+on every change to `agent/` on main. Every release also has `:vX.Y.Z` (and
+`:latest`), and every main build `:sha-<commit>`; those never move, so pin one of
+them for anything you keep, and set `imagePullPolicy: IfNotPresent`. Nothing else
+is needed if the nodes can pull from ghcr.io; otherwise build it yourself (2).
+
+## 2. Build it yourself (optional)
 
 From the repository root:
 
@@ -64,10 +72,8 @@ go test ./...
 go build -o tare-agent .
 ```
 
-## 2. Get the image to the nodes
-
-There is no published image yet. Either push it to a registry the cluster can pull
-from, or import it into every node's container runtime.
+Then either push it to a registry the cluster can pull from, or import it into
+every node's container runtime.
 
 **Registry:**
 
@@ -79,7 +85,8 @@ docker push registry.example.com/tare-agent:poc
 Then in `deploy/agent/agent.yaml` set `image: registry.example.com/tare-agent:poc`
 and `imagePullPolicy: IfNotPresent`.
 
-**Import into each node** (no registry, keep `imagePullPolicy: Never`):
+**Import into each node** (no registry): set `image: tare-agent:poc` and
+`imagePullPolicy: Never` in `deploy/agent/agent.yaml`, then
 
 ```bash
 # containerd
@@ -357,7 +364,7 @@ kubectl delete -f deploy/agent/agent.yaml     # and your PodMonitor / scrape con
 
 ## Limits of the proof of concept
 
-- The image is built locally; there is no published image or Helm chart.
+- There is no Helm chart.
 - The pod runs privileged; the capability-only profile is not done yet.
 - tare does not read the agent yet: `compare-pressure` is the way to look at it.
 - Measured cost: about 0.002–0.05 cores and 15–20 MiB per node, growing with the
