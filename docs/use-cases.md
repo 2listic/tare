@@ -1,7 +1,8 @@
 # Three scenarios tare is for
 
 Written against what the tool does today, with the gaps named where a scenario
-needs something not yet built.
+needs something not yet built. Output below is abridged to the relevant lines;
+`kubectl tare report --demo -v` shows the full format without a cluster.
 
 tare integrates with telemetry, not with other tooling: the Kubernetes API for
 what is declared, and a Prometheus-compatible endpoint — Prometheus, Thanos,
@@ -31,16 +32,16 @@ kubectl tare report -n prod -v
 kubectl tare report --verdict SATURATED
 ```
 
-**What they get:** the two or three rows out of forty-seven where the safe
-number and the observed number disagree, each with the flag quoted as the
-reason:
+**What they get:** the few rows where the safe number and the observed number
+disagree, each with the flag quoted as the reason:
 
 ```
-memory recommendation raised from 83Mi to 384Mi by a runtime ceiling;
-observed usage alone would have been unsafe
-[ceiling jvm-heap-max] JVM heap is capped at 256Mi by JAVA_OPTS=256m, so the
-container needs about 384Mi once metaspace, code cache and thread stacks are
-counted. Change the flag, not the limit.
+MEM_RAISED_BY_CEILING   memory recommendation raised from 253Mi to 384Mi by a runtime ceiling;
+                        observed usage alone would have been unsafe
+CEILING jvm-heap-max    JVM heap is capped at 256Mi by JAVA_OPTS=256m, so the container needs
+                        about 384Mi once metaspace, code cache and thread stacks are counted.
+                        Raising the limit above that buys nothing; lowering it below invites
+                        an OOMKill. Change the flag, not the limit.
 ```
 
 Where the flag is not in the pod spec at all, the ceiling is inferred from a
@@ -78,7 +79,7 @@ kubectl tare report --by-savings --top 20
 total that keeps both directions apart:
 
 ```
-17 containers over 2w: requests lowered on 10 (-2100m CPU, -2.7Gi mem), raised on 4 (+396m CPU, +438Mi mem)
+40 containers (20 listed) over 2w: nodes freed >=1 of 6; requests lowered on 19 (-2535m CPU, -6.2Gi mem), raised on 11 (+476m CPU, +132Mi mem)
 ```
 
 Both directions are reported, because a capacity plan built on the lowered
@@ -116,9 +117,9 @@ rather than a score:
 
 ```
 SATURATED  prod/Deployment/checkout [api]  confidence high (17098 samples)
-    - CPU pressure 0.900 s/s exceeds 0.030 while using 100% of its allocation:
-      the container is waiting on CPU it was denied (window mean 0.8437)
-    - usage is pinned at the 100m CPU limit; raise the limit, not just the request
+    CPU_PRESSURE          CPU pressure 0.900 s/s exceeds 0.030 while using 100% of its allocation:
+                          the container is waiting on CPU it was denied (window mean 0.8437)
+    CPU_PINNED_AT_LIMIT   usage is pinned at the 100m CPU limit; raise the limit, not just the request
 ```
 
 Sustained pressure is shown beside peak pressure, because one unlucky minute

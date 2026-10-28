@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/simulate"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/simulate"
 )
 
 // Every threshold in DefaultThresholds was chosen by judgement. The simulator

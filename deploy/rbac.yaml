@@ -1,7 +1,7 @@
 # Everything tare reads, and nothing else.
 #
-# tare never writes: there is no verb here but get, list and watch-free reads,
-# and the one subresource is the API server's service proxy, which is how the
+# tare never writes: the only verbs here are get and list, and the one
+# subresource is the API server's service proxy, which is how the
 # tool queries your existing Prometheus without a port-forward.
 #
 # Most people run tare as themselves with a kubeconfig that already has cluster
@@ -9,7 +9,9 @@
 # a shared runner, or an admin who would rather hand out exactly this.
 #
 #   kubectl apply -f deploy/rbac.yaml
-#   kubectl -n kube-system create token tare --duration 1h
+#
+# then build a kubeconfig around the service account's token; the README's
+# Permissions section has the four commands.
 #
 # Check what a token can actually do before trusting a report from it:
 #

@@ -1,6 +1,9 @@
 package main
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // pair is a container's accounted CPU wait and CPU run time, in nanoseconds.
 type pair struct{ wait, run uint64 }
@@ -11,8 +14,19 @@ func (p *pair) add(wait, run uint64) { p.wait += wait; p.run += run }
 // has not arrived yet: its last read value, so the total does not dip.
 type placeholder struct {
 	thread
-	read uint64 // the read at which the thread vanished
+	since time.Time // when the thread vanished
 }
+
+// pendingTimeout is how long a placeholder waits for its exit record before it
+// becomes final. Wall-clock, not a number of reads: with several scrapers or a
+// short scrape interval, reads come milliseconds apart while the record is still
+// in flight, and it would then be added on top of the finalised placeholder.
+const pendingTimeout = 30 * time.Second
+
+// tombstoneTTL is how long a finalised placeholder is remembered, so that an
+// exit record arriving after pendingTimeout adds only what the placeholder did
+// not already count.
+const tombstoneTTL = 10 * time.Minute
 
 // exitRecord is what an exit notification tells about a task.
 type exitRecord struct {
@@ -31,6 +45,7 @@ type started struct {
 type stats struct {
 	reads, exits, unattributed, outside, neverReceived, layoutUnknown, drops uint64
 	execs, execsInContainers, execDrops, placedByExec                        uint64
+	listening                                                                bool // exit listener registered and receiving
 	layouts                                                                  map[string]uint64
 	containers                                                               map[string]int
 }
@@ -46,16 +61,19 @@ type account struct {
 	exited    map[uint32]bool     // tids whose exit record arrived since the last read
 	pending   map[int]placeholder // tid -> placeholder (left /proc, no exit record yet)
 	atExec    map[int]started     // tgid -> container at exec, for tasks no read saw
+	finalized map[int]placeholder // tid -> placeholder made final without its record
 	saved     map[string]*pair    // container -> final values of exited tasks
 	st        stats
+	now       func() time.Time
 }
 
 func newAccount() *account {
 	return &account{
 		live: map[int]thread{}, procs: map[int]string{}, prevProcs: map[int]string{},
-		exited: map[uint32]bool{}, pending: map[int]placeholder{}, atExec: map[int]started{},
-		saved: map[string]*pair{},
-		st:    stats{layouts: map[string]uint64{}, containers: map[string]int{}},
+		exited: map[uint32]bool{}, pending: map[int]placeholder{}, finalized: map[int]placeholder{},
+		atExec: map[int]started{}, saved: map[string]*pair{},
+		st:  stats{layouts: map[string]uint64{}, containers: map[string]int{}},
+		now: time.Now,
 	}
 }
 
@@ -65,6 +83,7 @@ func (a *account) apply(w walk, exists func(scope string) bool) map[string]pair 
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.st.reads++
+	now := a.now()
 	a.st.containers = w.containers
 	a.prevProcs, a.procs = a.procs, w.processes
 
@@ -83,17 +102,33 @@ func (a *account) apply(w walk, exists func(scope string) bool) map[string]pair 
 	// already (done); if not, keep the last read value as a placeholder.
 	for tid, t := range a.live {
 		if _, still := w.threads[tid]; !still && !done[uint32(tid)] {
-			a.pending[tid] = placeholder{thread: t, read: a.st.reads}
+			a.pending[tid] = placeholder{thread: t, since: now}
 		}
 	}
 	a.live = w.threads
 
+	// A thread that missed one read (a /proc read that failed, a read racing a
+	// cgroup move) and is back: it is live again, and its placeholder would
+	// count it a second time. Only the same thread: same container, counters not
+	// lower (a reused tid starts from zero).
+	for tid, p := range a.pending {
+		if t, back := w.threads[tid]; back && sameThread(p.thread, t) {
+			delete(a.pending, tid)
+		}
+	}
+
 	// A placeholder whose exit record never came (dropped) becomes final.
 	for tid, p := range a.pending {
-		if p.read+2 < a.st.reads {
+		if now.Sub(p.since) > pendingTimeout {
 			a.savedFor(p.cgroup).add(p.wait, p.run)
 			delete(a.pending, tid)
+			a.finalized[tid] = placeholder{thread: p.thread, since: now}
 			a.st.neverReceived++
+		}
+	}
+	for tid, p := range a.finalized {
+		if now.Sub(p.since) > tombstoneTTL {
+			delete(a.finalized, tid)
 		}
 	}
 	// An exec is kept until two reads have passed: a process that lives longer
@@ -131,6 +166,10 @@ func (a *account) apply(w walk, exists func(scope string) bool) map[string]pair 
 		}
 	}
 	return totals
+}
+
+func sameThread(was, now thread) bool {
+	return was.cgroup == now.cgroup && now.wait >= was.wait && now.run >= was.run
 }
 
 func (a *account) savedFor(scope string) *pair {
@@ -196,6 +235,16 @@ func (a *account) exit(r exitRecord, cgroupOf func(pid int) (string, bool)) {
 		}
 		return
 	}
+	// A record arriving after its placeholder was made final adds only what the
+	// placeholder did not already count.
+	if f, late := a.finalized[tid]; late {
+		delete(a.finalized, tid)
+		if final := (thread{scope, r.wait, r.run}); sameThread(f.thread, final) {
+			a.savedFor(scope).add(r.wait-f.wait, r.run-f.run)
+			a.exited[r.tid] = true
+			return
+		}
+	}
 	a.savedFor(scope).add(r.wait, r.run)
 	delete(a.pending, tid) // the final value replaces the placeholder
 	a.exited[r.tid] = true
@@ -207,6 +256,9 @@ func (a *account) lookup(tid, tgid int) (string, bool) {
 		return t.cgroup, true
 	}
 	if p, ok := a.pending[tid]; ok {
+		return p.cgroup, true
+	}
+	if p, ok := a.finalized[tid]; ok {
 		return p.cgroup, true
 	}
 	if s, ok := a.processOf(tgid); ok && tgid != 0 {
@@ -279,3 +331,8 @@ func (a *account) drop()          { a.mu.Lock(); a.st.drops++; a.mu.Unlock() }
 
 // execDrop is counted by the exec listener.
 func (a *account) execDrop() { a.mu.Lock(); a.st.execDrops++; a.mu.Unlock() }
+
+// setListening records whether the exit listener is registered and receiving.
+func (a *account) setListening(up bool) { a.mu.Lock(); a.st.listening = up; a.mu.Unlock() }
+
+func (a *account) listening() bool { a.mu.Lock(); defer a.mu.Unlock(); return a.st.listening }

@@ -10,6 +10,8 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -37,10 +39,12 @@ func main() {
 	go func() {
 		if err := listenExits(a, r.cgroupOf); err != nil {
 			// Without exit records the agent still serves the live threads; the
-			// tasks that exit between scrapes are then missing, which shows as
-			// low coverage (tare_cpu_run_seconds_total against CPU usage).
+			// tasks that exit between scrapes are then missing. That is not a
+			// smaller number to be trusted: it is reported as
+			// tare_agent_exit_listener_up 0 and /healthz fails (pod not ready).
 			log.Printf("exit listener stopped: %v", err)
 		}
+		a.setListening(false)
 	}()
 	go func() {
 		if err := listenExecs(a, r.cgroupOf); err != nil {
@@ -55,14 +59,33 @@ func main() {
 	reg.MustRegister(&collector{r: r, a: a}, collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		collectors.NewGoCollector())
 	http.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
-	http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
-	log.Fatal(http.ListenAndServe(*listen, nil))
+	http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		if !a.listening() {
+			http.Error(w, "exit listener not receiving: CPU wait misses exited tasks", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte("ok\n"))
+	})
+	// Timeouts, because the port is on the node's network and unauthenticated:
+	// the default server lets one slow client hold a connection forever.
+	srv := &http.Server{
+		Addr:              *listen,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	log.Fatal(srv.ListenAndServe())
 }
 
 // collector reads every container on each scrape, like the Python exporter.
+// A scrape changes the account, so scrapes are serialised: two concurrent
+// scrapes whose reads were applied out of order would make the counters go
+// down, which rate() takes for a reset and turns into a spike.
 type collector struct {
-	r reader
-	a *account
+	mu sync.Mutex
+	r  reader
+	a  *account
 }
 
 var (
@@ -92,7 +115,9 @@ var (
 	descPlacedByExec = prometheus.NewDesc("tare_agent_exits_placed_by_exec_total",
 		"Exit records assigned to a container through the exec event of their process (exec probes and other tasks started from outside).",
 		nil, nil)
-	descReads      = prometheus.NewDesc("tare_agent_reads_total", "Reads of all containers (one per scrape).", nil, nil)
+	descReads     = prometheus.NewDesc("tare_agent_reads_total", "Reads of all containers (one per scrape).", nil, nil)
+	descListening = prometheus.NewDesc("tare_agent_exit_listener_up",
+		"1 if the exit listener is registered and receiving; 0 means CPU wait misses exited tasks.", nil, nil)
 	descContainers = prometheus.NewDesc("tare_agent_containers",
 		"Containers found, by location: kubepods, or outside (cgroup driver mismatch).", []string{"location"}, nil)
 	descInfo = prometheus.NewDesc("tare_agent_build_info", "Agent version, kernel and cgroup version.",
@@ -101,14 +126,16 @@ var (
 
 func (c *collector) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{descWait, descRun, descExits, descUnattr, descOutside, descNever,
-		descLayout, descUnknown, descDrops, descExecs, descExecDrops, descPlacedByExec, descReads, descContainers,
-		descInfo} {
+		descLayout, descUnknown, descDrops, descExecs, descExecDrops, descPlacedByExec, descReads, descListening,
+		descContainers, descInfo} {
 		ch <- d
 	}
 }
 
 func (c *collector) Collect(ch chan<- prometheus.Metric) {
+	c.mu.Lock()
 	totals := c.a.apply(c.r.read(), c.r.exists)
+	c.mu.Unlock()
 	for id, p := range totals {
 		ch <- prometheus.MustNewConstMetric(descWait, prometheus.CounterValue, float64(p.wait)/1e9, id)
 		ch <- prometheus.MustNewConstMetric(descRun, prometheus.CounterValue, float64(p.run)/1e9, id)
@@ -128,6 +155,11 @@ func (c *collector) Collect(ch chan<- prometheus.Metric) {
 	counter(descExecDrops, s.execDrops)
 	counter(descPlacedByExec, s.placedByExec)
 	counter(descReads, s.reads)
+	up := 0.0
+	if s.listening {
+		up = 1
+	}
+	ch <- prometheus.MustNewConstMetric(descListening, prometheus.GaugeValue, up)
 	for _, l := range layouts {
 		counter(descLayout, s.layouts[l.name], l.name)
 	}

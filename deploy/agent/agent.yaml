@@ -3,8 +3,9 @@
 #
 #   kubectl apply -f deploy/agent/agent.yaml
 #
-# There is no published image yet: build it with `docker build -t tare-agent:poc agent/`
-# and import it into each node's container runtime.
+# The image is ghcr.io/2listic/tare-agent, built by .github/workflows/agent-image.yml:
+# :main follows this branch, :vX.Y.Z and :sha-<commit> do not move. Pin one of
+# those for anything you keep; agent/README.md has how to build your own.
 #
 # Why each permission:
 #   hostPID       cgroup.procs holds host PIDs and /proc must be the host's
@@ -13,6 +14,13 @@
 #   privileged    for now. What is needed: CAP_NET_ADMIN (taskstats exit events,
 #                 SO_RCVBUFFORCE) and read access to every task's /proc entry
 #   no API token  the agent never talks to the Kubernetes API
+#
+# Exposure: /metrics is served on port 9105 of every node's network, over plain
+# HTTP with no authentication, and hostNetwork bypasses NetworkPolicy. Anyone
+# who can reach a node IP can read per-container CPU wait keyed by cgroup path
+# (pod UID and container id). Restrict 9105 at the node firewall or security
+# group to your Prometheus. The tolerations below schedule it on every node,
+# control plane included.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -41,8 +49,8 @@ spec:
       tolerations: [{operator: Exists}]
       containers:
       - name: agent
-        image: tare-agent:poc
-        imagePullPolicy: Never          # imported into the nodes, not pulled
+        image: ghcr.io/2listic/tare-agent:main
+        imagePullPolicy: Always         # :main moves; IfNotPresent once pinned
         args: ["-listen=:9105"]
         ports: [{name: metrics, containerPort: 9105}]
         readinessProbe:

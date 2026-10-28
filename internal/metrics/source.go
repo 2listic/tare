@@ -34,6 +34,7 @@ const (
 	SigMemTrend    Signal = "memory-trend"
 	SigLimitTrend  Signal = "limit-trend"
 	SigNodeUtil    Signal = "node-utilisation"
+	SigOwner       Signal = "pod-owner"
 	// SigCPUWait is tare-agent's CPU wait, the saturation signal for nodes
 	// without PSI. See cpuwait.go.
 	SigCPUWait Signal = "cpu-wait"
@@ -106,6 +107,21 @@ type Observation struct {
 	// Samples is populated buckets seen for this container, which drives the
 	// confidence rating.
 	Samples int
+
+	// FirstSeen and LastSeen bound the part of the window in which this
+	// container reported memory, in unix seconds, zero when unknown. A
+	// workload's coverage is the union of its pods' spans, not their sum:
+	// three replicas running side by side for a day are a day of evidence.
+	FirstSeen float64
+	LastSeen  float64
+
+	// Owner is the controller the pod belonged to, "Deployment/web", read from
+	// kube-state-metrics rather than from the API server, because the pods
+	// that matter here are the ones the API server has already forgotten. A
+	// rollout or a reschedule replaces every pod, and history keyed only by
+	// live pod names starts again from nothing each time. Empty when
+	// kube-state-metrics is not scraped.
+	Owner string
 
 	// Have records which signals actually produced data for this container.
 	Have map[Signal]bool

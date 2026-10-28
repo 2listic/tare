@@ -7,9 +7,9 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/packing"
-	"github.com/mfranzon/tare/internal/report"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/packing"
+	"github.com/2listic/tare/internal/report"
 )
 
 // The terminal report is a sequence of tables and nothing else.
@@ -209,6 +209,10 @@ func (p *printer) printTotals(fs []analyze.Finding) {
 		row(w, "idle", strconv.Itoa(s.IdleWorkloads), CPUDelta(-s.IdleCPUMillicores), MemDelta(-s.IdleMemBytes),
 			"not_in_lower:"+string(analyze.IdleCaveat))
 	}
+	if s.UnverifiedWorkloads > 0 {
+		row(w, "unverified", strconv.Itoa(s.UnverifiedWorkloads), CPUDelta(-s.UnverifiedCPUMillicores), MemDelta(-s.UnverifiedMemBytes),
+			"not_in_lower:"+string(analyze.Unverified))
+	}
 	if s.MemUnknown > 0 {
 		row(w, "unknown", strconv.Itoa(s.MemUnknown), "-", "?", string(analyze.MemDemandCensored))
 	}
@@ -286,6 +290,29 @@ func (p *printer) printNodes(r *report.Report) {
 		}
 		w.Flush()
 	}
+}
+
+// printFootprint converts each replay stage's FREED into energy and emissions
+// with the reader's own factors, and prints the factors under it so the
+// figure never travels without its coefficient. Nothing at all when no
+// factors were given: an unasked-for section of dashes is noise.
+func (p *printer) printFootprint(r *report.Report) {
+	if !r.Factors.Set() {
+		return
+	}
+	w := p.section("footprint", "STAGE", "NODES_FREED", "CREDIT", "KWH_YEAR", "KGCO2E_YEAR")
+	rows := report.Footprint(r)
+	if rows == nil {
+		row(w, "not_computed", "-", "-", "-", "-")
+		w.Flush()
+		fmt.Fprintln(p.out, "# not computed: no node count to convert, see section=nodes")
+		return
+	}
+	for _, f := range rows {
+		row(w, f.Stage, footprintNodes(f), f.Credit, footprintKWh(f), footprintKg(f))
+	}
+	w.Flush()
+	fmt.Fprintf(p.out, "# factors: %s\n", factorsNote(r.Factors))
 }
 
 // printDrainBlockers reports the budgets that make a drain impossible. A

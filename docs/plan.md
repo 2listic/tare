@@ -75,7 +75,7 @@ it, and the observational ceiling inference cannot distinguish a capped heap
 from genuinely steady demand (the consequence of being wrong is bounded, and
 documented where it is implemented).
 
-**A long-running stability experiment is collecting on msi.** See
+**A long-running stability experiment is collecting on the lab cluster.** See
 `test/longrun/README.md`. It has no end date and nothing will notify you. The
 clock was **restarted 2026-09-14 21:55 UTC** after the load generator was found
 to be generating no measurable load; day 7 and day 14 count from then.
@@ -125,6 +125,7 @@ restarting a pod.
 | Priority order | **User experience first, then integration ease, then capability.** This is an open source project whose distribution is a GitHub page: a feature nobody can run without configuration does not count as shipped. Zero required flags, one binary, no cluster changes. |
 | No-Prometheus clusters | v0.1 requires a Prometheus-compatible endpoint with auto-discovery; degraded snapshot mode lands in v0.2 |
 | Unit of savings *(2026-09-19)* | **Node-count delta from a bin-packing replay**, not reclaimed millicores. Millicores are the input to a saving and are reported as such. Never print a currency figure the replay cannot defend |
+| Energy and carbon *(2026-10-12)* | **The node delta times the user's own factors** (`--node-watts`, `--grid-intensity`), never per-pod power. *Revised 2026-10-19:* `--grid-intensity` also takes a country, resolved from an embedded, sourced Ember table and printed with its year and source; node power stays user-only. Not an ESG or emissions disclosure and never labelled "compliant". See "Footprint" |
 | Node inventory *(2026-09-19)* | A first-class input to `internal/discover`. Used for **scheduling** first (feasibility, bin packing, per-node overhead) and hardware characteristics second |
 | Hardware awareness *(2026-09-19)* | Admitted only where it changes a number or produces a refusal. Config findings and refusals, never CPU-model performance normalisation, which cannot be identified without benchmarking |
 
@@ -839,7 +840,7 @@ inventory and a pod list and touches no cluster.
 ## Live validation on the lab cluster (2026-09-19)
 
 The long run was stopped and attempt 5's data archived to
-`~/tare-longrun/attempt5-data/` on msi (88 snapshots, 793 rows,
+`~/tare-longrun/attempt5-data/` on the lab cluster (88 snapshots, 793 rows,
 2026-09-15 23:07 to 2026-09-19 13:17). The new code was then run against the
 live k3d cluster with `--window 4d`.
 
@@ -942,7 +943,7 @@ experiment exists to measure, and it holds.
 
 ## Pivot: self-hosted inference serving (2026-09-19)
 
-Direction set by Marco: point tare at LLM inference on Kubernetes - vLLM,
+Next direction: point tare at LLM inference on Kubernetes - vLLM,
 Ollama, TGI, llama.cpp - rather than at general web workloads. First pass is
 shipped and verified on the lab cluster. 206 tests across 8 packages.
 
@@ -1011,7 +1012,7 @@ using GPU fields added to the node inventory (`nvidia.com/gpu` capacity, plus
 
 ### Verified on the lab cluster, against pods that never started
 
-`test/lab/inference.yaml` plants three workloads on msi. Every finding below was
+`test/lab/inference.yaml` plants three workloads on the lab cluster. Every finding below was
 produced while the vLLM pod sat in `ImagePullBackOff`, which is the claim in
 executable form - the tool reads the configuration, not the behaviour:
 
@@ -1025,7 +1026,7 @@ executable form - the tool reads the configuration, not the behaviour:
 - and on all three, "configured as an inference server but requests no GPU"
 
 The lab cluster has no GPU exposed to k3d, so the fit check itself is covered
-only by unit tests. msi does have an RTX 3060 (6GB); exposing it needs the
+only by unit tests. The lab host does have an RTX 3060 (6GB); exposing it needs the
 NVIDIA container runtime and device plugin, and that is the next honest step,
 because a 6GB card refusing an 8B fp16 model is exactly the refusal this pass
 was written to produce.
@@ -1040,7 +1041,7 @@ throughout; only running it against a cluster showed the output.
 
 ## Refocus: optimising a fixed node pool (2026-09-19, third pass)
 
-Direction from Marco after the inference pass: rethink around the hardware
+Direction after the inference pass: rethink around the hardware
 actually available, and make tare useful to someone who wants to optimise the
 cluster they have. That is the right correction, for a reason this document
 had already established and then walked past.
@@ -1371,7 +1372,7 @@ write a change that would silently demote a Guaranteed pod to Burstable.
 
 ### Verified end to end
 
-A git repository was built on msi from the live lab manifests, `tare diff
+A git repository was built on the lab cluster from the live lab manifests, `tare diff
 --write` was run against the cluster, and the result inspected with `git diff`:
 5 files changed, 28 insertions, 18 deletions, every file still parsing, comments
 and inline notes intact, and the BestEffort pod correctly gaining a resources
@@ -1710,6 +1711,62 @@ deliberate.
 **What this pass did not change.** The HTML report and the TUI still render the
 sentences as before — the codes are available to them and unused. `kubectl tare
 check` is still prose end to end.
+
+## Footprint: energy and carbon from the node delta (2026-10-12)
+
+Asked for as an "ESG compliant report", for positioning. Rejected in that form,
+for three reasons:
+
+1. Compliance belongs to a company's disclosure (CSRD/ESRS E1, GHG Protocol,
+   ISSB S2), and that rests on metered power or provider statements. A
+   kubectl plugin's estimate pasted into one is the recurring failure shape
+   with legal weight on it.
+2. It is the currency problem again. Lowering a request changes neither the
+   bill nor the joules; the work still runs. Energy falls only when a node is
+   removed, so "carbon saved by right-sizing" on a fixed pool is zero.
+3. tare has no power signal. Kepler reads RAPL, which cloud VMs mostly do not
+   expose, so on most clusters a per-pod figure would be modelled: an
+   inferred curve, which the core mechanism refuses.
+
+What shipped is the same deal as currency: tare supplies the count, the user
+supplies the coefficient. `-o wide` gets a `footprint` section, one row per
+replay stage with the same `CREDIT` split as `nodes`, so the cluster's own
+slack is never counted as tare's carbon. A `# factors:` line under it carries
+the coefficients and what is excluded (embodied carbon). The row is `>=` when
+pods were pinned, negative when the recommendations need more nodes, and `?`
+for emissions without a grid intensity. JSON carries the factors beside the
+rows. `--node-watts` is documented as **idle** draw: the moved workload takes
+its dynamic power with it, so a loaded-power figure would overstate the
+saving.
+
+A defect found while testing it: `NodesNotComputed` returned the self-check
+text, which is empty on a `packing.Result` nobody filled in, so a replay that
+never ran read as computed. It now says the replay did not run.
+
+Not done, deliberately: per-instance-type wattage. The passes are packed
+independently, so which nodes tare freed is not a set the replay can name,
+and a per-type figure would need exactly that.
+
+### Revision: grid intensity by country (2026-10-19)
+
+The ask was for `--grid-intensity italy` instead of a number, taking the
+middle of the ranges in a table given in chat. Those ranges were from memory
+and wrong: France 41 not 50-80, Germany 330 not 350-450, Poland 591 not
+600-750 (Ember 2025). Shipping their midpoints would have embedded
+unsourced coefficients. What shipped is a table generated by `tools/mkgrid`
+from Ember's Yearly Electricity Data, latest year per country, with the year
+and source on the factors line (`grid_source=ember_2025_ITA`) and in JSON.
+A number still works and is labelled `user`.
+
+This relaxes "never a tare-supplied coefficient" for grid intensity only,
+because a published, dated, per-country figure is a citation and not an
+invention. Node power stays user-supplied: there is no equivalent public
+source for what one of *your* nodes draws at idle.
+
+The table test caught two defects in the data on first run: Central African
+Republic at 0 gCO2e/kWh (a gap in Ember, which would have printed 0 kg) and
+Western Sahara's last figure from 2009. The generator now drops zeros and
+anything more than three years behind the newest figure.
 
 ## Roadmap after v0.1
 

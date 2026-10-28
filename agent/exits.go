@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -50,7 +51,8 @@ func decode(tid uint32, b []byte) (r exitRecord, ok bool) {
 }
 
 // listenExits subscribes to the kernel's taskstats exit notifications on every
-// online CPU and feeds each record to the account. It runs until the socket fails.
+// online CPU and feeds each record to the account. It returns when registration
+// is refused or the socket fails; lost records (ENOBUFS) are counted, not fatal.
 func listenExits(a *account, cgroupOf func(pid int) (string, bool)) error {
 	c, err := genetlink.Dial(nil)
 	if err != nil {
@@ -80,18 +82,25 @@ func listenExits(a *account, cgroupOf func(pid int) (string, bool)) error {
 		return err
 	}
 	req := genetlink.Message{Header: genetlink.Header{Command: unix.TASKSTATS_CMD_GET, Version: fam.Version}, Data: data}
-	if _, err := c.Send(req, fam.ID, netlink.Request); err != nil {
+	if _, err := c.Send(req, fam.ID, netlink.Request|netlink.Acknowledge); err != nil {
 		return fmt.Errorf("register for exits: %w", err)
 	}
-	log.Printf("taskstats family %d, registered for exits on cpus %s", fam.ID, cpus)
-
+	// A refused registration (EPERM without CAP_NET_ADMIN) is not an error of
+	// Send: it arrives on the next Receive, as the reply to the request. The
+	// listener counts as up only once a Receive has succeeded (the ack, or a
+	// record), and goes down with any error other than lost records.
+	log.Printf("taskstats family %d, registration sent for cpus %s", fam.ID, cpus)
 	for {
 		msgs, _, err := c.Receive()
-		if err != nil {
-			a.drop() // typically ENOBUFS: exit records were lost
+		if errors.Is(err, unix.ENOBUFS) {
+			a.drop() // the receive buffer overflowed: exit records were lost
 			log.Printf("netlink receive: %v", err)
 			continue
 		}
+		if err != nil {
+			return fmt.Errorf("taskstats: %w", err)
+		}
+		a.setListening(true)
 		for _, m := range msgs {
 			if m.Header.Command != unix.TASKSTATS_CMD_NEW {
 				continue

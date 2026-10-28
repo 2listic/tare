@@ -6,7 +6,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/mfranzon/tare/internal/metrics"
+	"github.com/2listic/tare/internal/metrics"
 )
 
 // Tick is the simulation resolution. It matches a typical Prometheus scrape

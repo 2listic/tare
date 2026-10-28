@@ -7,14 +7,15 @@
 package analyze
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
 	"sort"
 	"time"
 
-	"github.com/mfranzon/tare/internal/ceilings"
-	"github.com/mfranzon/tare/internal/discover"
-	"github.com/mfranzon/tare/internal/metrics"
+	"github.com/2listic/tare/internal/ceilings"
+	"github.com/2listic/tare/internal/discover"
+	"github.com/2listic/tare/internal/metrics"
 )
 
 // Verdict is the headline classification of a container.
@@ -102,6 +103,7 @@ func RunWithCluster(containers []discover.Container, obs map[metrics.Key]*metric
 		applyConstraints(f, c)
 		f.reconcileFloors(th)
 		applySignalGaps(f)
+		holdTooYoung(f, th)
 		out = append(out, *f)
 	}
 	sortFindings(out)
@@ -110,12 +112,17 @@ func RunWithCluster(containers []discover.Container, obs map[metrics.Key]*metric
 
 // aggregate groups containers by workload plus container name, because a
 // recommendation applies to the workload, not to an individual pod, and joins
-// each group with the worst case of its pods' observations.
+// each group with the worst case of its pods' observations. That includes pods
+// that no longer exist: a rollout or a reschedule replaces every pod, and a
+// workload measured from its live pods alone is measured from whenever it was
+// last deployed, however wide the window.
 func aggregate(containers []discover.Container, obs map[metrics.Key]*metrics.Observation) map[groupKey]*Finding {
 	groups := map[groupKey]*Finding{}
 	// worstGrowth tracks, per group, the largest late/early memory ratio seen
 	// on any single pod, so the trend pair kept below comes from one pod.
 	worstGrowth := map[groupKey]float64{}
+	spans := map[groupKey][]*metrics.Observation{}
+	live := map[metrics.Key]bool{}
 
 	for _, c := range containers {
 		gk := groupKey{c.Namespace, c.Workload, c.Name}
@@ -142,43 +149,14 @@ func aggregate(containers []discover.Container, obs map[metrics.Key]*metrics.Obs
 			f.OOMKilled = true
 		}
 
-		o := obs[metrics.Key{Namespace: c.Namespace, Pod: c.Pod, Container: c.Name}]
+		k := metrics.Key{Namespace: c.Namespace, Pod: c.Pod, Container: c.Name}
+		live[k] = true
+		o := obs[k]
 		if o == nil {
 			continue
 		}
-		// Across pods of one workload take the worst case: the recommendation
-		// must hold for every replica, not for the average one.
-		f.CPUUsageP95 = max(f.CPUUsageP95, o.CPUUsageP95)
-		f.CPUUsageMax = max(f.CPUUsageMax, o.CPUUsageMax)
-		f.CPUStartupMax = max(f.CPUStartupMax, o.CPUStartupMax)
-		f.CPUSteadyMax = max(f.CPUSteadyMax, o.CPUSteadyMax)
-		f.MemUsageMax = max(f.MemUsageMax, o.MemWorkingSet)
-		f.MemP95 = max(f.MemP95, o.MemP95)
-		// A limit is a property of the workload, so the informative value wins:
-		// a pod created after a limit change has no early observation, and
-		// taking its zero would erase the very movement being looked for.
-		f.MemLimitEarly = max(f.MemLimitEarly, o.MemLimitEarly)
-		f.MemLimitLate = max(f.MemLimitLate, o.MemLimitLate)
-		f.Restarts = max(f.Restarts, o.Restarts)
-		f.PSIWaiting = max(f.PSIWaiting, o.PSIWaitingAvg)
-		f.PSIWaitingPeak = max(f.PSIWaitingPeak, o.PSIWaitingMax)
-		f.Throttle = max(f.Throttle, o.ThrottleAvg)
-		f.ThrottlePeak = max(f.ThrottlePeak, o.ThrottleRatio)
-		if o.Has(metrics.SigCPUWait) {
-			mergeCPUWait(&f.CPUWait, o.CPUWait, !f.hasSignal(metrics.SigCPUWait))
-		}
-		for sig, ok := range o.Have {
-			if ok {
-				if f.Have == nil {
-					f.Have = map[metrics.Signal]bool{}
-				}
-				f.Have[sig] = true
-			}
-		}
-		if o.OOMEvents > 0 {
-			f.OOMKilled = true
-		}
-		f.Samples = max(f.Samples, o.Samples)
+		fold(f, o, true)
+		spans[gk] = append(spans[gk], o)
 
 		// The memory trend is a per-pod pair, and the two halves must come from
 		// the same pod: comparing one replica's early average against another's
@@ -198,7 +176,106 @@ func aggregate(containers []discover.Container, obs map[metrics.Key]*metrics.Obs
 		}
 	}
 
+	// Pods that are gone, credited to the workload that owned them. A workload
+	// that is itself gone has no row to join and is skipped. Their trend pair
+	// is not used: a dead pod has no late hour, and pairing its early hour
+	// with a live pod's late one is the cross-pod comparison ruled out above.
+	for k, o := range obs {
+		if live[k] || o.Owner == "" {
+			continue
+		}
+		gk := groupKey{k.Namespace, o.Owner, k.Container}
+		f, ok := groups[gk]
+		if !ok {
+			continue
+		}
+		fold(f, o, false)
+		spans[gk] = append(spans[gk], o)
+	}
+
+	for gk, f := range groups {
+		f.Samples = coverage(spans[gk])
+	}
 	return groups
+}
+
+// fold merges one pod's observation into its workload's finding, taking the
+// worst case: the recommendation must hold for every replica, not for the
+// average one. A dead pod contributes everything but the memory trend, whose
+// pair aggregate takes from live pods only.
+func fold(f *Finding, o *metrics.Observation, live bool) {
+	f.CPUUsageP95 = max(f.CPUUsageP95, o.CPUUsageP95)
+	f.CPUUsageMax = max(f.CPUUsageMax, o.CPUUsageMax)
+	f.CPUStartupMax = max(f.CPUStartupMax, o.CPUStartupMax)
+	f.CPUSteadyMax = max(f.CPUSteadyMax, o.CPUSteadyMax)
+	f.MemUsageMax = max(f.MemUsageMax, o.MemWorkingSet)
+	f.MemP95 = max(f.MemP95, o.MemP95)
+	// A limit is a property of the workload, so the informative value wins:
+	// a pod created after a limit change has no early observation, and
+	// taking its zero would erase the very movement being looked for.
+	f.MemLimitEarly = max(f.MemLimitEarly, o.MemLimitEarly)
+	f.MemLimitLate = max(f.MemLimitLate, o.MemLimitLate)
+	f.Restarts = max(f.Restarts, o.Restarts)
+	f.PSIWaiting = max(f.PSIWaiting, o.PSIWaitingAvg)
+	f.PSIWaitingPeak = max(f.PSIWaitingPeak, o.PSIWaitingMax)
+	f.Throttle = max(f.Throttle, o.ThrottleAvg)
+	f.ThrottlePeak = max(f.ThrottlePeak, o.ThrottleRatio)
+	if o.Has(metrics.SigCPUWait) {
+		mergeCPUWait(&f.CPUWait, o.CPUWait, !f.hasSignal(metrics.SigCPUWait))
+	}
+	for sig, ok := range o.Have {
+		if !ok || (!live && sig == metrics.SigMemTrend) {
+			continue
+		}
+		if f.Have == nil {
+			f.Have = map[metrics.Signal]bool{}
+		}
+		f.Have[sig] = true
+	}
+	if o.OOMEvents > 0 {
+		f.OOMKilled = true
+	}
+}
+
+// coverage is how many scrapes' worth of the window a workload's pods cover
+// between them. Summing their samples would rate three replicas over one day
+// as three days of evidence, so the sum is divided by how many pods ran at
+// once on average: the total of their spans over the union of them. Spans
+// alone are not enough, because a span is first-to-last and a pod that lived
+// through a week of outages spans the week; the samples are what was actually
+// taken. Never below the best single pod, which is what tare reported before
+// spans existed. Without spans for every pod - the simulator, or a failed
+// query - only the best single pod can be trusted.
+func coverage(obs []*metrics.Observation) int {
+	var best, sum int
+	type span struct{ from, to float64 }
+	var ss []span
+	known := true
+	for _, o := range obs {
+		best = max(best, o.Samples)
+		sum += o.Samples
+		if o.LastSeen == 0 {
+			known = false
+		}
+		ss = append(ss, span{o.FirstSeen, o.LastSeen})
+	}
+	if !known {
+		return best
+	}
+	slices.SortFunc(ss, func(a, b span) int { return cmp.Compare(a.from, b.from) })
+	var union, total, end float64
+	for _, s := range ss {
+		total += s.to - s.from
+		from := max(s.from, end)
+		if s.to > from {
+			union += s.to - from
+		}
+		end = max(end, s.to)
+	}
+	if total <= 0 {
+		return best
+	}
+	return max(best, int(float64(sum)*union/total))
 }
 
 // mergeCPUWait folds one pod's CPU wait into its workload's, worst case per

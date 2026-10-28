@@ -13,9 +13,9 @@ import (
 
 	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/discover"
-	"github.com/mfranzon/tare/internal/render"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/discover"
+	"github.com/2listic/tare/internal/render"
 )
 
 // Shell completion directives for kubectl's Cobra __complete protocol.

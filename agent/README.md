@@ -16,9 +16,17 @@ belonged to, it also notes the container of every task that starts a program
 (process connector exec events): exec probes are started from outside the
 container and are usually gone before their exit can be traced back.
 
-This is a proof of concept. tare does not read the agent's metrics yet. To see how
-they compare with PSI today, use `compare-pressure` (below), which reads Prometheus
-and judges the agent's data the way tare judges PSI.
+This is a proof of concept. tare does not need it, does not install it, and does
+not read the agent's metrics yet.
+
+**Before you deploy it:** it runs privileged, with `hostPID` and `hostNetwork`,
+on every node including the control plane, and serves `/metrics` on port 9105 of
+each node over plain HTTP with no authentication. NetworkPolicy does not apply
+to host-network pods, so restrict 9105 to your Prometheus at the node firewall
+or security group. The image is `ghcr.io/2listic/tare-agent` (linux/amd64, arm64).
+
+To see how its numbers compare with PSI today, use `compare-pressure` (below),
+which reads Prometheus and judges the agent's data the way tare judges PSI.
 
 ## What gets deployed
 
@@ -40,7 +48,15 @@ Requirements:
 - kube-state-metrics, optional: with it, CPU requests and limits are taken into account.
 - Permission to run a privileged pod with `hostPID` and `hostNetwork` (see below).
 
-## 1. Build the image
+## 1. The image
+
+`deploy/agent/agent.yaml` pulls `ghcr.io/2listic/tare-agent:main`, rebuilt by CI
+on every change to `agent/` on main. Every release also has `:vX.Y.Z` (and
+`:latest`), and every main build `:sha-<commit>`; those never move, so pin one of
+them for anything you keep, and set `imagePullPolicy: IfNotPresent`. Nothing else
+is needed if the nodes can pull from ghcr.io; otherwise build it yourself (2).
+
+## 2. Build it yourself (optional)
 
 From the repository root:
 
@@ -59,10 +75,8 @@ go test ./...
 go build -o tare-agent .
 ```
 
-## 2. Get the image to the nodes
-
-There is no published image yet. Either push it to a registry the cluster can pull
-from, or import it into every node's container runtime.
+Then either push it to a registry the cluster can pull from, or import it into
+every node's container runtime.
 
 **Registry:**
 
@@ -74,7 +88,8 @@ docker push registry.example.com/tare-agent:poc
 Then in `deploy/agent/agent.yaml` set `image: registry.example.com/tare-agent:poc`
 and `imagePullPolicy: IfNotPresent`.
 
-**Import into each node** (no registry, keep `imagePullPolicy: Never`):
+**Import into each node** (no registry): set `image: tare-agent:poc` and
+`imagePullPolicy: Never` in `deploy/agent/agent.yaml`, then
 
 ```bash
 # containerd
@@ -95,9 +110,13 @@ kubectl -n tare-agent rollout status ds/tare-agent
 kubectl -n tare-agent logs ds/tare-agent
 ```
 
-The log should show the cgroup version, `registered for exits on cpus ...` and
-`process connector: listening for execs`. If either listener cannot start, the agent
-keeps serving what it has and logs why.
+The log should show the cgroup version, `registration sent for cpus ...` and
+`process connector: listening for execs`, and the pods should become ready. If the exec
+listener cannot start, the agent keeps serving what it has and logs why. If the exit
+listener cannot register or stops (no `CAP_NET_ADMIN`, not in the host network
+namespace), the agent logs why, keeps serving the live threads, reports
+`tare_agent_exit_listener_up 0`, and fails its readiness probe: without exit records CPU
+wait misses every task that exited between scrapes.
 
 Why the pod is privileged:
 
@@ -222,10 +241,11 @@ curl -s localhost:9105/metrics | grep '^tare_'
 |---|---|
 | `tare_cpu_wait_seconds_total{id}` | CPU wait of the container (counter, seconds) |
 | `tare_cpu_run_seconds_total{id}` | CPU time the agent accounted for the container: compared with the kubelet's CPU usage it gives coverage |
+| `tare_agent_exit_listener_up` | 1 when the exit listener is registered and receiving. Must be 1: at 0 CPU wait misses exited tasks |
 | `tare_agent_exits_total` | exit records received |
 | `tare_agent_exits_unattributed_total` | exit records that could not be assigned to any container. Healthy: a few percent at most |
 | `tare_agent_exits_outside_containers_total` | exits of host processes, not in any container (normal) |
-| `tare_agent_exits_never_received_total` | threads whose exit record never arrived. Healthy: close to 0 |
+| `tare_agent_exits_never_received_total` | threads whose exit record did not arrive within 30 s of leaving `/proc`. Healthy: close to 0 |
 | `tare_agent_exits_layout_total{layout}` | records decoded per kernel record layout (`upstream`, `rhel10`) |
 | `tare_agent_exits_layout_unknown_total` | records from a kernel whose layout the agent does not know. Must be 0 |
 | `tare_agent_netlink_drops_total` | exit records the kernel dropped. Must be 0 |
@@ -353,7 +373,7 @@ kubectl delete -f deploy/agent/agent.yaml     # and your PodMonitor / scrape con
 
 ## Limits of the proof of concept
 
-- The image is built locally; there is no published image or Helm chart.
+- There is no Helm chart.
 - The pod runs privileged; the capability-only profile is not done yet.
 - tare does not read the agent yet: `compare-pressure` is the way to look at it.
 - Measured cost: about 0.002–0.05 cores and 15–20 MiB per node, growing with the

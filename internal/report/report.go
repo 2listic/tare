@@ -6,9 +6,9 @@
 package report
 
 import (
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/metrics"
-	"github.com/mfranzon/tare/internal/packing"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/metrics"
+	"github.com/2listic/tare/internal/packing"
 )
 
 // Report is everything a renderer needs, so that the table, the JSON and the
@@ -30,15 +30,19 @@ type Report struct {
 	Source        string
 	Window        string
 
+	// KubeContext and Kubeconfig name the cluster the report was measured
+	// on. -o patch writes them into every command, because a script run
+	// later runs against whatever kubectl points at by then.
+	KubeContext string
+	Kubeconfig  string
+
 	// Coverage is how much of the cluster the metrics backend actually saw.
 	// A Prometheus that scrapes a subset of namespaces, or a node whose
 	// kubelet has stopped reporting, produces a report that looks complete and
 	// silently describes a fraction of the cluster. Those containers do appear,
 	// as NO-DATA rows, but nothing else in the report adds them up.
-	Coverage string
-	// CoverageMissing of CoverageTotal containers had no series. Zero total
-	// means full coverage.
-	CoverageMissing, CoverageTotal int
+	Coverage       string
+	CoverageCounts Coverage
 
 	// Redacted marks a report whose names were replaced with hashes, so every
 	// renderer can say so rather than leave a reader hunting for a namespace
@@ -66,6 +70,10 @@ type Report struct {
 	// opens. Nil when there is nothing to query; UsageNote says why.
 	Usage     func(analyze.Finding) (cpu, mem metrics.Series, err error)
 	UsageNote string
+
+	// Factors convert the node delta into energy and emissions; zero when
+	// the reader supplied none, and then no footprint is printed.
+	Factors Factors
 }
 
 // NodesNotComputed is why there is no node count to show, or "" when there is one.
@@ -74,6 +82,11 @@ func NodesNotComputed(r *Report) string {
 		return r.NodeNote
 	}
 	if !r.Nodes.Trustworthy {
+		// A Result nobody filled in is untrustworthy with no reason given,
+		// and an empty reason here reads as "computed".
+		if r.Nodes.SelfCheck == "" {
+			return "the node replay did not run"
+		}
 		return r.Nodes.SelfCheck
 	}
 	return ""

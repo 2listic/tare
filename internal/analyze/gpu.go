@@ -3,8 +3,8 @@ package analyze
 import (
 	"fmt"
 
-	"github.com/mfranzon/tare/internal/ceilings"
-	"github.com/mfranzon/tare/internal/discover"
+	"github.com/2listic/tare/internal/ceilings"
+	"github.com/2listic/tare/internal/discover"
 )
 
 // Inference servers break the assumption the rest of this package rests on.

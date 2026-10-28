@@ -171,6 +171,9 @@ func TestNamespaceSelectorIsApplied(t *testing.T) {
 		if !strings.Contains(expr, `namespace=~"alpha|beta"`) {
 			t.Errorf("query is not namespace-scoped: %s", truncate(expr))
 		}
+		if isOwnerQuery(expr) {
+			continue // owner series have no container label to exclude
+		}
 		if !strings.Contains(expr, `container!=""`) {
 			t.Errorf("query does not exclude the pod sandbox: %s", truncate(expr))
 		}
@@ -253,7 +256,7 @@ func TestQueriesAreWellFormed(t *testing.T) {
 // unaggregated query is what let a dead container's series win the join.
 func unwrapReduce(t *testing.T, e string) string {
 	t.Helper()
-	for _, op := range []string{"max", "sum"} {
+	for _, op := range []string{"max", "min", "sum"} {
 		prefix := op + " by (namespace,pod,container) ("
 		if strings.HasPrefix(e, prefix) && strings.HasSuffix(e, ")") {
 			return e[len(prefix) : len(e)-1]
@@ -262,6 +265,13 @@ func unwrapReduce(t *testing.T, e string) string {
 	t.Errorf("query is not aggregated by container, so a restarted container's dead "+
 		"series can win the join: %s", truncate(e))
 	return e
+}
+
+// isOwnerQuery reports a kube-state-metrics owner lookup. Those are keyed by pod
+// and owner, not by container, because they attribute pods rather than measure
+// containers.
+func isOwnerQuery(e string) bool {
+	return strings.Contains(e, "kube_pod_owner") || strings.Contains(e, "kube_replicaset_owner")
 }
 
 // TestIncarnationsAreAggregated is the regression test for a leaker that
@@ -300,10 +310,12 @@ func agentWide(expr string) bool {
 	return expr == agentPresentExpr || strings.Contains(expr, "tare_agent_")
 }
 
+// containerQueries is what was queried about containers: neither agent-wide
+// nor an owner lookup.
 func containerQueries(seen []string) []string {
 	var out []string
 	for _, e := range seen {
-		if !agentWide(e) {
+		if !agentWide(e) && !isOwnerQuery(e) {
 			out = append(out, e)
 		}
 	}
@@ -338,5 +350,144 @@ func TestAvailableWindowProbesEachWindowOnce(t *testing.T) {
 		if probed[q] > 1 {
 			t.Errorf("probed twice: %s", q)
 		}
+	}
+}
+
+// TestOwnersResolveThroughReplicaSets: a dead Deployment pod is owned by a
+// ReplicaSet that may itself be gone from the API server, so the walk up to
+// the Deployment has to come from kube-state-metrics too, or the pod is
+// credited to a hash-suffixed name no live workload matches.
+func TestOwnersResolveThroughReplicaSets(t *testing.T) {
+	series := func(rows ...map[string]string) string {
+		var res []any
+		for _, m := range rows {
+			res = append(res, map[string]any{"metric": m, "value": []any{1700000000, "1"}})
+		}
+		b, _ := json.Marshal(map[string]any{"status": "success",
+			"data": map[string]any{"resultType": "vector", "result": res}})
+		return string(b)
+	}
+	f := newFakeProm(nil)
+	defer f.Close()
+	f.respond = func(expr string) (string, int) {
+		if strings.Contains(expr, "container_cpu_usage_seconds_total") {
+			return series(
+				map[string]string{"namespace": "ns", "pod": "web-6d9f-old01", "container": "app"},
+				map[string]string{"namespace": "ns", "pod": "db-0", "container": "db"},
+				map[string]string{"namespace": "ns", "pod": "bare", "container": "c"},
+			), 200
+		}
+		switch {
+		case strings.Contains(expr, "kube_pod_owner"):
+			return series(
+				map[string]string{"namespace": "ns", "pod": "web-6d9f-old01", "owner_kind": "ReplicaSet", "owner_name": "web-6d9f"},
+				map[string]string{"namespace": "ns", "pod": "db-0", "owner_kind": "StatefulSet", "owner_name": "db"},
+				map[string]string{"namespace": "ns", "pod": "bare", "owner_kind": "<none>", "owner_name": "<none>"},
+			), 200
+		case strings.Contains(expr, "kube_replicaset_owner"):
+			return series(map[string]string{"namespace": "ns", "replicaset": "web-6d9f", "owner_kind": "Deployment", "owner_name": "web"}), 200
+		}
+		return emptyVector, 200
+	}
+	p := NewProm(f.URL)
+	obs, err := p.Observe([]string{"ns"}, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for pod, want := range map[string]string{
+		"web-6d9f-old01": "Deployment/web",
+		"db-0":           "StatefulSet/db",
+		"bare":           "",
+	} {
+		o := obs[Key{Namespace: "ns", Pod: pod, Container: map[string]string{"web-6d9f-old01": "app", "db-0": "db", "bare": "c"}[pod]}]
+		if o == nil {
+			t.Fatalf("no observation for %s", pod)
+		}
+		if o.Owner != want {
+			t.Errorf("%s: owner %q, want %q", pod, o.Owner, want)
+		}
+	}
+	for _, h := range p.Health() {
+		if h.Signal == SigOwner && !h.OK() {
+			t.Errorf("owner signal reported unhealthy: %+v", h)
+		}
+	}
+}
+
+// TestNonPrometheusAnswersSayWhatTheyAre: a 401 from an auth proxy, or Grafana
+// at the URL, used to reach the user as "invalid character '<'" or a bare
+// "query failed: ", and a password in the URL was repeated in every error.
+func TestNonPrometheusAnswersSayWhatTheyAre(t *testing.T) {
+	f := newFakeProm(func(string) (string, int) { return "<html>login</html>", 401 })
+	defer f.Close()
+	u := strings.Replace(f.URL, "http://", "http://alice:hunter2@", 1)
+	p := NewProm(u)
+	_, err := p.query("up")
+	if err == nil || !strings.Contains(err.Error(), "401") {
+		t.Errorf("want the HTTP status in the error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "hunter2") || strings.Contains(p.Describe(), "hunter2") {
+		t.Errorf("password leaked: %v / %s", err, p.Describe())
+	}
+
+	f.respond = func(string) (string, int) { return `{"message":"not found"}`, 200 }
+	if _, err := p.query("up"); err == nil || !strings.Contains(err.Error(), "not with a Prometheus API response") {
+		t.Errorf("want a not-Prometheus error, got %v", err)
+	}
+
+	// A bad query is a 400 with Prometheus's own JSON error, which must
+	// still come through rather than be replaced by the status line.
+	f.respond = func(string) (string, int) {
+		return `{"status":"error","errorType":"bad_data","error":"parse error at char 3"}`, 400
+	}
+	if _, err := p.query("up("); err == nil || !strings.Contains(err.Error(), "parse error") {
+		t.Errorf("want Prometheus's own message, got %v", err)
+	}
+}
+
+// TestInfinityIsNotAMeasurement: an Inf sample became a 9223372036854775807m
+// request in a runnable patch. It must be dropped like NaN.
+func TestInfinityIsNotAMeasurement(t *testing.T) {
+	f := newFakeProm(func(string) (string, int) { return vector("app", 0), 200 })
+	defer f.Close()
+	f.respond = func(string) (string, int) {
+		return strings.Replace(vector("app", 0), `"0"`, `"+Inf"`, 1), 200
+	}
+	got, err := NewProm(f.URL).query("x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("+Inf kept as a sample: %+v", got)
+	}
+}
+
+// TestStartupIsNotAnEarlyBaseline: node-agent on the lab cluster was reported
+// LEAKING because the window's first hour landed on its boot, when it used
+// half its steady-state memory. A pod that started inside the window has no
+// baseline hour; one that was already running keeps its trend.
+func TestStartupIsNotAnEarlyBaseline(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	window := 24 * time.Hour
+	opened := float64(now.Add(-window).Unix())
+	booted := &Observation{FirstSeen: opened + 1800, MemEarly: 1 << 20, MemLate: 3 << 20}
+	booted.Mark(SigMemTrend)
+	running := &Observation{FirstSeen: opened + 120, MemEarly: 1 << 20, MemLate: 3 << 20}
+	running.Mark(SigMemTrend)
+	unknown := &Observation{MemEarly: 1 << 20, MemLate: 3 << 20}
+	unknown.Mark(SigMemTrend)
+	out := map[Key]*Observation{{Pod: "booted"}: booted, {Pod: "running"}: running, {Pod: "unknown"}: unknown}
+
+	dropStartupTrends(out, window, now)
+	dropHalfTrends(out)
+
+	if booted.MemEarly != 0 || booted.Has(SigMemTrend) {
+		t.Errorf("a pod booted 30m into the window kept its startup hour as a baseline")
+	}
+	if running.MemEarly == 0 || !running.Has(SigMemTrend) {
+		t.Errorf("a pod running when the window opened lost its trend")
+	}
+	if unknown.MemEarly == 0 {
+		t.Errorf("no FirstSeen is not evidence of a startup; the trend must stand")
 	}
 }

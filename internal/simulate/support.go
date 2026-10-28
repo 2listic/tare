@@ -4,7 +4,7 @@ import (
 	"math"
 	"time"
 
-	"github.com/mfranzon/tare/internal/metrics"
+	"github.com/2listic/tare/internal/metrics"
 )
 
 // Helpers the tests of other packages use to set up a simulation. They are

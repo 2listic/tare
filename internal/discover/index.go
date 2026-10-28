@@ -2,7 +2,6 @@ package discover
 
 import (
 	"context"
-	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,7 +25,6 @@ type workloadIndex struct {
 	tmpl    map[string]map[string]Authored // ns/Kind/name -> container -> authored
 	rsOwner map[string]string              // ns/name -> "Kind/Name" of the ReplicaSet's own controller
 	loaded  map[string]bool                // kind -> already listed
-	warn    []string
 }
 
 func newWorkloadIndex(c *Client, namespaces []string) *workloadIndex {
@@ -80,11 +78,10 @@ func (x *workloadIndex) load(ctx context.Context, kind string) {
 	x.loaded[kind] = true
 	for _, ns := range x.scope {
 		if err := x.list(ctx, kind, ns); err != nil {
-			x.warn = append(x.warn, fmt.Sprintf(
-				"%ss in %s could not be read (%v): for those workloads tare cannot tell a request its "+
-					"author wrote from one Kubernetes copied out of the limit, and pods are attributed to "+
-					"the object that owns them rather than to the controller above it",
-				kind, describeScope(ns), err))
+			x.c.warn("%ss in %s could not be read (%v): for those workloads tare cannot tell a request its "+
+				"author wrote from one Kubernetes copied out of the limit, and pods are attributed to "+
+				"the object that owns them rather than to the controller above it",
+				kind, describeScope(ns), err)
 			return
 		}
 	}

@@ -4,13 +4,13 @@ Every serious defect found in tare so far, in the order they were found.
 
 This file exists because tare's claim is not that it is clever. It is that it
 will not confidently tell you something false. That claim is worth exactly as
-much as the evidence behind it, and the evidence is this list: forty-seven times
+much as the evidence behind it, and the evidence is this list: fifty-three times
 this tool produced an answer it had no business producing, almost always a clean
-and plausible one, and forty-seven times it was caught and written down.
+and plausible one, and fifty-three times it was caught and written down.
 
 Three of them surfaced as an error: a run that timed out on a cluster larger than
 the lab (25), a denied HPA read that aborted (26), and a panic on an empty
-`resources: {}` (36). The other forty-four did not surface at all, which is the
+`resources: {}` (36). The other fifty did not surface at all, which is the
 whole point.
 
 ## The shape
@@ -757,7 +757,7 @@ saturation path never saw either one, because their pressure was low against
 their allocation and read as node contention. This is defect 2 at a shorter
 timescale.
 
-**Caught by:** running the post-review build on msi on 2026-10-11 and
+**Caught by:** running the post-review build on the lab cluster on 2026-10-11 and
 reading the patch script's comments against its numbers.
 
 **Fixed by:** a CPU limit that throttled the container above `ThrottleRatio`
@@ -931,7 +931,213 @@ labels are now `UNLIMITED_CPU_CONTAINERS` / `UNLIMITED_MEM_CONTAINERS`.
 - **`diff --repo /typo` was rejected only after the whole run**, minutes of
   Prometheus queries later. The target is now checked before any cluster call.
 
+## 48. `--redact` sent PDB names, namespaces and the HPA name in the clear
+
+**Looked like:** a redacted report, every finding hashed, `names redacted` in
+the header.
+
+**Was actually:** leaking. `node_pins` (and `PinReasons` in JSON) printed
+`PodDisruptionBudget tare-lab/overcommitter-pdb` unhashed, the drain blockers
+hashed the namespace and kept the PDB name, and JSON carried `"HPAName":
+"frontend"`. The header also hashed the Prometheus namespace twice, so
+`source` named `4b0c96d8` while the `using` line on stderr named `14a2326b`
+for the same endpoint. The test enumerated the fields it checked, so every
+field nobody listed passed.
+
+**Caught by:** the 2026-10-24 pre-release run on the lab cluster, grepping every redacted
+output for every pod, node, container and image name in the cluster.
+
+**Fixed by:** PDB names read out of the sentences that carry them, HPA and VPA
+names and pin reasons redacted, the source hashed once.
+`TestRedactionLeavesNoNameAnywhereInTheReport` checks every field of the
+report rather than a list, and fails four ways with the fix reverted.
+
+## 49. Node contention and "not the node" on the same row
+
+**Looked like:** `NODE_CONTENTION: ... this is contention on the node rather
+than a shortage of its own` on guaranteed-cache, metrics-app and resize-target.
+
+**Was actually:** contradicted two lines down by `LIMIT_NOT_NODE: the
+constraint is this container's own limit, not the machine`, on a node 8% busy.
+Contention was decided from 5-minute averaged usage against the limit; the
+container was throttled in 89% of periods by bursts the average hides. The
+stall was its own quota. `throttled_limit_test.go` had documented this very
+container "reading as node contention" without anyone testing the reason.
+
+**Caught by:** the 2026-10-24 pre-release run on the lab cluster.
+
+**Fixed by:** pressure on a throttle-stalled container is not attributed to the
+node. `TestThrottledPressureIsNotBlamedOnTheNode`, both directions.
+
+## 50. A container minutes old was sized, patched and put in a pull request
+
+**Looked like:** `WASTE low boutique/frontend 100m→10m`, and the same number in
+`-o patch` and `diff --write`.
+
+**Was actually:** 14 samples, three and a half minutes of a pod still warming
+up: p95 0m while `kubectl top` showed 29-51m. `low` confidence was the only
+caveat, and nothing that acts on a row reads confidence. `diff --write` wrote a
+10m CPU *limit* into eight Go and Node services of Google's Online Boutique.
+
+**Caught by:** deploying a third-party application on the lab cluster and running tare at
+once, which is what a first-time user does.
+
+**Fixed by:** under `MinSamplesForSizing` (240, an hour at a 15s scrape) a
+reduction becomes `UNVERIFIED` with `TOO_FEW_SAMPLES`; starvation still
+stands. `TestTooFewSamplesProposesNoReduction`.
+
+## 51. UNVERIFIED reductions were summed into the headline and the node replay
+
+**Looked like:** `requests lowered on 12 (-1540m CPU, -980Mi mem)`.
+
+**Was actually:** twelve rows `-o patch` refused to write. Defect 31 for IDLE,
+again: every row said the reduction could not be shown safe, the summary and
+`nodes freed` counted it anyway. On a cluster with no PSI every row is
+UNVERIFIED, so the headline would be made entirely of disowned reductions.
+
+**Caught by:** the same run, comparing the summary with `-o patch`.
+
+**Fixed by:** UNVERIFIED is counted apart, as IDLE is: an `unverified` row in
+`totals`, `N UNVERIFIED not counted` in the summary, kept at current requests
+in the replay. `TestUnverifiedIsNotSummedIntoTheReduction`,
+`TestSizerKeepsUnverifiedWorkloadsAsTheyAre`.
+
+## 52. A timeout was reported as an RBAC denial
+
+**Looked like:** `warning SIGNAL_DENIED rbac: horizontal pod autoscalers ...
+could not be read (context deadline exceeded)`.
+
+**Was actually:** an expired `--timeout`, with full read access. Every failed
+non-fatal read was labelled a denial, which sends the reader to fix
+permissions they already have.
+
+**Caught by:** `--timeout 1s` in the same run.
+
+**Fixed by:** only an API-server Forbidden is `SIGNAL_DENIED rbac`; anything
+else is `SIGNAL_QUERY_FAILED kube-api`. `TestOnlyAForbiddenReadIsCalledDenied`.
+
+## 53. tare's own patch took down Online Boutique
+
+**Looked like:** `WASTE medium` on eight Boutique services, an hour of steady
+traffic behind each, every patch passing `--dry-run=server`. cartservice's CPU
+limit went 300m→29m, recommendationservice 200m→42m, checkout and shipping
+200m→10m.
+
+**Was actually:** an outage. Applied at the same 100-user load it was sized
+from, the shop failed **66% of requests** (baseline 0.03%), cartservice and
+recommendationservice crash-looped on 1s liveness probes while throttled in
+95-100% of periods, currencyservice restarted 6 times. The startup guard that
+the README promises ("a limit sized to steady state throttles every
+restart") never ran: the boots happened 66 minutes before the report, the
+window was rounded down to 1h, and no boot fell inside it. `CPUStartupMax` was
+zero, the steady half of the startup query had data so the signal counted as
+measured, and the limit came from steady state alone. Every pod older than its
+window is in this position, which in production means nearly all of them.
+
+**Caught by:** the first closed-loop test against a live third-party
+application, 2026-10-24 - apply `-o patch`, measure the application. Nothing
+before it measured what happens *after* a recommendation is applied. tare's
+next report did call the damage (`SATURATED`, `RESTART_CHURN`), after the fact.
+
+**Fixed by (first):** a CPU limit is never lowered, or added, unless a boot of
+that container was observed in the window (then `CPU_LIMIT_HELD_NO_BOOT`). The request is
+still sized from usage. `TestUnobservedBootHoldsTheCPULimit`, three cases, fails
+four ways with the fix reverted. For a Guaranteed pod holding the limit holds
+the request too.
+
+**Not fixed:** the CPU limit can still be sized down to the 10m floor when a
+boot *was* observed. At 10m, checkout and shipping were throttled in 24-30% of
+periods and failed readiness probes without restarting. A 1-minute rate cannot
+see the sub-100ms bursts a CFS quota is enforced against, so no CPU limit tare
+proposes below the current one is backed by a measurement. See Open.
+
+**Second loop, with the fix (same day, 3h window):** the hold fired on three
+services. Nothing restarted and the error rate stayed at baseline (0.02-0.03%),
+so a check that looks only at errors and restarts passes this patch. Latency
+did not. A separate probe pod measured 300 GETs to the product page:
+
+| phase | p95 | p99 |
+|---|---|---|
+| original sizing, 100 users | 26ms | 54ms |
+| tare's patch, 100 users | 113ms | 181ms |
+| original sizing, 200 users | 49ms | 78ms |
+| tare's patch, 200 users | 896ms | 1115ms |
+
+Under tare's patch, checkout (10m limit) was throttled in 60-73% of periods,
+recommendationservice (63m) in 66%, and shipping (10m) in 21-30%. The frontend
+HPA went to 4 replicas because the request was now lower. tare's next report
+marked six of the services `SATURATED`.
+
+The patch also cut the load generator to 25m. That throttled it in 98% of
+periods, so locust's own latency figures from that phase say nothing; the probe
+figures above come from a pod outside the patch. A cost-only view would rate
+this patch a success: a 4x slowdown at the load it was sized from, 18x at 2x
+the load. That is the Open item below, measured.
+
+
+**Fixed by (final):** a CPU limit is never lowered and never added, whether or
+not a boot was seen: `CPU_LIMIT_HELD`, which replaces the boot-only hold. A
+limit goes up only when a measured boot or the request needs more. Requests are
+still sized from usage. `TestCPULimitIsNeverLowered` (four cases) and the
+updated `TestLoweredLimitsCarryReasons` fail eight ways with the rule
+disabled. A Guaranteed pod's request is held equal to its limit, so a
+Guaranteed pod now gets no CPU reduction at all. That is the price of keeping
+its QoS class without a measured limit.
+
+**Third loop, with the final rule (2026-10-24, 6h window, load generator left
+out of the patch):** requests were cut by 1.6 CPU and 1 GiB, and every CPU
+limit was unchanged.
+
+| phase | p95 | p99 |
+|---|---|---|
+| original sizing, 100 users | 29ms | 52ms |
+| original sizing, 200 users | 22ms | 52ms |
+| tare's patch, 100 users | 10ms | 29ms |
+| tare's patch, 200 users | 14ms | 46ms |
+
+Over the two 20-minute phases there were no restarts and no OOMs, and no
+service was throttled above 1.4%. The frontend HPA went to 4 replicas at 200
+users, where the control ran 3. At 58m a replica, that is still less CPU
+reserved than 3 at 100m.
+
+The 100-user phase's locust aggregate shows 0.27% failures and one 60s
+request. That aggregate covers the rollout of eleven single-replica services,
+and the 200-user phase ran at baseline (0.04%). The failures are probably
+rollout disruption rather than sizing, but the locust log was gone before that
+could be checked.
 ---
+
+## 54. A fortnight's report built from the last hour
+
+**Looked like:** `40 containers (21 listed) over 2w`, every row `low`, and
+cpu-hog SATURATED from 318 samples.
+
+**Was actually:** observations were joined to live pods only. A node of the
+lab cluster went NotReady, its pods were rescheduled under new names, and
+every one of those workloads was sized from the hour since. Prometheus held
+about 10,000 samples of cpu-hog across four pods of the same ReplicaSet; tare
+read the newest 318. Any rollout does the same, so a team that deploys daily
+never gets more than a day of history, while the header names the window.
+
+**Caught by:** the 2026-10-25 stress pass, comparing a row's sample count with
+`count_over_time` by pod on the lab cluster's Prometheus.
+
+**Fixed by:** `kube_pod_owner` and `kube_replicaset_owner` over the window
+credit every pod, dead or alive, to its controller, and `aggregate` folds a
+dead pod's worst case into its workload's row. Its memory-trend half is not
+used: a dead pod has no late hour. Coverage is samples summed and divided by
+how many pods ran at once (total span over union of spans), because both
+obvious versions were wrong on the same cluster: a plain sum rated three
+DaemonSet pods as three times the evidence, and a union of first-to-last
+spans rated a pod that lived through a week of nightly power-offs as a full
+week. Without kube-state-metrics the row is measured from live pods as before
+and `pod-owner` is reported missing. Tests: `internal/analyze/history_test.go`,
+`TestOwnersResolveThroughReplicaSets`.
+
+On the lab cluster this moved cartservice, currencyservice and recommendationservice from
+OK to UNVERIFIED: their replaced pods carried sustained pressure up to 0.12
+and 19 restarts from when the cluster was crowded onto two nodes. That
+evidence existed all along and was being dropped.
 
 ## Open, and not yet solved
 
@@ -978,6 +1184,12 @@ the data is old. Confidence falls, because the sample count falls, but that is
 an accident of the same arithmetic rather than a statement about staleness. The
 measurement that would settle it is the timestamp of the last sample per
 container, which is one more query and has not been added.
+
+**A CPU limit below the current one is never measured.** It has been decided:
+tare holds CPU limits and only ever raises them (53). Lowering one safely would
+need a signal finer than a 1-minute rate, such as per-period usage or
+throttling observed at the candidate limit. tare collects neither, so this
+stays out of scope.
 
 **The memory floor is undefended.** `MinMemBytes` is 16Mi. Comparable floors
 elsewhere are 100MiB and 250MB, an order of magnitude higher. On a typical

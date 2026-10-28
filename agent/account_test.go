@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 const (
 	appCg   = "/kubepods.slice/p.slice/cri-containerd-a.scope"
@@ -68,11 +71,23 @@ func TestPlaceholderUntilTheExitRecordArrives(t *testing.T) {
 	}
 }
 
+// clock is a fake time source; advance moves it on.
+type clock struct{ t time.Time }
+
+func (c *clock) now() time.Time          { return c.t }
+func (c *clock) advance(d time.Duration) { c.t = c.t.Add(d) }
+func withClock(a *account) (*account, *clock) {
+	c := &clock{t: time.Unix(1e9, 0)}
+	a.now = c.now
+	return a, c
+}
+
 func TestPlaceholderBecomesFinalWhenTheRecordNeverComes(t *testing.T) {
-	a := newAccount()
+	a, c := withClock(newAccount())
 	a.apply(read(map[int]thread{1: {appCg, 10, 100}, 2: {appCg, 5, 50}}, nil), always)
 	var got map[string]pair
 	for i := 0; i < 4; i++ {
+		c.advance(15 * time.Second)
 		got = a.apply(read(map[int]thread{1: {appCg, 10, 100}}, nil), always)
 	}
 	if want := (pair{15, 150}); got[appCg] != want {
@@ -218,5 +233,67 @@ func TestReadsComeBeforeExecs(t *testing.T) {
 	}
 	if s := a.snapshot(); s.placedByExec != 0 {
 		t.Errorf("placedByExec=%d, want 0", s.placedByExec)
+	}
+}
+
+// A thread missing from one read and back in the next is live, not also a
+// placeholder: counted once, and never made final behind its back.
+func TestThreadThatMissesOneReadIsNotCountedTwice(t *testing.T) {
+	a, c := withClock(newAccount())
+	a.apply(read(map[int]thread{1: {appCg, 1000, 5000}}, nil), always)
+	a.apply(read(map[int]thread{}, nil), always) // missed
+	var got map[string]pair
+	for i := 0; i < 4; i++ {
+		c.advance(15 * time.Second)
+		got = a.apply(read(map[int]thread{1: {appCg, 1001, 5001}}, nil), always)
+	}
+	if want := (pair{1001, 5001}); got[appCg] != want {
+		t.Errorf("got %v, want %v", got[appCg], want)
+	}
+}
+
+// A tid reused by a new thread is not the vanished one: the placeholder stays,
+// or the total would dip by the old thread's value.
+func TestReusedTidKeepsThePlaceholder(t *testing.T) {
+	a := newAccount()
+	a.apply(read(map[int]thread{1: {appCg, 1000, 5000}}, nil), always)
+	a.apply(read(map[int]thread{}, nil), always)
+	got := a.apply(read(map[int]thread{1: {appCg, 3, 7}}, nil), always) // new thread, same tid
+	if want := (pair{1003, 5007}); got[appCg] != want {
+		t.Errorf("got %v, want %v", got[appCg], want)
+	}
+}
+
+// Reads milliseconds apart (several scrapers) must not make a placeholder final
+// while its exit record is still in flight.
+func TestRapidReadsDoNotFinalisePlaceholders(t *testing.T) {
+	a, c := withClock(newAccount())
+	a.apply(read(map[int]thread{1: {appCg, 10, 100}, 2: {appCg, 5, 50}}, nil), always)
+	for i := 0; i < 20; i++ {
+		c.advance(5 * time.Millisecond)
+		a.apply(read(map[int]thread{1: {appCg, 10, 100}}, nil), always)
+	}
+	a.exit(exitRecord{tid: 2, wait: 6, run: 55}, noProc)
+	got := a.apply(read(map[int]thread{1: {appCg, 10, 100}}, nil), always)
+	if want := (pair{16, 155}); got[appCg] != want {
+		t.Errorf("got %v, want %v", got[appCg], want)
+	}
+	if s := a.snapshot(); s.neverReceived != 0 {
+		t.Errorf("neverReceived = %d, want 0", s.neverReceived)
+	}
+}
+
+// A record that arrives after its placeholder was made final adds only the
+// difference.
+func TestLateRecordAddsOnlyTheDifference(t *testing.T) {
+	a, c := withClock(newAccount())
+	a.apply(read(map[int]thread{1: {appCg, 10, 100}, 2: {appCg, 5, 50}}, nil), always)
+	a.apply(read(map[int]thread{1: {appCg, 10, 100}}, nil), always)
+	c.advance(pendingTimeout + time.Second)
+	a.apply(read(map[int]thread{1: {appCg, 10, 100}}, nil), always) // placeholder final
+	a.exit(exitRecord{tid: 2, wait: 6, run: 55}, noProc)
+	got := a.apply(read(map[int]thread{1: {appCg, 10, 100}}, nil), always)
+	if want := (pair{16, 155}); got[appCg] != want {
+		t.Errorf("got %v, want %v", got[appCg], want)
 	}
 }

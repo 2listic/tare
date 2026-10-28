@@ -7,8 +7,8 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/report"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/report"
 )
 
 // The default report is what fits on a screen: one row per finding somebody
@@ -73,7 +73,11 @@ func (p *printer) printSummary(r *report.Report, listed int) {
 	}
 	line := fmt.Sprintf("%s over %s:", head, r.WindowUsed)
 	if nodes, freed := nodeCells(r); nodes != "" {
-		line += fmt.Sprintf(" nodes freed %s of %s;", freed, nodes)
+		line += fmt.Sprintf(" nodes freed %s of %s", freed, nodes)
+		if f, ok := report.TareFootprint(r); ok {
+			line += fmt.Sprintf(" (%s kWh/yr, %s kgCO2e/yr at your factors)", footprintKWh(f), footprintKg(f))
+		}
+		line += ";"
 	}
 	line += fmt.Sprintf(" requests lowered on %d (%s CPU, %s mem)",
 		s.Workloads, CPUDelta(-s.CPUMillicores), MemDelta(-s.MemBytes))
@@ -86,6 +90,9 @@ func (p *printer) printSummary(r *report.Report, listed int) {
 	}
 	if s.IdleWorkloads > 0 {
 		line += fmt.Sprintf("; %d IDLE not counted", s.IdleWorkloads)
+	}
+	if s.UnverifiedWorkloads > 0 {
+		line += fmt.Sprintf("; %d UNVERIFIED not counted", s.UnverifiedWorkloads)
 	}
 	fmt.Fprintln(p.diag, line)
 }
@@ -114,15 +121,11 @@ func (p *printer) printWarnings(r *report.Report) {
 	if r.WindowUsed != r.Window {
 		add("WINDOW_SHORT", r.Window)
 	}
-	if r.CoverageTotal > 0 {
-		noData := report.Tally(r.Findings)[analyze.NoData]
-		detail := fmt.Sprintf("%d of %d pod containers have no series (%d NO-DATA workloads; the rest have other pods covered)",
-			r.CoverageMissing, r.CoverageTotal, noData)
-		if r.CoverageMissing == noData {
-			detail = fmt.Sprintf("%d of %d pod containers have no series (%d NO-DATA)",
-				r.CoverageMissing, r.CoverageTotal, noData)
-		}
-		add("METRICS_COVERAGE", detail)
+	// Counted before the display filters: r.Findings may be a --top or
+	// --verdict cut that no longer holds the NO-DATA rows this describes.
+	if c := r.CoverageCounts; c.Total > 0 {
+		add("METRICS_COVERAGE", fmt.Sprintf("%d of %d pod containers have no series (%s)",
+			c.Missing, c.Total, c.Split()))
 	}
 	for _, g := range r.Missing {
 		add("SIGNAL_"+g.Status, string(g.Signal)+": "+g.Detail)

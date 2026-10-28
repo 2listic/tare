@@ -8,11 +8,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/ceilings"
-	"github.com/mfranzon/tare/internal/metrics"
-	"github.com/mfranzon/tare/internal/packing"
-	"github.com/mfranzon/tare/internal/report"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/ceilings"
+	"github.com/2listic/tare/internal/metrics"
+	"github.com/2listic/tare/internal/packing"
+	"github.com/2listic/tare/internal/report"
 )
 
 // capture runs f with a printer whose data goes to a buffer and whose
@@ -409,7 +409,7 @@ func TestCompactCollapsesUnsetAndCountsListedRows(t *testing.T) {
 	noData := r.Findings[0]
 	noData.Verdict, noData.Container = analyze.NoData, "ghost"
 	r.Findings = append(r.Findings, unset, noData)
-	r.CoverageMissing, r.CoverageTotal = 9, 75
+	r.CoverageCounts = report.Coverage{Missing: 9, Total: 75, Dark: 1, DarkRows: 1}
 
 	out, stderr := renderCompact(t, r)
 	if strings.Contains(out, "node-agent") {
@@ -418,7 +418,7 @@ func TestCompactCollapsesUnsetAndCountsListedRows(t *testing.T) {
 	if !strings.Contains(stderr, "3 containers (1 listed) over 2w:") {
 		t.Errorf("summary does not report total vs listed containers:\n%s", stderr)
 	}
-	if !strings.Contains(stderr, "9 of 75 pod containers have no series (1 NO-DATA workloads; the rest have other pods covered)") {
+	if !strings.Contains(stderr, "9 of 75 pod containers have no series (1 in 1 NO-DATA row; 8 in rows sized from their other pods)") {
 		t.Errorf("METRICS_COVERAGE warning does not distinguish pod containers from NO-DATA workloads:\n%s", stderr)
 	}
 	if !strings.Contains(stderr, "not listed: 1 UNSET, 1 NO-DATA") {
@@ -442,5 +442,40 @@ func TestExplainPrintsCommitmentTableAndOnlyApplicableLegend(t *testing.T) {
 	}
 	if strings.Contains(out, "CPU_OVERCOMMIT_HEAVY: looks empty") {
 		t.Errorf("table --explain printed legend for CPU_OVERCOMMIT_HEAVY when no node has it:\n%s", out)
+	}
+}
+
+// The coverage warning describes the cluster, not the rows a --top or
+// --verdict left standing: cutting the NO-DATA row out of view must not turn
+// it into "0 NO-DATA".
+func TestCoverageWarningIgnoresDisplayFilters(t *testing.T) {
+	r := sampleReport()
+	r.Findings = r.Findings[:1]
+	r.CoverageCounts = report.Coverage{Missing: 2, Total: 37, Dark: 1, DarkRows: 1}
+	_, stderr := renderCompact(t, r)
+	if !strings.Contains(stderr, "2 of 37 pod containers have no series (1 in 1 NO-DATA row; 1 in rows sized from their other pods)") {
+		t.Errorf("coverage warning changed with the filtered rows:\n%s", stderr)
+	}
+}
+
+// The footprint section only exists when asked for, carries its factors on
+// the line under it, and marks tare's row as a lower bound like FREED.
+func TestFootprintSection(t *testing.T) {
+	if out := renderTable(t, packedReport(), false); strings.Contains(out, "section=footprint") {
+		t.Error("footprint section printed with no factors given")
+	}
+	r := packedReport()
+	r.Factors = report.Factors{NodeWatts: 100}
+	out := renderTable(t, r, false)
+	sec := out[strings.Index(out, "# section=footprint"):]
+	if !strings.Contains(sec, "# factors: node_watts=100 grid_gco2e_kwh=unset") {
+		t.Errorf("factors line missing:\n%s", sec)
+	}
+	if !strings.Contains(strings.Join(strings.Fields(sec), " "), "packed_after >=2 tare >=1752 ?") {
+		t.Errorf("tare row should be >=2 nodes, >=1752 kWh, ? kgCO2e:\n%s", sec)
+	}
+	_, diag := renderCompact(t, r)
+	if !strings.Contains(diag, "(>=1752 kWh/yr, ? kgCO2e/yr at your factors)") {
+		t.Errorf("summary line does not carry the footprint:\n%s", diag)
 	}
 }

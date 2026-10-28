@@ -53,6 +53,16 @@ func Redact(r *Report) {
 		for _, n := range f.Nodes {
 			add(n)
 		}
+		add(f.Constraints.HPAName)
+		add(f.Constraints.VPAName)
+	}
+	// A budget is named only inside the sentences that report it, so its
+	// name has to be read back out of them.
+	for _, s := range r.DrainBlockers {
+		addPDB(s, add)
+	}
+	for s := range r.Nodes.PinReasons {
+		addPDB(s, add)
 	}
 	for _, c := range r.Commitment {
 		add(c.Node)
@@ -88,6 +98,8 @@ func Redact(r *Report) {
 		f.Image = rep(f.Image)
 		f.Nodes = repEach(rep, f.Nodes)
 		f.NodeClasses = repEach(rep, f.NodeClasses)
+		f.Constraints.HPAName = rep(f.Constraints.HPAName)
+		f.Constraints.VPAName = rep(f.Constraints.VPAName)
 		for j := range f.Reasons {
 			f.Reasons[j].Text = rep(f.Reasons[j].Text)
 			f.Reasons[j].Subject = rep(f.Reasons[j].Subject)
@@ -104,6 +116,13 @@ func Redact(r *Report) {
 	r.Nodes.Unusable = repEach(rep, r.Nodes.Unusable)
 	r.Nodes.SelfCheck = rep(r.Nodes.SelfCheck)
 	r.DrainBlockers = repEach(rep, r.DrainBlockers)
+	if len(r.Nodes.PinReasons) > 0 {
+		pins := make(map[string]int, len(r.Nodes.PinReasons))
+		for reason, n := range r.Nodes.PinReasons {
+			pins[rep(reason)] += n
+		}
+		r.Nodes.PinReasons = pins
+	}
 	for i := range r.Missing {
 		r.Missing[i].Detail = rep(r.Missing[i].Detail)
 	}
@@ -113,8 +132,20 @@ func Redact(r *Report) {
 	// invites a reader to go looking for a namespace called 3f2a91c4.
 	// Single-spaced: the meta section is a table now, and two consecutive
 	// spaces are its column separator.
-	r.Source = RedactSource(rep(r.Source)) + " | names redacted"
+	// RedactSource hashes the endpoint's own names. Passing it the output of
+	// rep would hash a namespace twice, and the header would name a different
+	// endpoint from the "using" line on stderr.
+	r.Source = RedactSource(r.Source) + " | names redacted"
 	r.Redacted = true
+}
+
+var pdbName = regexp.MustCompile(`PodDisruptionBudget ([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)`)
+
+func addPDB(s string, add func(string)) {
+	for _, m := range pdbName.FindAllStringSubmatch(s, -1) {
+		add(m[1])
+		add(m[2])
+	}
 }
 
 // RedactSource hides where the data came from while keeping what kind of place
@@ -191,4 +222,32 @@ func hashName(s string) string {
 // HashName returns the stable 8-character hash Redact uses for a cluster name.
 func HashName(s string) string {
 	return hashName(s)
+}
+
+var urlToken = regexp.MustCompile(`[a-z][a-z0-9+.-]*://[^\s"]+`)
+
+// Scrubber returns what --redact does to a free-text error before it reaches
+// stderr. Errors are the one output Redact never sees, and the ones from a
+// Prometheus query carry the endpoint twice over: as the source tare
+// describes, and inside client-go's own text, which quotes the proxied URL
+// with the namespaces of the PromQL in its query string, or names the service
+// and namespace that refused it. Every URL is reduced the way the source line
+// is, and each of names is hashed the way the "using" line hashes it, so the
+// two agree.
+func Scrubber(names ...string) func(string) string {
+	hide := map[string]bool{}
+	for _, n := range names {
+		if n != "" {
+			hide[n] = true
+		}
+	}
+	return func(s string) string {
+		s = urlToken.ReplaceAllStringFunc(s, RedactSource)
+		return nameToken.ReplaceAllStringFunc(s, func(tok string) string {
+			if hide[tok] {
+				return hashName(tok)
+			}
+			return tok
+		})
+	}
 }

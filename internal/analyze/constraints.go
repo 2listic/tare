@@ -3,7 +3,7 @@ package analyze
 import (
 	"fmt"
 
-	"github.com/mfranzon/tare/internal/discover"
+	"github.com/2listic/tare/internal/discover"
 )
 
 // applyConstraints adjusts a recommendation to respect facts about the

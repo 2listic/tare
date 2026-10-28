@@ -3,8 +3,8 @@ package report
 import (
 	"testing"
 
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/discover"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/discover"
 )
 
 func TestSizerSumsContainersOfAWorkload(t *testing.T) {
@@ -52,5 +52,15 @@ func TestSizerKeepsIdleWorkloadsAsTheyAre(t *testing.T) {
 	})
 	if _, _, ok := size(discover.Pod{Namespace: "web", Workload: "Deployment/sync"}); ok {
 		t.Error("an IDLE workload must keep its current requests in the replay")
+	}
+}
+
+func TestSizerKeepsUnverifiedWorkloadsAsTheyAre(t *testing.T) {
+	size := Sizer([]analyze.Finding{
+		{Namespace: "web", Workload: "Deployment/new", Container: "app", Verdict: analyze.Unverified,
+			CPURequest: 100, RecCPU: 10, MemRequest: 64 << 20, RecMem: 16 << 20},
+	})
+	if _, _, ok := size(discover.Pod{Namespace: "web", Workload: "Deployment/new"}); ok {
+		t.Error("an UNVERIFIED workload must keep its current requests in the replay")
 	}
 }

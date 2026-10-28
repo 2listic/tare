@@ -46,6 +46,10 @@ type Thresholds struct {
 	// MinSamplesForInference guards against inferring a ceiling from an hour
 	// of data.
 	MinSamplesForInference int
+	// MinSamplesForSizing: below it a reduction is not proposed at all. A
+	// container minutes old has not met its own load yet; on the lab cluster a frontend
+	// 3.5 minutes old read p95 0m while drawing 50m, and was told 10m.
+	MinSamplesForSizing int
 	// MinSaturationUtil guards every pressure-based saturation verdict: the
 	// container's own usage must reach this fraction of its allocation before
 	// stalls are read as starvation. A container using 1.5% of its request is
@@ -191,6 +195,7 @@ func DefaultThresholds() Thresholds {
 		PlateauHeadroom:        0.70,
 		LimitMoveRatio:         0.20,
 		MinSamplesForInference: 2880, // twelve hours at a 15s scrape
+		MinSamplesForSizing:    240,  // an hour at a 15s scrape
 		// 0.05, as agent/compare-pressure's --share, which is what the rule was
 		// evaluated with on the harness clusters. Unswept in this catalog.
 		CPUWaitStalledShare: 0.05,

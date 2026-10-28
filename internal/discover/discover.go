@@ -20,7 +20,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/mfranzon/tare/internal/ceilings"
+	"github.com/2listic/tare/internal/ceilings"
 )
 
 // Container is one container of one pod, joined to the workload that owns it.
@@ -71,6 +71,11 @@ type Client struct {
 	cs  kubernetes.Interface
 	dyn dynamic.Interface
 
+	// Context is the kubeconfig context the client resolved to, named so that
+	// anything tare hands back to run later, such as -o patch, can be pinned
+	// to the cluster it was measured on. Empty when the config has none.
+	Context string
+
 	// idxs caches one workload index per namespace scope. Both the sizing pass
 	// and the packing replay need to know which controller owns a pod, and
 	// they run far apart; without this the second one repeats every List the
@@ -81,12 +86,30 @@ type Client struct {
 	// silently removes a finding, so none of them is allowed to stay inside
 	// this package.
 	warnings []string
+	// denied marks the warnings the API server refused, as opposed to reads
+	// that timed out or failed in transit. A --timeout that expired was
+	// reported as an RBAC denial, which sends the reader to fix permissions
+	// they already have.
+	denied map[string]bool
 }
 
 // warn records a read that failed without being fatal.
 func (c *Client) warn(format string, args ...any) {
-	c.warnings = append(c.warnings, fmt.Sprintf(format, args...))
+	w := fmt.Sprintf(format, args...)
+	c.warnings = append(c.warnings, w)
+	for _, a := range args {
+		if err, ok := a.(error); ok && errors.IsForbidden(err) {
+			if c.denied == nil {
+				c.denied = map[string]bool{}
+			}
+			c.denied[w] = true
+		}
+	}
 }
+
+// Denied reports whether a warning from Warnings was a refusal by the API
+// server rather than a read that failed.
+func (c *Client) Denied(warning string) bool { return c.denied[warning] }
 
 // Warnings lists the non-fatal read failures of this run, usually RBAC. Each
 // one silently removes a finding from the report, so none of them is allowed
@@ -98,14 +121,6 @@ func (c *Client) Warnings() []string {
 		if !seen[w] {
 			seen[w] = true
 			out = append(out, w)
-		}
-	}
-	for _, x := range c.idxs {
-		for _, w := range x.warn {
-			if !seen[w] {
-				seen[w] = true
-				out = append(out, w)
-			}
 		}
 	}
 	sort.Strings(out)
@@ -135,10 +150,11 @@ func NewClient(kubeconfig, context string) (*Client, error) {
 	if kubeconfig != "" {
 		rules.ExplicitPath = kubeconfig
 	}
-	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+	loader := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
 		rules,
 		&clientcmd.ConfigOverrides{CurrentContext: context},
-	).ClientConfig()
+	)
+	cfg, err := loader.ClientConfig()
 	if err != nil {
 		return nil, fmt.Errorf("no usable kubeconfig: %w\n%s", err, kubeconfigHelp())
 	}
@@ -156,7 +172,12 @@ func NewClient(kubeconfig, context string) (*Client, error) {
 	// The dynamic client reads CRDs such as VPA. Its absence is not fatal:
 	// most clusters have no VPA installed.
 	dyn, _ := dynamic.NewForConfig(cfg)
-	return &Client{cs: cs, dyn: dyn}, nil
+	if context == "" {
+		if raw, err := loader.RawConfig(); err == nil {
+			context = raw.CurrentContext
+		}
+	}
+	return &Client{cs: cs, dyn: dyn, Context: context}, nil
 }
 
 // UserAgent identifies tare in API server audit logs. A cluster admin watching

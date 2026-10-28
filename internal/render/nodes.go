@@ -4,7 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mfranzon/tare/internal/packing"
+	"github.com/2listic/tare/internal/packing"
+	"github.com/2listic/tare/internal/report"
 )
 
 // nodeLines is the node block as text, so the table and the HTML report cannot
@@ -66,4 +67,24 @@ func nodeLines(r packing.Result) []string {
 	}
 	pf("  tare reports nodes, not currency: only you know what your nodes cost.")
 	return out
+}
+
+// footprintLines is the footprint as sentences, for --explain and the HTML
+// page. The caveat is part of the figure: without it a kgCO2e value reads as
+// a measurement.
+func footprintLines(r *report.Report) []string {
+	rows := report.Footprint(r)
+	if rows == nil {
+		return nil
+	}
+	f := rows[1]
+	out := []string{fmt.Sprintf("footprint of the %s node(s) these recommendations free: %s kWh/yr, %s kgCO2e/yr.",
+		footprintNodes(f), footprintKWh(f), footprintKg(f))}
+	if c := rows[0]; c.Nodes > 0 {
+		out = append(out, fmt.Sprintf("  the %d node(s) already free without resizing are another %s kWh/yr, %s kgCO2e/yr, and are not tare's.",
+			c.Nodes, footprintKWh(c), footprintKg(c)))
+	}
+	return append(out,
+		"  "+factorsNote(r.Factors)+".",
+		"  It is a node count times your coefficients, nothing measured: it is realised only if the nodes are actually removed, and on a fixed node pool it is zero.")
 }

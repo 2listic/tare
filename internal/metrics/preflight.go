@@ -53,6 +53,9 @@ func (p *Prom) Preflight(namespaces []string, window time.Duration) []SeriesChec
 			Buys: "restart counts (kube-state-metrics), which corroborate an OOMKill"},
 		{Metric: "kube_pod_container_resource_limits",
 			Buys: "watching a limit move, which is how a runtime ceiling is inferred when the flag is not in the pod spec"},
+		{Metric: "kube_pod_owner",
+			Buys: "history from pods a rollout or reschedule replaced (kube-state-metrics); without it a " +
+				"workload is measured only since its pods were last replaced"},
 		{Metric: "node_cpu_seconds_total",
 			Buys: "node utilisation (node-exporter), without which tare cannot say whether a throttled container " +
 				"was competing for a busy machine or stalling next to idle cores"},
@@ -60,8 +63,12 @@ func (p *Prom) Preflight(namespaces []string, window time.Duration) []SeriesChec
 
 	for i := range checks {
 		expr := fmt.Sprintf("count(%s{%s})", checks[i].Metric, sel)
-		if checks[i].Metric == "node_cpu_seconds_total" {
+		switch checks[i].Metric {
+		case "node_cpu_seconds_total":
 			expr = fmt.Sprintf(`count(%s{mode="idle"})`, checks[i].Metric)
+		case "kube_pod_owner":
+			// No container label: the container matchers would exclude every series.
+			expr = fmt.Sprintf("count(%s{%s})", checks[i].Metric, nsSelector(namespaces))
 		}
 		samples, err := p.query(expr)
 		checks[i].Err = err

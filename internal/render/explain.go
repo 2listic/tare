@@ -5,9 +5,9 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/packing"
-	"github.com/mfranzon/tare/internal/report"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/packing"
+	"github.com/2listic/tare/internal/report"
 )
 
 // --explain is where the sentences went.
@@ -72,6 +72,9 @@ func (p *printer) explainNodes(r *report.Report) {
 		return
 	}
 	for _, l := range nodeLines(r.Nodes) {
+		fmt.Fprintf(p.out, "  %s\n", l)
+	}
+	for _, l := range footprintLines(r) {
 		fmt.Fprintf(p.out, "  %s\n", l)
 	}
 }

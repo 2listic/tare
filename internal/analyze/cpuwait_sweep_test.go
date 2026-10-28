@@ -3,9 +3,9 @@ package analyze_test
 import (
 	"testing"
 
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/metrics"
-	"github.com/mfranzon/tare/internal/simulate"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/metrics"
+	"github.com/2listic/tare/internal/simulate"
 )
 
 // verdictWithout runs one archetype under one scenario, with the given signals

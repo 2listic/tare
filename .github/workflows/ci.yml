@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # agent/ is its own module and only builds on Linux, so a root `go test ./...`
+  # on a Mac never runs it. This is the only place its tests run.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            agent/go.sum
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          [ -z "$unformatted" ] || { echo "$unformatted"; exit 1; }
+      - name: vet
+        run: go vet ./...
+      - name: test
+        run: go test ./...
+      - name: vet agent
+        working-directory: agent
+        run: go vet ./...
+      - name: test agent
+        working-directory: agent
+        run: go test ./...
+
+  # The release targets, so a platform-specific break shows up here and not in
+  # tools/release.sh.
+  cross-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: ./tools/build.sh linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64

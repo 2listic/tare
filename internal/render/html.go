@@ -6,8 +6,8 @@ import (
 	"io"
 	"strings"
 
-	"github.com/mfranzon/tare/internal/analyze"
-	"github.com/mfranzon/tare/internal/report"
+	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/report"
 )
 
 // The HTML report exists for the case the terminal cannot serve: the person who
@@ -72,13 +72,14 @@ type htmlView struct {
 // headline once came out optimistic by exactly the amount the reader most
 // needed to see.
 type htmlSavings struct {
-	Workloads        int
-	CPUMillicores    int64
-	MemBytes         int64
-	AddWorkloads     int
-	AddCPUMillicores int64
-	AddMemBytes      int64
-	IdleWorkloads    int
+	Workloads           int
+	CPUMillicores       int64
+	MemBytes            int64
+	AddWorkloads        int
+	AddCPUMillicores    int64
+	AddMemBytes         int64
+	IdleWorkloads       int
+	UnverifiedWorkloads int
 }
 
 type htmlCount struct {
@@ -95,7 +96,7 @@ func buildHTMLView(r *report.Report) htmlView {
 	v.Savings = htmlSavings{
 		Workloads: t.Workloads, CPUMillicores: t.CPUMillicores, MemBytes: t.MemBytes,
 		AddWorkloads: t.AddWorkloads, AddCPUMillicores: t.AddCPUMillicores, AddMemBytes: t.AddMemBytes,
-		IdleWorkloads: t.IdleWorkloads,
+		IdleWorkloads: t.IdleWorkloads, UnverifiedWorkloads: t.UnverifiedWorkloads,
 	}
 
 	for _, c := range report.CountVerdicts(r.Findings) {
@@ -132,7 +133,7 @@ func buildHTMLView(r *report.Report) htmlView {
 	}
 
 	if r.NodeNote == "" {
-		v.Nodes = nodeLines(r.Nodes)
+		v.Nodes = append(nodeLines(r.Nodes), footprintLines(r)...)
 	}
 	return v
 }
@@ -307,6 +308,7 @@ footer { margin-top: 36px; color: var(--dim); font-size: 12px; border-top: 1px s
   {{if .Savings.AddWorkloads}}<div class="warn">requests raised on {{.Savings.AddWorkloads}} containers:
     <span class="mono">{{cores .Savings.AddCPUMillicores}} CPU, {{human .Savings.AddMemBytes}} memory</span></div>{{end}}
   {{if .Savings.IdleWorkloads}}<div>{{.Savings.IdleWorkloads}} IDLE containers are not counted above: their idleness is not ruled out.</div>{{end}}
+  {{if .Savings.UnverifiedWorkloads}}<div>{{.Savings.UnverifiedWorkloads}} UNVERIFIED containers are not counted above: their reduction cannot be shown to be safe.</div>{{end}}
 </div>
 
 <div class="hint">Click any row for the evidence behind it. Column headers sort.</div>
