@@ -28,6 +28,11 @@ func TestContainerScope(t *testing.T) {
 			"/system.slice/containerd.service/kubepods-besteffort-podX.slice:cri-containerd:" + id64, true},
 		{"/kubepods.slice/kubepods-burstable.slice", "/kubepods.slice/kubepods-burstable.slice", false},
 		{"/system.slice/sshd.service", "/system.slice/sshd.service", false},
+		// systemd mount units of containerd's mounts carry the id but are no container
+		{"/system.slice/run-containerd-io.containerd.runtime.v2.task-k8s.io-" + id64 + "-rootfs.mount",
+			"/system.slice/run-containerd-io.containerd.runtime.v2.task-k8s.io-" + id64 + "-rootfs.mount", false},
+		{"/system.slice/run-containerd-io.containerd.grpc.v1.cri-sandboxes-" + id64 + "-shm.mount",
+			"/system.slice/run-containerd-io.containerd.grpc.v1.cri-sandboxes-" + id64 + "-shm.mount", false},
 	}
 	for _, tt := range tests {
 		got, ok := containerScope(tt.path)
@@ -81,6 +86,7 @@ func TestReaderFindsEveryThreadOfEveryContainer(t *testing.T) {
 	n.container(crio+"/container", map[int][]int{20: {20}})
 	n.container(outside, map[int][]int{30: {30}})
 	n.container("/system.slice/sshd.service", map[int][]int{40: {40}}) // not a container
+	n.container("/system.slice/run-containerd-io.containerd.runtime.v2.task-k8s.io-"+id64+"-rootfs.mount", nil)
 
 	proc, err := procfs.NewFS(n.proc)
 	if err != nil {
