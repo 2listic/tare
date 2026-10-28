@@ -1,5 +1,7 @@
 # tare
 
+<img width="1400" height="760" alt="tui" src="https://github.com/user-attachments/assets/33b8e558-ea3a-4468-886a-2690c464f3b5" />
+
 Right-sizes Kubernetes workloads by asking the kernel whether they are waiting
 for CPU, not only how much they used, and explains every number it produces.
 
