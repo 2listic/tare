@@ -235,7 +235,7 @@ func (e *Env) observe(k metrics.Key, window time.Duration) *metrics.Observation 
 	// has one task, so wait is the stalled share of the work it wanted: the
 	// demand the quota refused above it, the queueing below it. There is no
 	// background wait from neighbours, so a container that never approaches
-	// its quota has no normal; see TestCPUWaitMatchesPSIOnCatalog.
+	// its quota has no normal; see TestCPUWaitOnCatalog.
 	var stretches []metrics.WaitStretch
 	var cur metrics.WaitStretch
 	var curN int

@@ -372,10 +372,11 @@ func TestNoSaturationSignalWithholdsConfidence(t *testing.T) {
 		t.Fatalf("baseline verdict = %s, want WASTE", full.Verdict)
 	}
 
-	// Same data, same workload, but the cluster exports no saturation signal.
+	// Same data, same workload, but the cluster exports no saturation signal
+	// and runs no tare-agent.
 	obs2, _ := c.Observe(nil, window)
 	blind := analyze.Run(c.Containers(),
-		simulate.Without(obs2, metrics.SigPSI, metrics.SigPSIAvg, metrics.SigThrottle),
+		simulate.Without(obs2, metrics.SigPSI, metrics.SigPSIAvg, metrics.SigThrottle, metrics.SigCPUWait),
 		window, analyze.DefaultThresholds())[0]
 
 	if blind.Verdict != analyze.Unverified {

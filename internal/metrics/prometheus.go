@@ -24,6 +24,10 @@ type Prom struct {
 	// which is the failure mode of a proxied query against an overloaded
 	// backend.
 	Ctx context.Context
+
+	// placement is each container's node, for the node half of the CPU wait
+	// rule; see SetPlacement.
+	placement map[Key]Placement
 }
 
 // New builds a source over any transport.

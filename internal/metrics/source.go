@@ -196,6 +196,15 @@ type NodeObserver interface {
 	ObserveNodes(ips []string, window time.Duration) (map[string]NodeObservation, error)
 }
 
+// Placer is a Source that can use each container's node. Like NodeObserver it
+// is not part of Source: the simulator has no nodes.
+type Placer interface {
+	// SetPlacement gives each container's node before Observe, for the node
+	// half of the CPU wait rule. Optional: without it that rule decides from
+	// the containers alone.
+	SetPlacement(map[Key]Placement)
+}
+
 // WindowProber is an optional Source capability: reporting how much history the
 // backend actually holds, so the caller can ask for a window that exists rather
 // than one that produces a report full of "low" confidence.

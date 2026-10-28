@@ -14,6 +14,7 @@ func TestSummariseCPUWait(t *testing.T) {
 		name        string
 		st          []WaitStretch
 		stalled     float64
+		run         int
 		hasNormal   bool
 		busy        bool
 		normal, cov float64
@@ -22,7 +23,14 @@ func TestSummariseCPUWait(t *testing.T) {
 			// Twice the normal and above the idle floor: stalled.
 			name:    "relative",
 			st:      append(repeat(quiet, 9), WaitStretch{Wait: 0.5, Run: 1, Usage: 1}),
-			stalled: 0.1, hasNormal: true, busy: true, normal: 0.02, cov: 0.9,
+			stalled: 0.1, run: 1, hasNormal: true, busy: true, normal: 0.02, cov: 0.9,
+		},
+		{
+			// Two runs, of 2 and 3: the longest counts.
+			name: "runs",
+			st: append(append(append(append(repeat(quiet, 20), repeat(WaitStretch{Wait: 0.5, Run: 1, Usage: 1}, 2)...),
+				quiet), repeat(WaitStretch{Wait: 0.5, Run: 1, Usage: 1}, 3)...), quiet),
+			stalled: 5.0 / 27, run: 3, hasNormal: true, busy: true, normal: 0.02, cov: 0.9,
 		},
 		{
 			// Twice a tiny normal, but the wait itself is negligible.
@@ -35,7 +43,7 @@ func TestSummariseCPUWait(t *testing.T) {
 			// can call it stalled, and it does.
 			name:    "ceiling",
 			st:      repeat(WaitStretch{Wait: 1.2, Run: 1, Usage: 1}, 4),
-			stalled: 1, hasNormal: true, busy: true, normal: 1.2, cov: 1,
+			stalled: 1, run: 4, hasNormal: true, busy: true, normal: 1.2, cov: 1,
 		},
 		{
 			// Never above MinUsage: no slowdown, no normal, no coverage.
@@ -51,6 +59,9 @@ func TestSummariseCPUWait(t *testing.T) {
 			}
 			if math.Abs(got.Stalled-c.stalled) > 1e-9 {
 				t.Errorf("stalled = %v, want %v", got.Stalled, c.stalled)
+			}
+			if got.LongestRun != c.run {
+				t.Errorf("longest run = %d, want %d", got.LongestRun, c.run)
 			}
 			if got.HasNormal != c.hasNormal || math.Abs(got.Normal-c.normal) > 1e-9 {
 				t.Errorf("normal = %v (%v), want %v (%v)", got.Normal, got.HasNormal, c.normal, c.hasNormal)
@@ -122,6 +133,9 @@ type agentCluster struct {
 	normal        float64
 	stretches     int
 	candidates    []float64
+	// steps places the candidates, in 5-minute steps from the start; nil
+	// means one after another.
+	steps []int
 }
 
 func (c agentCluster) respond(expr string) (string, int) {
@@ -139,7 +153,7 @@ func (c agentCluster) respond(expr string) (string, int) {
 	case strings.Contains(expr, "tare_agent_"):
 		return emptyVector, 200
 	case strings.Contains(expr, " or ("): // the stalled candidates, a range query
-		return matrix("app", c.candidates), 200
+		return matrix("app", c.candidates, c.steps), 200
 	case strings.Contains(expr, "count_over_time((sum by (namespace,pod,container) (sum by (id)"):
 		return vector("app", float64(c.stretches)), 200
 	case strings.Contains(expr, "quantile_over_time(0.1,"):
@@ -162,10 +176,14 @@ func labelled(labels map[string]string, v float64) string {
 	return string(b)
 }
 
-func matrix(container string, values []float64) string {
+func matrix(container string, values []float64, steps []int) string {
 	pts := make([]any, len(values))
 	for i, v := range values {
-		pts[i] = []any{1700000000 + 300*i, formatFloat(v)}
+		step := i
+		if steps != nil {
+			step = steps[i]
+		}
+		pts[i] = []any{1700000000 + 300*step, formatFloat(v)}
 	}
 	b, _ := json.Marshal(map[string]any{
 		"status": "success",
@@ -212,10 +230,30 @@ func TestObserveCPUWait(t *testing.T) {
 	if math.Abs(w.Stalled-0.03) > 1e-9 {
 		t.Errorf("stalled = %v, want 0.03 (0.2, 0.5 and 1.3 of 100 stretches)", w.Stalled)
 	}
+	if w.LongestRun != 3 {
+		t.Errorf("longest run = %d, want 3 (0.2, 0.5, 1.3 in consecutive steps)", w.LongestRun)
+	}
 	for _, h := range healthOf(p, SigCPUWait) {
 		if !h.OK() {
 			t.Errorf("unhealthy CPU wait query on a healthy agent: %+v", h)
 		}
+	}
+}
+
+// Only candidates come back from the range query, so a run is broken by a
+// missing step as much as by a candidate under the container's threshold.
+func TestObserveCPUWaitLongestRun(t *testing.T) {
+	c := agentCluster{agent: true, normal: 0.1, stretches: 100,
+		candidates: []float64{0.5, 0.5, 0.5, 0.5, 0.15, 0.5, 0.5},
+		steps:      []int{0, 1, 3, 4, 5, 6, 7}}
+	f := newFakeProm(c.respond)
+	defer f.Close()
+	obs, err := NewProm(f.URL).Observe([]string{"ns"}, 7*24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := obs[Key{Namespace: "ns", Pod: "p-0", Container: "app"}].CPUWait; w.LongestRun != 2 || math.Abs(w.Stalled-0.06) > 1e-9 {
+		t.Errorf("want runs of 2 (gap at step 2, sub-threshold at 5) and 6 stalled, got %+v", w)
 	}
 }
 

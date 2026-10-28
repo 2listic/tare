@@ -88,6 +88,11 @@ type Finding struct {
 	// exported, and the caveat it drives says so.
 	trendKilledByRestart bool
 
+	// cpuWaitStalledRun records a long run of stalled stretches that the
+	// stalled share did not reach. CPU wait stays a usable signal; it only
+	// cannot vouch for a reduction.
+	cpuWaitStalledRun bool
+
 	// RecCPU and RecMem are the recommended requests, zero when none is
 	// offered. RecCPULimit is the recommended CPU limit, which is deliberately
 	// higher: a request sized to a percentile must not become a limit that

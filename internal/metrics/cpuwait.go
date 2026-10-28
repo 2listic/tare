@@ -37,6 +37,29 @@ import (
 //
 // What the rule cannot do is size an increase. Usage plus wait is not demand,
 // so the size of an increase stays with the usage-based logic, as for PSI.
+//
+// Node context. A task waits for a CPU only while every CPU it may use is
+// busy, which is a fact about the node, and node-exporter reports it on every
+// kernel without PSI: the run-queue wait of all the node's tasks
+// (/proc/schedstat) and its idle time. Each stretch is judged with its node's
+// state:
+//
+//	node contended (queue >= nodeContendedQueue and its busiest minute at
+//	    least nodeFullBusy): stalled if the container waited at all (wait >=
+//	    IdleFloor). The cause is established, so no normal is needed:
+//	    always-contended containers and short incidents.
+//	node idle in every minute (busy < nodeIdleBusy): not stalled. A request
+//	    is a CPU weight and only matters while CPUs are contested; the waits of
+//	    a container with idle CPUs next to it are its own wake-ups, which a
+//	    larger request does not remove. Not for a container that may be pinned
+//	    to some of the node's CPUs, whose CPUs can be full while the rest idle.
+//	in between: the relative test, without the ceiling, which only stood in
+//	    for the missing quiet normal that node confirmation now supplies.
+//	node unknown: the relative slowdown rule as above.
+//
+// On the harness's seven one-hour runs (five distributions, cgroup v1
+// included) it was right in 99.6% of stretches with no stalled stretch missed,
+// against 98.5% for the relative rule alone and 91.6% for PSI.
 const (
 	cpuWaitStep = 5 * time.Minute
 
@@ -61,6 +84,26 @@ const (
 	// still has a quiet normal.
 	slowdownNormalQuantile = 0.10
 
+	// nodeContendedQueue: a node whose tasks waited this many seconds per
+	// second per CPU over the stretch was short of CPU. On the harness, quiet
+	// worker nodes stayed at or below 0.28 (0.16 typically) and contended ones
+	// read 0.33 to 2.7; two busy neighbours on 4 CPUs read 0.5 to 1.2.
+	nodeContendedQueue = 0.3
+	// nodeFullBusy: the queue alone is not contention. A task held back by its
+	// own CPU limit (CFS throttling) counts as waiting in schedstat while the
+	// CPUs idle: one busy loop throttled to 100m added 0.23 per CPU to a
+	// 4-CPU node half idle. Contention needs the CPUs full, and a throttled
+	// task does not fill them. On the harness the busiest minute of a quiet
+	// stretch never passed 0.65 and that of a contended one never fell below
+	// 0.97, on every kernel tried.
+	nodeFullBusy = 0.9
+	// nodeIdleBusy: a node below this busy share in every minute of the
+	// stretch had CPUs going spare all the time. Every minute, not the
+	// average: a 30-second burst raises the average little and is real
+	// contention while it lasts. The harness's quiet nodes ran 25-50% busy at
+	// their workloads' own load, contended ones 54-100%.
+	nodeIdleBusy = 0.35
+
 	// agentUnattributedMax is the share of a node's exit records the agent may
 	// fail to place before its numbers for that node are not believed.
 	agentUnattributedMax = 0.05
@@ -73,6 +116,19 @@ type CPUWait struct {
 	// Stalled is the share of Stretches the relative slowdown rule calls
 	// stalled.
 	Stalled float64
+	// LongestRun is the most stalled stretches in a row. A share dilutes a
+	// starvation that is serious but short against the window: a batch job
+	// starved for its whole hour every night is 4% of a week, under the share.
+	// A run of them does not dilute.
+	LongestRun int
+	// LongestConfirmedRun is the most stalled stretches in a row that its
+	// node's contention confirmed. Unlike a run the relative test alone found,
+	// its cause is known, so it is starvation however short against the window.
+	LongestConfirmedRun int
+	// NodeKnown is the share of Stretches whose node state was known, and
+	// NodeContended the share whose node was contended. A container with no
+	// quiet normal is contended all the time only if its node was.
+	NodeKnown, NodeContended float64
 	// Normal is the container's normal slowdown. HasNormal is false when it
 	// never waited enough to have one; only the ceiling applies then.
 	Normal    float64
@@ -95,10 +151,50 @@ func stalled(wait, slowdown, normal float64, hasNormal bool) bool {
 	return hasNormal && slowdown >= slowdownK*normal && wait >= slowdownIdleFloor
 }
 
+// NodeState is what the container's node did over one stretch. Known is false
+// when node-exporter had nothing for it, or the container's node is not known.
+type NodeState struct {
+	Known bool
+	// Queue is the run-queue wait of all the node's tasks per CPU, s/s.
+	Queue float64
+	// BusyMax is the busiest minute's share of the node's CPU time not idle.
+	BusyMax float64
+	// EveryMinute: node-exporter answered in every minute of the stretch.
+	// A node too busy to be scraped leaves gaps exactly in its busiest
+	// minutes, and the minutes left look idle.
+	EveryMinute bool
+	// Pinned: the container may run on only some of the node's CPUs (an
+	// integer CPU allocation the kubelet's CPU manager may pin), so the node's
+	// idle CPUs prove nothing about it.
+	Pinned bool
+}
+
+func (n NodeState) contended() bool {
+	return n.Known && n.Queue >= nodeContendedQueue && n.BusyMax >= nodeFullBusy
+}
+func (n NodeState) idle() bool {
+	return n.Known && n.EveryMinute && !n.Pinned && n.BusyMax < nodeIdleBusy
+}
+
+// judge decides one stretch. confirmed is set when the node's contention made
+// it stalled.
+func judge(wait, slowdown, normal float64, hasNormal bool, node NodeState) (isStalled, confirmed bool) {
+	switch {
+	case !node.Known:
+		return stalled(wait, slowdown, normal, hasNormal), false
+	case node.contended():
+		return wait >= slowdownIdleFloor, wait >= slowdownIdleFloor
+	case node.idle():
+		return false, false
+	}
+	return hasNormal && slowdown >= slowdownK*normal && wait >= slowdownIdleFloor, false
+}
+
 // WaitStretch is one 5-minute stretch: CPU wait (s/s), the CPU time the agent
-// accounted (cores) and the kubelet's CPU usage (cores).
+// accounted (cores), the kubelet's CPU usage (cores), and the node's state.
 type WaitStretch struct {
 	Wait, Run, Usage float64
+	Node             NodeState
 }
 
 // SummariseCPUWait applies the rule to stretches already in hand. It is the
@@ -122,18 +218,59 @@ func SummariseCPUWait(st []WaitStretch) CPUWait {
 	if len(cover) > 0 {
 		c.Coverage, c.Busy = interpolatedQuantile(cover, 0.5), true
 	}
-	var n int
+	var n, known, contended int
+	var runs runCounter
 	for _, s := range st {
 		c.Mean += s.Wait
-		if s.Usage > slowdownMinUsage && stalled(s.Wait, s.Wait/s.Usage, c.Normal, c.HasNormal) {
+		if s.Node.Known {
+			known++
+		}
+		if s.Node.contended() {
+			contended++
+		}
+		var isStalled, confirmed bool
+		if s.Usage > slowdownMinUsage {
+			isStalled, confirmed = judge(s.Wait, s.Wait/s.Usage, c.Normal, c.HasNormal, s.Node)
+		}
+		if isStalled {
 			n++
 		}
+		runs.add(isStalled, confirmed, true)
 	}
+	c.LongestRun, c.LongestConfirmedRun = runs.longest, runs.longestConfirmed
 	if len(st) > 0 {
 		c.Mean /= float64(len(st))
 		c.Stalled = float64(n) / float64(len(st))
+		c.NodeKnown = float64(known) / float64(len(st))
+		c.NodeContended = float64(contended) / float64(len(st))
 	}
 	return c
+}
+
+// runCounter tracks the longest runs of stalled stretches, all of them and
+// those the node confirmed.
+type runCounter struct {
+	run, confirmed, longest, longestConfirmed int
+}
+
+// add records the next stretch. adjacent is false when a stretch is missing
+// before this one, which breaks both runs.
+func (r *runCounter) add(isStalled, confirmed, adjacent bool) {
+	if !adjacent {
+		r.run, r.confirmed = 0, 0
+	}
+	if !isStalled {
+		r.run, r.confirmed = 0, 0
+		return
+	}
+	r.run++
+	r.longest = max(r.longest, r.run)
+	if confirmed {
+		r.confirmed++
+		r.longestConfirmed = max(r.longestConfirmed, r.confirmed)
+	} else {
+		r.confirmed = 0
+	}
 }
 
 // interpolatedQuantile is PromQL's quantile_over_time: linear interpolation
@@ -344,30 +481,157 @@ func (p *Prom) observeCPUWait(out map[Key]*Observation, sel string, window time.
 	}
 
 	end := time.Now().Truncate(cpuWaitStep)
+	start := end.Add(-window)
 	expr := stalledCandidatesExpr(sel, agentSel)
-	candidates, err := p.queryRangeByKey(expr, end.Add(-window), end, cpuWaitStep)
+	candidates, err := p.queryRangeByKey(expr, start, end, cpuWaitStep)
 	// A healthy cluster has no candidates at all, which is an answer, not an
 	// absent signal: the series that counts here is the stretch count above.
 	p.health = append(p.health, SignalHealth{Signal: SigCPUWait, Query: expr, Err: err, Series: len(got)})
 	if err != nil {
 		return
 	}
+	nodes := p.nodeStates(sel, agentSel, start, end)
 	for k, c := range got {
 		if c.Stretches == 0 {
 			continue
 		}
+		at := nodes.of(k, p.placement[k])
 		var n int
+		var runs runCounter
+		var last int64
 		for _, s := range candidates[k] {
-			// Every candidate below the ceiling already waited at least the
-			// idle floor, so the floor stands in for its wait.
-			if stalled(slowdownIdleFloor, s, c.Normal, c.HasNormal) {
+			// Only candidates come back, so a missing step between two of
+			// them is a stretch that was not stalled.
+			adjacent := last != 0 && s.t-last == int64(cpuWaitStep/time.Second)
+			last = s.t
+			// Every candidate below the ceiling waited at least the idle floor.
+			// The ones at the ceiling are checked where the node is known: the
+			// node test is about waiting at all.
+			wait := slowdownIdleFloor
+			if nodes.waited != nil && !nodes.waited[k][s.t] {
+				wait = 0
+			}
+			isStalled, confirmed := judge(wait, s.v, c.Normal, c.HasNormal, at(s.t))
+			if isStalled {
 				n++
 			}
+			runs.add(isStalled, confirmed, adjacent)
 		}
+		c.LongestRun, c.LongestConfirmedRun = runs.longest, runs.longestConfirmed
 		c.Stalled = min(float64(n)/float64(c.Stretches), 1)
+		c.NodeKnown, c.NodeContended = nodes.shares(p.placement[k], c.Stretches)
 		out[k].CPUWait = *c
 		out[k].Mark(SigCPUWait)
 	}
+}
+
+// Placement is where a container runs, for the node half of the CPU wait
+// rule: its node's address, as node-exporter's `instance` carries it, and
+// whether it may be pinned to some of that node's CPUs.
+type Placement struct {
+	NodeIP string
+	Pinned bool
+}
+
+// SetPlacement gives the CPU wait rule each container's node. A container it
+// does not list, or a Prom never given one, has no node context, and the
+// relative rule decides alone.
+func (p *Prom) SetPlacement(m map[Key]Placement) { p.placement = m }
+
+// The node's state per stretch, from node-exporter: run-queue wait per CPU over
+// the stretch, and its busiest minute. Rates over 2 minutes, so a 60-second
+// scrape interval still gives a value every minute.
+const (
+	nodeQueueExpr = `sum by (instance) (rate(node_schedstat_waiting_seconds_total[5m])) / count by (instance) (node_cpu_seconds_total{mode="idle"})`
+	nodeBusyExpr  = `max_over_time(` + nodeBusyMinute + `[5m:1m])`
+	// nodeMinutesExpr counts the minutes of the stretch that have a busy share.
+	nodeMinutesExpr = `count_over_time(` + nodeBusyMinute + `[5m:1m])`
+	nodeBusyMinute  = `(1 - sum by (instance) (rate(node_cpu_seconds_total{mode="idle"}[2m])) / count by (instance) (node_cpu_seconds_total{mode="idle"}))`
+	// stretchMinutes is how many minutes a stretch has.
+	stretchMinutes = 5
+)
+
+// nodeContext is the node half of the rule over the window.
+type nodeContext struct {
+	queue, busy, minutes map[string]map[int64]float64 // node IP -> stretch end -> value
+	waited               map[Key]map[int64]bool       // stretches a container waited at least the idle floor
+}
+
+// nodeStates reads the node half of the rule. Without placements there is
+// nothing to join it to, and it is not asked for. A failed or empty query is
+// no node context, never an idle node.
+func (p *Prom) nodeStates(sel, agentSel string, start, end time.Time) nodeContext {
+	nc := nodeContext{}
+	if len(p.placement) == 0 {
+		return nc
+	}
+	byIP := func(expr string) map[string]map[int64]float64 {
+		series, err := p.queryRangeSeries(expr, start, end, cpuWaitStep)
+		if err != nil {
+			return nil
+		}
+		out := map[string]map[int64]float64{}
+		for _, s := range series {
+			ip, ok := ipOf(s.labels["instance"])
+			if !ok {
+				continue
+			}
+			if out[ip] == nil {
+				out[ip] = map[int64]float64{}
+			}
+			for _, pt := range s.points {
+				out[ip][pt.t] = pt.v
+			}
+		}
+		return out
+	}
+	nc.queue, nc.busy, nc.minutes = byIP(nodeQueueExpr), byIP(nodeBusyExpr), byIP(nodeMinutesExpr)
+	wait, _, _ := cpuWaitExprs(sel, agentSel)
+	waited, err := p.queryRangeByKey(fmt.Sprintf(`max by (namespace,pod,container) (%s >= %g)`, wait, slowdownIdleFloor),
+		start, end, cpuWaitStep)
+	if err == nil {
+		nc.waited = map[Key]map[int64]bool{}
+		for k, pts := range waited {
+			nc.waited[k] = map[int64]bool{}
+			for _, pt := range pts {
+				nc.waited[k][pt.t] = true
+			}
+		}
+	}
+	return nc
+}
+
+// of returns the state of a container's node at each stretch end.
+func (nc nodeContext) of(k Key, pl Placement) func(t int64) NodeState {
+	return func(t int64) NodeState {
+		q, ok1 := nc.queue[pl.NodeIP][t]
+		b, ok2 := nc.busy[pl.NodeIP][t]
+		// A placement without wait data cannot tell a stretch that waited
+		// from one that did not, which the node test depends on.
+		known := pl.NodeIP != "" && ok1 && ok2 && nc.waited != nil
+		every := nc.minutes[pl.NodeIP][t] >= stretchMinutes
+		return NodeState{Known: known, Queue: q, BusyMax: b, EveryMinute: every, Pinned: pl.Pinned}
+	}
+}
+
+// shares is how much of the window the container's node was known, and
+// contended, as shares of the container's stretches.
+func (nc nodeContext) shares(pl Placement, stretches int) (known, contended float64) {
+	if pl.NodeIP == "" || stretches == 0 || nc.waited == nil {
+		return 0, 0
+	}
+	var k, c int
+	for t, q := range nc.queue[pl.NodeIP] {
+		if _, ok := nc.busy[pl.NodeIP][t]; !ok {
+			continue
+		}
+		k++
+		if q >= nodeContendedQueue {
+			c++
+		}
+	}
+	n := float64(stretches)
+	return min(float64(k)/n, 1), min(float64(c)/n, 1)
 }
 
 // pressureOK reports whether PSI produced believable data in this Observe.
@@ -384,9 +648,36 @@ func (p *Prom) pressureOK() bool {
 	return seen
 }
 
-// queryRangeByKey runs a range query and returns each container's values.
-// Steps with no value are left out, as Prometheus leaves them out.
-func (p *Prom) queryRangeByKey(expr string, start, end time.Time, step time.Duration) (map[Key][]float64, error) {
+// point is one step of a range query: Unix seconds and value.
+type point struct {
+	t int64
+	v float64
+}
+
+// queryRangeByKey runs a range query and returns each container's points in
+// time order. Steps with no value are left out, as Prometheus leaves them out.
+func (p *Prom) queryRangeByKey(expr string, start, end time.Time, step time.Duration) (map[Key][]point, error) {
+	series, err := p.queryRangeSeries(expr, start, end, step)
+	if err != nil {
+		return nil, err
+	}
+	out := map[Key][]point{}
+	for _, s := range series {
+		k := keyOf(s.labels)
+		out[k] = append(out[k], s.points...)
+	}
+	return out, nil
+}
+
+// rangeSeries is one series of a range query.
+type rangeSeries struct {
+	labels map[string]string
+	points []point
+}
+
+// queryRangeSeries runs a range query and returns every series with its points in
+// time order.
+func (p *Prom) queryRangeSeries(expr string, start, end time.Time, step time.Duration) ([]rangeSeries, error) {
 	body, err := p.transport.Get(p.ctx(), "/api/v1/query_range", url.Values{
 		"query": {expr},
 		"start": {strconv.FormatInt(start.Unix(), 10)},
@@ -412,20 +703,22 @@ func (p *Prom) queryRangeByKey(expr string, start, end time.Time, step time.Dura
 	if pr.Status != "success" {
 		return nil, fmt.Errorf("query failed: %s", pr.Error)
 	}
-	out := map[Key][]float64{}
+	out := make([]rangeSeries, 0, len(pr.Data.Result))
 	for _, r := range pr.Data.Result {
-		k := keyOf(r.Metric)
+		s := rangeSeries{labels: r.Metric}
 		for _, pt := range r.Values {
-			vs, ok := pt[1].(string)
-			if !ok {
+			ts, ok1 := pt[0].(float64)
+			vs, ok2 := pt[1].(string)
+			if !ok1 || !ok2 {
 				continue
 			}
 			v, err := strconv.ParseFloat(vs, 64)
 			if err != nil || v != v {
 				continue
 			}
-			out[k] = append(out[k], v)
+			s.points = append(s.points, point{int64(ts), v})
 		}
+		out = append(out, s)
 	}
 	return out, nil
 }

@@ -203,15 +203,17 @@ func aggregate(containers []discover.Container, obs map[metrics.Key]*metrics.Obs
 
 // mergeCPUWait folds one pod's CPU wait into its workload's, worst case per
 // field. The normal shown is the one of the most stalled pod, since that is
-// the pod the verdict is about.
+// the pod the verdict is about; among equally stalled pods, the highest, so a
+// never-quiet replica is not hidden by a quiet one.
 func mergeCPUWait(dst *metrics.CPUWait, c metrics.CPUWait, first bool) {
 	if first {
 		*dst = c
 		return
 	}
-	if c.Stalled > dst.Stalled {
+	if c.Stalled > dst.Stalled || (c.Stalled == dst.Stalled && c.HasNormal && c.Normal > dst.Normal) {
 		dst.Stalled, dst.Normal, dst.HasNormal = c.Stalled, c.Normal, c.HasNormal
 	}
+	dst.LongestRun = max(dst.LongestRun, c.LongestRun)
 	dst.Mean = max(dst.Mean, c.Mean)
 	dst.Stretches = max(dst.Stretches, c.Stretches)
 	switch {

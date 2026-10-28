@@ -65,6 +65,11 @@ func applySignalGaps(f *Finding) {
 			f.Verdict = Unverified
 		}
 	}
+	// Not blind, but the one saturation signal there is saw a stall it cannot
+	// classify; see maskUnusableCPUWait.
+	if f.cpuWaitStalledRun && f.HasCPUWait() && f.Verdict == Waste {
+		f.Verdict = Unverified
+	}
 
 	if !f.hasSignal(metrics.SigOOM) && f.RecMem > 0 && f.MemRequest > 0 && f.RecMem < f.MemRequest {
 		f.Reasons = append(f.Reasons, note(NoOOMHistory, "OOMKill history is unavailable, so a past failure at this "+

@@ -150,3 +150,143 @@ func TestCPUWaitAcrossPodsTakesWorstCoverage(t *testing.T) {
 		t.Errorf("low coverage on one replica ignored: %v", analyze.ReasonTexts(f.Reasons))
 	}
 }
+
+// A starvation the stalled share dilutes: serious, and short against the
+// window. The rule cannot tell it from a load peak its own normal does not
+// cover, so a reduction is held, and nothing is called SATURATED.
+func TestCPUWaitStalledRunHoldsReduction(t *testing.T) {
+	for name, c := range map[string]struct {
+		stalled float64
+		run     int
+		want    analyze.Verdict
+	}{
+		"nightly batch, an hour a night": {0.04, 12, analyze.Unverified},
+		"20 minutes once":                {0.002, 4, analyze.Unverified},
+		"15 minutes once":                {0.002, 3, analyze.Waste},
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := starvedWait
+			w.Stalled, w.LongestRun = c.stalled, c.run
+			f := judgeWait(t, w)
+			if f.Verdict != c.want {
+				t.Fatalf("verdict %s, want %s: %v", f.Verdict, c.want, analyze.ReasonTexts(f.Reasons))
+			}
+			if c.want == analyze.Unverified {
+				if !hasCode(f, analyze.CPUWaitStalledRun) {
+					t.Errorf("held without saying why: %v", analyze.ReasonTexts(f.Reasons))
+				}
+				// The signal is sound: it is not reported as missing.
+				if !f.HasCPUWait() || hasCode(f, analyze.NoSaturationSignal) {
+					t.Errorf("CPU wait withdrawn for a stalled run: %v", analyze.ReasonTexts(f.Reasons))
+				}
+			}
+		})
+	}
+}
+
+// Starved by the share, a run is not news.
+func TestCPUWaitStalledRunOnSaturated(t *testing.T) {
+	w := starvedWait
+	w.LongestRun = 50
+	f := judgeWait(t, w)
+	if f.Verdict != analyze.Saturated || hasCode(f, analyze.CPUWaitStalledRun) {
+		t.Fatalf("verdict %s, reasons %v", f.Verdict, analyze.ReasonTexts(f.Reasons))
+	}
+}
+
+// A container contended all the time has its contention for a normal, and
+// nothing is "twice normal". Its CPU wait is not used, unless it already
+// shows starvation.
+func TestCPUWaitNeverQuiet(t *testing.T) {
+	w := starvedWait
+	w.Normal, w.Stalled = 0.95, 0
+	f := judgeWait(t, w)
+	if f.Verdict != analyze.Unverified || !hasCode(f, analyze.CPUWaitNeverQuiet) {
+		t.Fatalf("always contended: verdict %s, reasons %v", f.Verdict, analyze.ReasonTexts(f.Reasons))
+	}
+
+	w.Stalled = 0.2
+	if f := judgeWait(t, w); f.Verdict != analyze.Saturated || hasCode(f, analyze.CPUWaitNeverQuiet) {
+		t.Fatalf("always contended and over the ceiling: verdict %s, reasons %v", f.Verdict, analyze.ReasonTexts(f.Reasons))
+	}
+}
+
+// With node context, the node decides the two cases the relative rule cannot.
+// A run its node confirmed is starvation however short against the window; a
+// run the relative test alone found still only holds a reduction. A container
+// with no quiet normal is starved if its node was contended (its stretches are
+// confirmed, so its share is high) and judged by its normal if not.
+func TestCPUWaitNodeContextVerdicts(t *testing.T) {
+	for name, c := range map[string]struct {
+		w    func(metrics.CPUWait) metrics.CPUWait
+		want analyze.Verdict
+		code analyze.Code
+	}{
+		"20 minutes in a week, node confirmed": {func(w metrics.CPUWait) metrics.CPUWait {
+			w.Stalled, w.LongestRun, w.LongestConfirmedRun, w.NodeKnown = 0.002, 4, 4, 1
+			return w
+		}, analyze.Saturated, analyze.CPUWaitNodeConfirmed},
+		"20 minutes in a week, relative only": {func(w metrics.CPUWait) metrics.CPUWait {
+			w.Stalled, w.LongestRun, w.LongestConfirmedRun, w.NodeKnown = 0.002, 4, 0, 1
+			return w
+		}, analyze.Unverified, analyze.CPUWaitStalledRun},
+		"15 minutes confirmed: under the run": {func(w metrics.CPUWait) metrics.CPUWait {
+			w.Stalled, w.LongestRun, w.LongestConfirmedRun, w.NodeKnown = 0.0015, 3, 3, 1
+			return w
+		}, analyze.Waste, ""},
+		"never quiet, node contended all along": {func(w metrics.CPUWait) metrics.CPUWait {
+			w.Normal, w.Stalled, w.LongestConfirmedRun, w.NodeKnown, w.NodeContended = 0.95, 1, 2016, 1, 1
+			return w
+		}, analyze.Saturated, analyze.CPUWaitRelative},
+		"never quiet, node not contended (k6, chatty)": {func(w metrics.CPUWait) metrics.CPUWait {
+			w.Normal, w.Stalled, w.NodeKnown, w.NodeContended = 0.95, 0, 1, 0
+			return w
+		}, analyze.Waste, ""},
+		"never quiet, node unknown": {func(w metrics.CPUWait) metrics.CPUWait {
+			w.Normal, w.Stalled, w.NodeKnown = 0.95, 0, 0
+			return w
+		}, analyze.Unverified, analyze.CPUWaitNeverQuiet},
+		"never quiet, node known for too little of the window": {func(w metrics.CPUWait) metrics.CPUWait {
+			w.Normal, w.Stalled, w.NodeKnown = 0.95, 0, 0.3
+			return w
+		}, analyze.Unverified, analyze.CPUWaitNeverQuiet},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := judgeWait(t, c.w(starvedWait))
+			if f.Verdict != c.want {
+				t.Fatalf("verdict %s, want %s: %v", f.Verdict, c.want, analyze.ReasonTexts(f.Reasons))
+			}
+			if c.code != "" && !hasCode(f, c.code) {
+				t.Errorf("missing %s: %v", c.code, analyze.ReasonTexts(f.Reasons))
+			}
+			if c.want == analyze.Waste && (hasCode(f, analyze.CPUWaitNeverQuiet) || hasCode(f, analyze.CPUWaitStalledRun)) {
+				t.Errorf("held without cause: %v", analyze.ReasonTexts(f.Reasons))
+			}
+		})
+	}
+}
+
+// Confirmed starvation on a container using little of its allocation is the
+// node's contention, not a shortage of its own: a reduction is allowed.
+func TestCPUWaitNodeConfirmedBelowAllocation(t *testing.T) {
+	w := starvedWait
+	w.Stalled, w.LongestRun, w.LongestConfirmedRun, w.NodeKnown = 0.002, 4, 4, 1
+	cs, obs := waitContainer(w)
+	for _, o := range obs {
+		o.CPUUsageMax, o.CPUSteadyMax = 0.1, 0.1
+	}
+	f := judge(t, cs, obs)
+	if f.Verdict == analyze.Saturated || !hasCode(f, analyze.NodeContention) {
+		t.Fatalf("verdict %s, reasons %v", f.Verdict, analyze.ReasonTexts(f.Reasons))
+	}
+}
+
+// PSI decides wherever it exists: node context changes nothing there.
+func TestCPUWaitNodeContextIgnoredWithPSI(t *testing.T) {
+	w := starvedWait
+	w.Stalled, w.LongestRun, w.LongestConfirmedRun, w.NodeKnown = 0.002, 4, 4, 1
+	f := judgeWait(t, w, metrics.SigPSI)
+	if hasCode(f, analyze.CPUWaitNodeConfirmed) {
+		t.Fatalf("CPU wait read beside PSI: %v", analyze.ReasonTexts(f.Reasons))
+	}
+}

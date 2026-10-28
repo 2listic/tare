@@ -156,8 +156,20 @@ func CPUWaitDetail(f analyze.Finding) string {
 	if c.Busy {
 		cover = fmt.Sprintf("%.0f%%", c.Coverage*100)
 	}
-	return fmt.Sprintf("stalled %.1f%% of %d stretches   normal %s   mean %.3f s/s   coverage %s",
-		c.Stalled*100, c.Stretches, cpuWaitNormal(f), c.Mean, cover)
+	return fmt.Sprintf("stalled %.1f%% of %d stretches   longest run %s   normal %s   mean %.3f s/s   coverage %s",
+		c.Stalled*100, c.Stretches, runDuration(c.LongestRun), cpuWaitNormal(f), c.Mean, cover)
+}
+
+// runDuration renders a count of 5-minute stretches as time.
+func runDuration(n int) string {
+	switch m := n * 5; {
+	case n == 0:
+		return "-"
+	case m < 120:
+		return fmt.Sprintf("%dm", m)
+	default:
+		return fmt.Sprintf("%.1fh", float64(m)/60)
+	}
 }
 
 func Milli(m int64) string {
