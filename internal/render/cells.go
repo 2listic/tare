@@ -8,6 +8,8 @@ import (
 
 	"github.com/2listic/tare/internal/analyze"
 	"github.com/2listic/tare/internal/ceilings"
+	"github.com/2listic/tare/internal/discover"
+	"github.com/2listic/tare/internal/metrics"
 	"github.com/2listic/tare/internal/packing"
 	"github.com/2listic/tare/internal/report"
 )
@@ -172,6 +174,60 @@ func MissingNames(f analyze.Finding) []string {
 		names = append(names, string(s))
 	}
 	return names
+}
+
+// GPUUse is a GPU container's measured device use as cells. "?" is a signal
+// that was not measured. On a shared device or a MIG slice the exporter's
+// figures are not this container's, so the cell names why it is withheld
+// instead of printing someone else's number.
+type GPUUse struct{ IdleDevices, Busy, SMActive, VRAM string }
+
+func GPUCells(f analyze.Finding) GPUUse {
+	withheld := ""
+	switch {
+	case discover.IsMIGResource(f.GPUResource):
+		withheld = "mig"
+	case f.GPUShared:
+		withheld = "shared"
+	}
+	if withheld != "" {
+		return GPUUse{withheld, withheld, withheld, withheld}
+	}
+	u := GPUUse{"?", "?", "?", "?"}
+	if f.Have[metrics.SigGPUBusy] {
+		u.IdleDevices = strconv.Itoa(f.GPUIdleDevices)
+		u.Busy = gpuPct(f.GPUBusyAvg) + "/" + gpuPct(f.GPUBusyMax) + "%"
+	}
+	if f.Have[metrics.SigGPUSMActive] {
+		u.SMActive = gpuPct(f.GPUSMActiveAvg) + "/" + gpuPct(f.GPUSMActiveP95) + "%"
+	}
+	if f.Have[metrics.SigGPUMem] {
+		u.VRAM = "0"
+		if f.GPUMemMax > 0 {
+			u.VRAM = analyze.HumanBytes(int64(f.GPUMemMax))
+		}
+	}
+	return u
+}
+
+// gpuPct keeps a measured zero apart from a small number: zero busy-time is
+// the proof of an idle device, and rounding 0.4% down to it would forge one.
+func gpuPct(frac float64) string {
+	if frac > 0 && frac < 0.01 {
+		return "<1"
+	}
+	return fmt.Sprintf("%.0f", frac*100)
+}
+
+// GPUCodes is the GPU and VRAM evidence codes of a finding.
+func GPUCodes(f analyze.Finding) []string {
+	var out []string
+	for _, r := range f.Reasons {
+		if c := string(r.Code); strings.HasPrefix(c, "GPU_") || strings.HasPrefix(c, "VRAM_") {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // freedLabel is the nodes tare's recommendations free. Pinned pods held their

@@ -1868,6 +1868,19 @@ every pod on a time-sliced device is unverified.
 End to end on `tare-gpu`: the spinner reports GPU_BUSY_UNVERIFIED with
 `gpu-sm-active ABSENT`. GPU_IDLE awaits a window of sleeper history.
 
+Later the same day: the sleeper reports GPU_IDLE over 2h, but only once the
+window had slid past the handover. One minute earlier, the same report said
+GPU_UNDERUSED. The cause was a single sample of 100 at 19:43:13 that was
+attributed to the sleeper. The spinner's last sample was 19:42:43 and the
+sleeper started at 19:42:58. GPU_UTIL is a trailing average over the
+sampling period, so the first sample after a handover carries the previous
+holder's work under the new holder's name. This error points in the safe
+direction: it hides an idle device and never invents use. The cost is that
+any pod that inherits a device from a busy one is denied GPU_IDLE for one
+full window. That was left as it is. Dropping a holder's first sample would
+fix this case, and it would also erase the first sample of a pod that really
+does start working at once.
+
 ## Roadmap after v0.1
 
 - **v0.2**: CRD for policy and scoping; degraded no-Prometheus mode; PR bot

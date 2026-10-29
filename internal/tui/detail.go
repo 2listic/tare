@@ -64,6 +64,11 @@ func tuiDetail(f analyze.Finding) []string {
 	out = append(out,
 		fmt.Sprintf("%-15spsi %s   throttle %s   oom %s   restarts %s", "pressure", psi, thr, oom, restarts),
 		fmt.Sprintf("%-15sqos %s   pods %d   samples %d", "pod", dash(f.QoS), f.Pods, f.Samples))
+	if f.GPUs > 0 {
+		u := render.GPUCells(f)
+		out = append(out, fmt.Sprintf("%-15s%d %s   idle %s   busy %s   sm %s   vram %s",
+			"gpu", f.GPUs, f.GPUResource, u.IdleDevices, u.Busy, u.SMActive, u.VRAM))
+	}
 	if len(f.Nodes) > 0 {
 		out = append(out, fmt.Sprintf("%-15s%s", "nodes", strings.Join(f.Nodes, " ")))
 	}
