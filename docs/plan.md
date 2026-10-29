@@ -1820,6 +1820,53 @@ recreating `tare-test` destroys its Prometheus history. Setup in
    **Attribution rule:** use `exported_*` when present; otherwise use
    `namespace/pod/container` only when discovery says that pod requests a GPU.
    The exporter requests none, so it can never be credited with a device.
+3. **`FB_USED` is the device's, not the pod's.** The unheld device reads 8MiB,
+   the host's Xorg, and the pod that takes it inherits the figure. Harmless
+   while VRAM is never a reason to lower anything; fatal the day it is.
+
+### What shipped (same day)
+
+`metrics.GPUObserver` (`internal/metrics/gpu.go`), optional like
+`NodeObserver`, attributes DCGM series by the rule above, measures coverage
+from timestamps (dcgm-exporter scrapes every 30s, so `expectedSamples` would
+call every device half covered), records devices that never ran a kernel, and
+detects two pods holding one device at once (more than 5 minutes of overlap; a
+rollout's hand-over is not sharing). A negative control in the style of
+`flagDeadPressure`: GPU pods exist, the exporter answers, and no series names
+any of them, so the signals are marked Suspect and nothing is read as idle. It
+counts owners before the namespace filter, or `-n web` would condemn a working
+exporter.
+
+Verdicts (`applyGPUUsage`, `internal/analyze/gpu.go`): GPU_IDLE,
+GPU_DEVICE_UNUSED, GPU_UNDERUSED, GPU_BUSY_UNVERIFIED, GPU_CPU_BOUND,
+GPU_NOT_MEASURED, GPU_SHARED_UNATTRIBUTED, GPU_MIG_UNVERIFIED. None is
+patched. Two changes to the CPU path: `isIdle` no longer calls a GPU holder
+IDLE unless its device is proven idle, and `holdCPUForGPU` keeps a GPU
+workload's CPU request, because a GPU short of host CPU shows as an idle
+device, not as CPU pressure. The lab spinner confirmed it: `cudaDeviceSynchronize`
+busy-waits, and the spinner's CPU recommendation went from 50m to 1150m.
+
+**Correction to the plan written this morning.** It said GPU_UNDERUSED needs SM
+activity and is unreachable on GeForce. Wrong: busy-time bounds use from
+above, so a LOW busy-time proves underuse just as zero proves idleness. Only a
+high one is unverifiable. GPU_UNDERUSED now reads SM p95 when the card exports
+it and mean busy-time otherwise; GPU_BUSY_UNVERIFIED is reserved for high
+busy-time without SM.
+
+**MIG, found while answering "does this work on any GPU".** Discover counted
+only `nvidia.com/gpu`, so a pod requesting `nvidia.com/mig-1g.10gb` was
+`GPUs=0` and got the CPU-only treatment. Worse, once counted, the existing VRAM
+fit check would have compared the model against the node's whole-device
+memory label: an 8B fp16 model "fits" an 80GB A100 and cannot load in its 10GB
+slice. MIG slices are now GPU holders, the fit check refuses them
+(VRAM_MIG_UNCHECKED), and no usage verdict is drawn for them
+(GPU_MIG_UNVERIFIED) until a MIG card shows what dcgm-exporter attributes to
+a slice. Node sharing is read from GFD (`gpu.replicas > 1`, a
+`sharing-strategy` other than `none`) because whether the exporter names
+every pod on a time-sliced device is unverified.
+
+End to end on `tare-gpu`: the spinner reports GPU_BUSY_UNVERIFIED with
+`gpu-sm-active ABSENT`. GPU_IDLE awaits a window of sleeper history.
 
 ## Roadmap after v0.1
 

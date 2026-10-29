@@ -1,6 +1,7 @@
 package analyze
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -171,5 +172,18 @@ func TestOllamaKeepAliveSurfacesWithoutAFitCheck(t *testing.T) {
 	// the keep-alive finding still has to reach the report.
 	if len(f.Ceilings) == 0 {
 		t.Fatal("the keep-alive ceiling must be detected")
+	}
+}
+
+// The node label is the whole device's memory. On a 1g.10gb slice of an 80GB
+// A100, an 8B fp16 model "fits" against the label and cannot load in the
+// slice, so the check must refuse rather than pass.
+func TestMIGSliceIsNotFitAgainstTheWholeDevice(t *testing.T) {
+	f := vllmFinding("--model", "meta-llama/Llama-3.1-8B-Instruct")
+	f.GPUResource = "nvidia.com/mig-1g.10gb"
+	applyInference(f, inv(gpuNode("gpu-0", "NVIDIA-A100-SXM4-80GB", 80)))
+	got := func(c Code) bool { return slices.ContainsFunc(f.Reasons, func(r Reason) bool { return r.Code == c }) }
+	if got(VRAMFits) || !got(VRAMMIGUnchecked) {
+		t.Errorf("reasons %v, want VRAM_MIG_UNCHECKED and no fit", f.Reasons)
 	}
 }

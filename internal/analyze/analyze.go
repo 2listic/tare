@@ -94,10 +94,12 @@ func RunWithCluster(containers []discover.Container, obs map[metrics.Key]*metric
 		// above made stale; applySignalGaps reads the final numbers to say
 		// which of them stand on a missing signal.
 		c := cl.Constraints[discover.ConstraintKey(f.Namespace, f.Workload)]
+		markGPUSharing(f, cl.Nodes)
 		decide(f, window, th)
 		holdGuaranteed(f, c)
 		applyNodes(f, cl.Nodes, cl.NodeUtil, th)
 		applyInference(f, cl.Nodes)
+		applyGPUUsage(f, window, th)
 		applyAuthored(f, f.Authored)
 		authoredQoSNote(f, f.Authored)
 		applyConstraints(f, c)
@@ -136,6 +138,7 @@ func aggregate(containers []discover.Container, obs map[metrics.Key]*metrics.Obs
 				CPULimit: c.CPULimit, MemLimit: c.MemLimit,
 				WorkloadKind: c.WorkloadKind,
 				GPUs:         c.GPUs,
+				GPUResource:  c.GPUResource,
 				Authored:     c.Authored,
 				Ceilings:     ceilings.Detect(c.Spec),
 			}
@@ -231,6 +234,43 @@ func fold(f *Finding, o *metrics.Observation, live bool) {
 	}
 	if o.OOMEvents > 0 {
 		f.OOMKilled = true
+	}
+	if o.GPU != nil {
+		foldGPU(f, o.GPU)
+	}
+}
+
+// foldGPU is fold for device use: the worst case for every value, except the
+// idle device count, which is the fewest any pod had - a count every replica
+// can give up, not one that only the quietest replica could.
+func foldGPU(f *Finding, g *metrics.GPUObservation) {
+	f.GPUBusyMax = max(f.GPUBusyMax, g.BusyMax)
+	f.GPUBusyAvg = max(f.GPUBusyAvg, g.BusyAvg)
+	f.GPUSMActiveAvg = max(f.GPUSMActiveAvg, g.SMActiveAvg)
+	f.GPUSMActiveP95 = max(f.GPUSMActiveP95, g.SMActiveP95)
+	f.GPUMemMax = max(f.GPUMemMax, g.MemMax)
+	if f.gpuPods == 0 || len(g.IdleDevices) < f.GPUIdleDevices {
+		f.GPUIdleDevices = len(g.IdleDevices)
+	}
+	f.gpuPods++
+	if g.FirstSeen > 0 && (f.GPUFirstSeen == 0 || g.FirstSeen < f.GPUFirstSeen) {
+		f.GPUFirstSeen = g.FirstSeen
+	}
+	f.GPULastSeen = max(f.GPULastSeen, g.LastSeen)
+	for _, p := range g.SharedWith {
+		if !slices.Contains(f.GPUSharedWith, p) {
+			f.GPUSharedWith = append(f.GPUSharedWith, p)
+		}
+	}
+	if f.Have == nil {
+		f.Have = map[metrics.Signal]bool{}
+	}
+	for sig, ok := range map[metrics.Signal]bool{
+		metrics.SigGPUBusy: g.HasBusy, metrics.SigGPUSMActive: g.HasSM, metrics.SigGPUMem: g.HasMem,
+	} {
+		if ok {
+			f.Have[sig] = true
+		}
 	}
 }
 

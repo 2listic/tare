@@ -3,8 +3,10 @@ package discover
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -57,6 +59,12 @@ type Node struct {
 	GPUProduct  string
 	GPUMemBytes int64
 	MIGCapable  bool
+
+	// GPUShared is set when GPU Feature Discovery says each physical device
+	// is advertised more than once (time-slicing or MPS replicas). Pods on
+	// such a node share a device that per-device metrics cannot split
+	// between them, whatever the metrics' pod labels say.
+	GPUShared bool
 
 	// Schedulable is false for a cordoned node. Such a node still runs its
 	// pods, so it counts for current placement and must not count as a
@@ -211,6 +219,20 @@ func (inv Inventory) ByIP(ip string) (Node, bool) {
 // gpuResources are the extended resources that mean "a whole accelerator".
 var gpuResources = []corev1.ResourceName{"nvidia.com/gpu", "amd.com/gpu", "intel.com/gpu"}
 
+// migPrefix is the resource family MIG's mixed strategy advertises, one name
+// per slice profile: nvidia.com/mig-1g.10gb, nvidia.com/mig-3g.40gb.
+const migPrefix = "nvidia.com/mig-"
+
+// IsGPUResource reports whether a resource name allocates an accelerator or a
+// slice of one.
+func IsGPUResource(name corev1.ResourceName) bool {
+	return slices.Contains(gpuResources, name) || IsMIGResource(string(name))
+}
+
+// IsMIGResource reports whether a resource name is a MIG slice rather than a
+// whole device.
+func IsMIGResource(name string) bool { return strings.HasPrefix(name, migPrefix) }
+
 // readGPU fills in what the node says about its accelerators.
 //
 // Every field here is optional in practice. A cluster running the NVIDIA GPU
@@ -227,6 +249,14 @@ func readGPU(n *corev1.Node, out *Node) {
 	}
 	out.GPUProduct = n.Labels["nvidia.com/gpu.product"]
 	out.MIGCapable = n.Labels["nvidia.com/mig.capable"] == "true"
+	// Both labels are GFD's, measured on the lab card unshared as
+	// gpu.replicas=1 and gpu.sharing-strategy=none.
+	if r, err := strconv.Atoi(n.Labels["nvidia.com/gpu.replicas"]); err == nil && r > 1 {
+		out.GPUShared = true
+	}
+	if s := n.Labels["nvidia.com/gpu.sharing-strategy"]; s != "" && s != "none" {
+		out.GPUShared = true
+	}
 	// nvidia.com/gpu.memory is in MiB, as a plain integer label value.
 	if v := n.Labels["nvidia.com/gpu.memory"]; v != "" {
 		if mib, err := strconv.ParseInt(v, 10, 64); err == nil && mib > 0 {
