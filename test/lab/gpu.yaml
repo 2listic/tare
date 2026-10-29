@@ -1,0 +1,91 @@
+# GPU workloads for the tare-gpu cluster (see README.md, "GPU cluster").
+# Each one is a claim about a verdict, not a demo.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gpu-lab
+---
+# Holds a whole device and never touches it. Must be GPU_IDLE.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gpu-sleeper
+  namespace: gpu-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: gpu-sleeper}
+  template:
+    metadata:
+      labels: {app: gpu-sleeper}
+    spec:
+      containers:
+        - name: sleeper
+          image: busybox:1.37
+          command: ["sleep", "infinity"]
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {memory: 32Mi, nvidia.com/gpu: 1}
+---
+# One thread in one block, spinning on clock64() and relaunched forever. The
+# device has a kernel resident nearly 100% of the time, so GPU-Util reads ~100%,
+# while one SM of thirty does any work. Must never be called busy or OK.
+#
+# There is one GPU and the sleeper holds it: run these one at a time with
+#   kubectl -n gpu-lab scale deploy/gpu-sleeper --replicas=0
+#   kubectl -n gpu-lab scale deploy/gpu-spinner --replicas=1
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gpu-spinner-src
+  namespace: gpu-lab
+data:
+  spin.cu: |
+    #include <cstdio>
+    __global__ void spin(long long cycles) {
+      long long start = clock64();
+      while (clock64() - start < cycles) {}
+    }
+    int main() {
+      for (;;) {
+        spin<<<1, 1>>>(1000000000LL);
+        cudaError_t e = cudaDeviceSynchronize();
+        if (e != cudaSuccess) { fprintf(stderr, "%s\n", cudaGetErrorString(e)); return 1; }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gpu-spinner
+  namespace: gpu-lab
+spec:
+  replicas: 0
+  selector:
+    matchLabels: {app: gpu-spinner}
+  template:
+    metadata:
+      labels: {app: gpu-spinner}
+    spec:
+      initContainers:
+        # CUDA 12.2 is the newest the lab's 535 driver runs.
+        - name: build
+          image: nvidia/cuda:12.2.2-devel-ubuntu22.04
+          command: ["nvcc", "-arch=sm_86", "-o", "/out/spin", "/src/spin.cu"]
+          volumeMounts:
+            - {name: src, mountPath: /src}
+            - {name: out, mountPath: /out}
+      containers:
+        - name: spinner
+          image: nvidia/cuda:12.2.2-base-ubuntu22.04
+          command: ["/out/spin"]
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi, nvidia.com/gpu: 1}
+          volumeMounts:
+            - {name: out, mountPath: /out}
+      volumes:
+        - name: src
+          configMap: {name: gpu-spinner-src}
+        - name: out
+          emptyDir: {}
