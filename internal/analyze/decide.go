@@ -180,10 +180,16 @@ func assessSaturation(f *Finding, th Thresholds) starved {
 					"while using %.0f%% of its allocation: its tasks waited for CPU %s",
 				f.CPUWait.Stalled*100, th.CPUWaitStalledShare*100, util*100, cpuWaitStall(f.CPUWait))))
 		} else {
+			// The run may be a short pod's and the share the quiet history
+			// beside it: the run is part of the window whichever.
+			share := f.CPUWait.Stalled
+			if f.CPUWait.Stretches > 0 {
+				share = max(share, float64(f.CPUWait.LongestConfirmedRun)/float64(f.CPUWait.Stretches))
+			}
 			f.Reasons = append(f.Reasons, measured(CPUWaitNodeConfirmed, float64(f.CPUWait.LongestConfirmedRun), float64(th.CPUWaitStalledRun), Count, fmt.Sprintf(
 				"CPU wait (tare-agent; this container has no PSI) shows its tasks waiting for CPU for %s in a row while its node was short of CPU, "+
 					"using %.0f%% of its allocation. Only %.1f%% of the window, but the node confirms the cause: a starvation at one time of day, a batch run or an incident",
-				stretchesDuration(f.CPUWait.LongestConfirmedRun), util*100, f.CPUWait.Stalled*100)))
+				stretchesDuration(f.CPUWait.LongestConfirmedRun), util*100, share*100)))
 		}
 	} else if f.throttleStalled(th) && wantsCPU {
 		f.Verdict, st.cpu = Saturated, true
@@ -195,12 +201,13 @@ func assessSaturation(f *Finding, th Thresholds) starved {
 	// A throttled container's stalls are its own quota, however low its
 	// averaged usage reads: CFS enforces the quota per 100ms period and a
 	// 5-minute rate hides the bursts that hit it. Blaming the node there
-	// contradicts LIMIT_NOT_NODE on the same row.
+	// contradicts LIMIT_NOT_NODE on the same row, whichever signal saw the
+	// stall.
 	if !wantsCPU && f.psiStalled(th) && !f.throttleStalled(th) {
 		f.Reasons = append(f.Reasons, measured(NodeContention, f.PSIWaitingPeak, th.PSIWaiting, SecPerSec, fmt.Sprintf(
 			"CPU pressure peaked at %.3f s/s but the container used only %.0f%% of its allocation (window mean pressure %.4f), so this is contention on the node rather than a shortage of its own: a larger request would not remove it",
 			f.PSIWaitingPeak, util*100, f.PSIWaiting)))
-	} else if !wantsCPU && f.cpuWaitStalled(th) {
+	} else if !wantsCPU && f.cpuWaitStalled(th) && !f.throttleStalled(th) {
 		f.Reasons = append(f.Reasons, measured(NodeContention, f.CPUWait.Stalled, th.CPUWaitStalledShare, Ratio, fmt.Sprintf(
 			"CPU wait (tare-agent) shows it stalled in %.0f%% of 5-minute stretches but the container used only %.0f%% of its allocation, so this is contention on the node rather than a shortage of its own: a larger request would not remove it",
 			f.CPUWait.Stalled*100, util*100)))

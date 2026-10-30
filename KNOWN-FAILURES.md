@@ -1139,7 +1139,97 @@ OK to UNVERIFIED: their replaced pods carried sustained pressure up to 0.12
 and 19 restarts from when the cluster was crowded onto two nodes. That
 evidence existed all along and was being dropped.
 
+## 55. An hour-old pod's CPU wait decided a workload with a week behind it
+
+**Looked like:** nothing on a cluster yet. Found reading the merge of 54 into
+the CPU wait work, and confirmed by tests written to the behaviour wanted.
+
+**Was actually:** a workload's CPU wait was merged field by field, each from
+the worst pod, and the checks ran on the merged row. The stall came from the
+most stalled pod and the history from the longest one, so a pod that lived an
+hour, stalled at twice a normal made of that hour, made a workload SATURATED
+on the strength of another pod's week. Alone it would have been withdrawn as
+`CPU_WAIT_SHORT_HISTORY`. 54 made this common, since gone pods are often short
+ones, but a replica added by a scale-up did the same while live. And a gone
+pod the agent barely saw withdrew the whole row as `CPU_WAIT_LOW_COVERAGE`,
+though the live pod beside it was seen well. Separately, the node-context
+fields (`LongestConfirmedRun`, `NodeKnown`, `NodeContended`) were never
+merged: they were the first pod's, so a confirmed starvation on any other
+replica was lost.
+
+**Fixed by:** a pod's stall counts only if it has the history for its own
+normal; short pods decide only while no pod has one, and the row is then
+withdrawn as short history as before. A gone pod's CPU wait is used only if it
+would pass both checks alone. A live replica's low coverage still doubts the
+workload, because that replica runs now. The node fields travel with the stall,
+and the confirmed run takes the worst pod's. Tests:
+`internal/analyze/cpuwait_history_test.go`. The catalog sweep
+(`TestCPUWaitOnCatalog`) is unchanged at 28/54.
+
+**And then, as first written, hid a starved replacement.** On a one-hour run
+on a test cluster (2026-10-29, gates scaled to the hour, PSI hidden), a
+Deployment was rolled out while a CPU hog filled its node: its new pod waited
+1.18 s per second run for 22 minutes, node-confirmed, beside its predecessor's
+quiet history. The fix above dropped the short pod's whole CPU wait, confirmed run
+included, and called the workload OK where PSI and the code before it said
+SATURATED. A confirmed run needs no normal (the node established its cause), so
+the confirmed run is now taken from every pod, short or not. The
+`CPU_WAIT_NODE_CONFIRMED` text gives the run's own share of the window when the
+stalled share beside it is lower. `TestShortPodsConfirmedRunCounts`.
+
+## 56. A limit it never reached was blamed, beside node contention
+
+**Looked like:** `LIMIT_NOT_NODE: ... the constraint is this container's own
+limit, not the machine` on a Guaranteed pod with a 300m limit, using 14% of it.
+
+**Was actually:** throttled in 0% of periods, and `NODE_CONTENTION` on the same
+row: 49 the other way round. `LIMIT_NOT_NODE` took CPU pressure as evidence
+against the limit wherever throttling was below the threshold. Pressure is
+meant to stand in for CFS counters that are missing (`TestPSIAloneIsEnough`,
+as it was), but measured-and-zero was read the same as missing. Pressure says
+the tasks waited, not why: a CPU hog beside it filled the node for a few minutes
+of a window the node averaged 43% over, and the idle gates, on whole-window figures, could not see
+the two were at the same time. Separately, the CPU wait branch of
+`NODE_CONTENTION` had no throttle guard, so 49 could still happen on a
+container without PSI.
+
+**Caught by:** a 15-minute report during a run on a test cluster,
+2026-10-29.
+
+**Fixed by:** pressure stands in for throttling only where throttling is not
+measured; the CPU wait `NODE_CONTENTION` is withheld from a throttle-stalled
+container, as the PSI one is. `TestUnthrottledLimitIsNotBlamed`.
+
+**And where throttling is not measured,** pressure on a node idle on average
+cannot tell the quota from the neighbours either, and the row got both reasons.
+It now gets `THROTTLE_UNKNOWN` instead of either, naming the missing CFS
+metric, and the `NODE_CONTENTION` already on the row is withdrawn
+(`TestPSIAloneCannotTellLimitFromNode`, formerly `TestPSIAloneIsEnough`;
+`TestUnmeasuredThrottlingBlamesNeither`). Without node figures the row keeps
+`NODE_CONTENTION` (`TestSuppressedPressureIsExplained`), beside
+`NODE_UTIL_UNKNOWN` where the nodes were known. Telling the two apart needs the time: whether
+the node was full in the stretches the container waited, which the CPU wait
+rule already reads per stretch.
+
 ## Open, and not yet solved
+
+**A workload redeployed more than once a day never has usable CPU wait.**
+CPU wait compares each pod with its own normal (55), which needs a day of
+history, and every rollout starts new pods. Such a workload is UNVERIFIED with
+`CPU_WAIT_SHORT_HISTORY` however long the window: safe, and the agent is of no
+use to it. A normal per workload, pooled across its pods, is not the free fix
+it looks like. PromQL cannot take one quantile over time and series at once,
+so the stretches would be fetched and pooled in Go, and that is nearly every
+busy stretch rather than the candidates `stalledCandidatesExpr` keeps small. A
+rollout runs new code, whose normal may differ: pooled with the old version's,
+a new version that simply waits more per second run reads as stalled, or hides
+a real stall. It changes the rule for replicas side by side, not only for
+replacements. The rule's 98.5% and 99.6% were measured per container on
+one-hour runs, which cannot show rollouts spread over days, and
+`agent/compare-pressure` applies it per container. The first thing to try is a
+normal per ReplicaSet (one pod template, so one version), which covers
+evictions and reschedules but not frequent deploys, measured on
+`test/longrun` before anything wider.
 
 **The kubelet can lie about PSI. Mitigated 2026-09-20, not eliminated.**
 Kubernetes issue #136333: on hosts without kernel PSI support, the kubelet

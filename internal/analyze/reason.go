@@ -68,6 +68,9 @@ const (
 	NoMemTrendOnRaise  Code = "NO_MEM_TREND_ON_RAISE"
 	NoMemP95           Code = "NO_MEM_P95"
 	NodeUtilUnknown    Code = "NODE_UTIL_UNKNOWN"
+	// ThrottleUnknown: pressure under a CPU limit on a node idle on average,
+	// with throttling unmeasured, so neither the limit nor the node is blamed.
+	ThrottleUnknown Code = "THROTTLE_UNKNOWN"
 	// CPU wait was measured and not used: the agent saw too little of the
 	// container's CPU time, or the container has too little history for its
 	// own normal.

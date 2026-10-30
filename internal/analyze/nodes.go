@@ -2,6 +2,7 @@ package analyze
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/2listic/tare/internal/ceilings"
@@ -49,7 +50,11 @@ func limitBoundOnIdleNode(f *Finding, util map[string]metrics.NodeObservation, t
 		return // no quota, so nothing can be bound by one
 	}
 	throttled := f.ThrottlePeak > th.ThrottleRatio
-	pressured := f.psiStalled(th)
+	// Pressure stands in for throttling only where throttling is not
+	// measured. Measured and absent, the wait was the neighbours', not the
+	// quota's: pressure says the tasks waited, not why, and a node idle on
+	// average can be full for the few minutes that made it.
+	pressured := !f.hasSignal(metrics.SigThrottle) && f.psiStalled(th)
 	if !throttled && !pressured {
 		return
 	}
@@ -78,6 +83,19 @@ func limitBoundOnIdleNode(f *Finding, util map[string]metrics.NodeObservation, t
 		// Both gates are needed: the mean catches a node that was busy all
 		// window, the peak catches one that averaged low and saturated during
 		// the hours that mattered, which tare cannot correlate in time.
+		return
+	}
+	if !throttled {
+		// Pressure alone, on a node idle on average: the quota, or a node full
+		// for the minutes that made the pressure, which whole-window figures
+		// cannot place in time. Neither claim is made, and NODE_CONTENTION,
+		// already on the row, is withdrawn rather than contradicted.
+		f.Reasons = slices.DeleteFunc(f.Reasons, func(r Reason) bool { return r.Code == NodeContention })
+		f.Reasons = append(f.Reasons, measured(ThrottleUnknown, f.PSIWaitingPeak, th.PSIWaiting, SecPerSec, fmt.Sprintf(
+			"%s against a %dm CPU limit, while the busiest node it ran on averaged %.1f%% CPU across the window and stayed below %.1f%% for 95%% of it. "+
+				"Whether its own limit or the other containers on the node held it back is unknown: its CFS throttling is not measured (no container_cpu_cfs_throttled_periods_total), and a node idle on average can be full for the minutes that made the pressure. "+
+				"Collecting the throttling metric settles it: high means the limit, zero means the neighbours.",
+			evidence, f.CPULimit, mean*100, p95*100)))
 		return
 	}
 
