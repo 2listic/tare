@@ -17,6 +17,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/2listic/tare/internal/discover"
+	"github.com/2listic/tare/internal/metrics"
 )
 
 // fakeProm answers the counting queries preflight makes. absent names the
@@ -44,6 +45,10 @@ func fakeProm(t *testing.T, absent []string, zeroPressure bool) *httptest.Server
 		}
 		// The non-zero-pressure probe is the one query wrapped in "> 0".
 		if strings.Contains(q, "container_pressure") && strings.Contains(q, "> 0") && zeroPressure {
+			value = ""
+		}
+		// A complete cluster has no containers outside kubepods.
+		if strings.Contains(q, `location="outside"`) {
 			value = ""
 		}
 		if value == "" {
@@ -143,5 +148,36 @@ func TestCheckNamesTheMissingPermissions(t *testing.T) {
 	}
 	if !strings.Contains(out, "node-count delta") {
 		t.Errorf("output does not say what a denied read costs:\n%s", out)
+	}
+}
+
+// tare-agent is a cluster admin's install, so check says when it is needed,
+// what is lost without it, and what is wrong with it once it is there.
+func TestCheckAgent(t *testing.T) {
+	cases := []struct {
+		name  string
+		st    metrics.AgentStatus
+		psiOK bool
+		ok    bool
+		want  string
+	}{
+		{"psi, no agent", metrics.AgentStatus{}, true, true, "not needed"},
+		{"no psi, no agent", metrics.AgentStatus{}, false, false, "deploy/agent/agent.yaml"},
+		{"healthy", metrics.AgentStatus{Nodes: 3, Matched: 40}, false, true, "passing on every node"},
+		{"broken join", metrics.AgentStatus{Nodes: 3}, false, false, "`id` label"},
+		{"driver mismatch", metrics.AgentStatus{Nodes: 3, Matched: 40, Outside: 2}, false, false, "cgroup drivers"},
+		{"failing node", metrics.AgentStatus{Nodes: 3, Matched: 40, Failing: []metrics.AgentNode{
+			{Instance: "10.0.0.7:9105", Problems: []string{"exit records dropped by the kernel"}}}}, false, false, "10.0.0.7:9105"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var b strings.Builder
+			if got := checkAgent(&b, c.st, c.psiOK); got != c.ok {
+				t.Errorf("ok = %v, want %v:\n%s", got, c.ok, b.String())
+			}
+			if !strings.Contains(strings.Join(strings.Fields(b.String()), " "), c.want) {
+				t.Errorf("output lacks %q:\n%s", c.want, b.String())
+			}
+		})
 	}
 }

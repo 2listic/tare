@@ -64,6 +64,11 @@ func tuiDetail(f analyze.Finding) []string {
 	out = append(out,
 		fmt.Sprintf("%-15spsi %s   throttle %s   oom %s   restarts %s", "pressure", psi, thr, oom, restarts),
 		fmt.Sprintf("%-15sqos %s   pods %d   samples %d", "pod", dash(f.QoS), f.Pods, f.Samples))
+	if w := render.CPUWaitDetail(f); w != "" {
+		// Kept beside the pressure line rather than in it: psi is "?" here by
+		// definition, and this is what decided instead.
+		out = append(out[:len(out)-1], fmt.Sprintf("%-15s%s", "cpu wait", w), out[len(out)-1])
+	}
 	if len(f.Nodes) > 0 {
 		out = append(out, fmt.Sprintf("%-15s%s", "nodes", strings.Join(f.Nodes, " ")))
 	}

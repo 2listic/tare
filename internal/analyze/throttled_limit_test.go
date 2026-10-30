@@ -180,3 +180,53 @@ func TestCPULimitIsNeverLowered(t *testing.T) {
 		})
 	}
 }
+
+// A Guaranteed pod on a test cluster (2026-10-29), with a 300m limit it never
+// reached (throttled 0%), waiting on its neighbours during the busy minutes of
+// a node that averaged 43%, carried NODE_CONTENTION and LIMIT_NOT_NODE on one
+// row. Measured throttling decides which: pressure is no evidence against the
+// limit once throttling is measured and absent.
+func TestUnthrottledLimitIsNotBlamed(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		throttle          float64
+		limit, contention bool
+	}{
+		{"throttled", 0.821, true, false},
+		{"never throttled", 0, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cs, obs := guaranteedCache("Guaranteed", tc.throttle)
+			cs[0].Node = "n1"
+			cl := analyze.Cluster{
+				Nodes:    discover.Inventory{Nodes: []discover.Node{{Name: "n1", Cores: 4, AllocCPU: 4000, AllocMem: 8 << 30, Arch: "amd64", Schedulable: true}}},
+				NodeUtil: map[string]metrics.NodeObservation{"n1": {CPUUtilMean: 0.43, CPUUtilP95: 0.70, Samples: 100}},
+			}
+			f := analyze.RunWithCluster(cs, obs, cl, 14*24*time.Hour, analyze.DefaultThresholds())[0]
+			if hasCode(f, analyze.LimitNotNode) != tc.limit || hasCode(f, analyze.NodeContention) != tc.contention {
+				t.Errorf("%s = %v, %s = %v; want %v, %v: %v", analyze.LimitNotNode, hasCode(f, analyze.LimitNotNode),
+					analyze.NodeContention, hasCode(f, analyze.NodeContention), tc.limit, tc.contention, analyze.ReasonTexts(f.Reasons))
+			}
+		})
+	}
+}
+
+// The same row with its throttling unmeasured: the pressure may be the
+// quota's or the neighbours', so it gets THROTTLE_UNKNOWN and neither claim.
+func TestUnmeasuredThrottlingBlamesNeither(t *testing.T) {
+	cs, obs := guaranteedCache("Guaranteed", 0)
+	for _, o := range obs {
+		delete(o.Have, metrics.SigThrottle)
+		delete(o.Have, metrics.SigThrottleAvg)
+	}
+	cs[0].Node = "n1"
+	cl := analyze.Cluster{
+		Nodes:    discover.Inventory{Nodes: []discover.Node{{Name: "n1", Cores: 4, AllocCPU: 4000, AllocMem: 8 << 30, Arch: "amd64", Schedulable: true}}},
+		NodeUtil: map[string]metrics.NodeObservation{"n1": {CPUUtilMean: 0.43, CPUUtilP95: 0.70, Samples: 100}},
+	}
+	f := analyze.RunWithCluster(cs, obs, cl, 14*24*time.Hour, analyze.DefaultThresholds())[0]
+	if !hasCode(f, analyze.ThrottleUnknown) || hasCode(f, analyze.LimitNotNode) || hasCode(f, analyze.NodeContention) {
+		t.Errorf("want %s alone, without %s or %s: %v", analyze.ThrottleUnknown, analyze.LimitNotNode,
+			analyze.NodeContention, analyze.ReasonTexts(f.Reasons))
+	}
+}

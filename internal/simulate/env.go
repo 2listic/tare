@@ -213,7 +213,7 @@ func (e *Env) observe(k metrics.Key, window time.Duration) *metrics.Observation 
 	for _, sig := range []metrics.Signal{
 		metrics.SigCPUUsage, metrics.SigCPUPeak, metrics.SigMemory,
 		metrics.SigMemP95, metrics.SigPSI, metrics.SigPSIAvg, metrics.SigOOM,
-		metrics.SigRestarts, metrics.SigStartup,
+		metrics.SigRestarts, metrics.SigStartup, metrics.SigCPUWait,
 	} {
 		o.Mark(sig)
 	}
@@ -231,9 +231,26 @@ func (e *Env) observe(k metrics.Key, window time.Duration) *metrics.Observation 
 	// a high peak and a negligible mean.
 	var psiSum float64
 	var psiN int
+	// CPU wait, as tare-agent would see it, in 5-minute stretches. The model
+	// has one task, so wait is the stalled share of the work it wanted: the
+	// demand the quota refused above it, the queueing below it. There is no
+	// background wait from neighbours, so a container that never approaches
+	// its quota has no normal; see TestCPUWaitOnCatalog.
+	var stretches []metrics.WaitStretch
+	var cur metrics.WaitStretch
+	var curN int
+	const perStretch = int(5 * time.Minute / Tick)
 	for _, s := range e.samples {
 		if s.T.Before(cutoff) {
 			continue
+		}
+		cur.Wait += s.PSIWaiting * s.CPUDemand
+		cur.Usage += s.CPUUsage
+		if curN++; curN == perStretch {
+			cur.Wait, cur.Usage = cur.Wait/float64(curN), cur.Usage/float64(curN)
+			cur.Run = cur.Usage
+			stretches = append(stretches, cur)
+			cur, curN = metrics.WaitStretch{}, 0
 		}
 		cpu = append(cpu, s.CPUUsage)
 		o.CPUUsageMax = math.Max(o.CPUUsageMax, s.CPUUsage)
@@ -267,6 +284,7 @@ func (e *Env) observe(k metrics.Key, window time.Duration) *metrics.Observation 
 	if psiN > 0 {
 		o.PSIWaitingAvg = psiSum / float64(psiN)
 	}
+	o.CPUWait = metrics.SummariseCPUWait(stretches)
 	o.MemEarly, o.MemLate = mean(early), mean(late)
 	o.MemLimitEarly, o.MemLimitLate = float64(e.Alloc.MemLimit), float64(e.Alloc.MemLimit)
 	return o

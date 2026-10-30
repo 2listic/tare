@@ -14,6 +14,10 @@ func (f *Finding) hasSignal(s metrics.Signal) bool { return f.Have[s] }
 func (f Finding) HasPSI() bool      { return f.Have[metrics.SigPSI] }
 func (f Finding) HasThrottle() bool { return f.Have[metrics.SigThrottle] }
 
+// HasCPUWait reports tare-agent's CPU wait as the pressure source: measured,
+// believed, and not overruled by PSI, which decides wherever it exists.
+func (f Finding) HasCPUWait() bool { return f.Have[metrics.SigCPUWait] && !f.Have[metrics.SigPSI] }
+
 // The sustained halves are separate signals because they are separate queries
 // and either can fail on its own. A renderer that printed a missing mean as
 // 0.0000 beside a real peak would be showing the most reassuring number on the
@@ -50,9 +54,9 @@ func applySignalGaps(f *Finding) {
 
 	blind := !f.hasAny(metrics.SaturationSignals...)
 	if blind {
-		f.Reasons = append(f.Reasons, note(NoSaturationSignal, "no saturation signal is available on this cluster "+
-			"(neither PSI nor CFS throttle metrics), so this container cannot be shown to have headroom. "+
-			"Treat any reduction as unverified."))
+		f.Reasons = append(f.Reasons, note(NoSaturationSignal, "no saturation signal is usable for this container "+
+			"(no PSI, no CPU wait from tare-agent, no CFS throttle metrics), so it cannot be shown to have headroom. "+
+			"Treat any reduction as unverified. Where PSI is missing, tare-agent provides CPU wait: see kubectl tare check."))
 		// Confidence is about how much the recommendation can be trusted, and
 		// without a saturation signal it cannot be trusted much whatever the
 		// sample count says.
@@ -60,6 +64,11 @@ func applySignalGaps(f *Finding) {
 		if f.Verdict == Waste || f.Verdict == Healthy {
 			f.Verdict = Unverified
 		}
+	}
+	// Not blind, but the one saturation signal there is saw a stall it cannot
+	// classify; see maskUnusableCPUWait.
+	if f.cpuWaitStalledRun && f.HasCPUWait() && f.Verdict == Waste {
+		f.Verdict = Unverified
 	}
 
 	if !f.hasSignal(metrics.SigOOM) && f.RecMem > 0 && f.MemRequest > 0 && f.RecMem < f.MemRequest {

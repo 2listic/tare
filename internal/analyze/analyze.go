@@ -81,7 +81,7 @@ func Run(containers []discover.Container, obs map[metrics.Key]*metrics.Observati
 // does not.
 func RunWithCluster(containers []discover.Container, obs map[metrics.Key]*metrics.Observation,
 	cl Cluster, window time.Duration, th Thresholds) []Finding {
-	groups := aggregate(containers, obs)
+	groups := aggregate(containers, obs, th)
 	out := make([]Finding, 0, len(groups))
 	for _, f := range groups {
 		sort.Strings(f.Nodes)
@@ -116,7 +116,7 @@ func RunWithCluster(containers []discover.Container, obs map[metrics.Key]*metric
 // that no longer exist: a rollout or a reschedule replaces every pod, and a
 // workload measured from its live pods alone is measured from whenever it was
 // last deployed, however wide the window.
-func aggregate(containers []discover.Container, obs map[metrics.Key]*metrics.Observation) map[groupKey]*Finding {
+func aggregate(containers []discover.Container, obs map[metrics.Key]*metrics.Observation, th Thresholds) map[groupKey]*Finding {
 	groups := map[groupKey]*Finding{}
 	// worstGrowth tracks, per group, the largest late/early memory ratio seen
 	// on any single pod, so the trend pair kept below comes from one pod.
@@ -155,7 +155,7 @@ func aggregate(containers []discover.Container, obs map[metrics.Key]*metrics.Obs
 		if o == nil {
 			continue
 		}
-		fold(f, o, true)
+		fold(f, o, true, th)
 		spans[gk] = append(spans[gk], o)
 
 		// The memory trend is a per-pod pair, and the two halves must come from
@@ -189,7 +189,7 @@ func aggregate(containers []discover.Container, obs map[metrics.Key]*metrics.Obs
 		if !ok {
 			continue
 		}
-		fold(f, o, false)
+		fold(f, o, false, th)
 		spans[gk] = append(spans[gk], o)
 	}
 
@@ -202,8 +202,9 @@ func aggregate(containers []discover.Container, obs map[metrics.Key]*metrics.Obs
 // fold merges one pod's observation into its workload's finding, taking the
 // worst case: the recommendation must hold for every replica, not for the
 // average one. A dead pod contributes everything but the memory trend, whose
-// pair aggregate takes from live pods only.
-func fold(f *Finding, o *metrics.Observation, live bool) {
+// pair aggregate takes from live pods only, and CPU wait it could not be
+// judged on alone.
+func fold(f *Finding, o *metrics.Observation, live bool, th Thresholds) {
 	f.CPUUsageP95 = max(f.CPUUsageP95, o.CPUUsageP95)
 	f.CPUUsageMax = max(f.CPUUsageMax, o.CPUUsageMax)
 	f.CPUStartupMax = max(f.CPUStartupMax, o.CPUStartupMax)
@@ -220,8 +221,15 @@ func fold(f *Finding, o *metrics.Observation, live bool) {
 	f.PSIWaitingPeak = max(f.PSIWaitingPeak, o.PSIWaitingMax)
 	f.Throttle = max(f.Throttle, o.ThrottleAvg)
 	f.ThrottlePeak = max(f.ThrottlePeak, o.ThrottleRatio)
+	wait := o.Has(metrics.SigCPUWait) && (live || usableAlone(o.CPUWait, th))
+	if live && !o.Has(metrics.SigCPUWait) {
+		f.cpuWaitUnseen++
+	}
+	if wait {
+		mergeCPUWait(&f.CPUWait, o.CPUWait, !f.hasSignal(metrics.SigCPUWait), th)
+	}
 	for sig, ok := range o.Have {
-		if !ok || (!live && sig == metrics.SigMemTrend) {
+		if !ok || (!live && sig == metrics.SigMemTrend) || (sig == metrics.SigCPUWait && !wait) {
 			continue
 		}
 		if f.Have == nil {
@@ -273,6 +281,61 @@ func coverage(obs []*metrics.Observation) int {
 		return best
 	}
 	return max(best, int(float64(sum)*union/total))
+}
+
+// usableAlone reports whether a gone pod's CPU wait says anything about its
+// workload: enough history for its own normal, and an agent that saw it. A
+// live replica's blind spot is doubt about the workload as it runs now; a gone
+// pod's is only missing evidence about the past.
+func usableAlone(c metrics.CPUWait, th Thresholds) bool {
+	return c.Stretches >= th.CPUWaitMinStretches && (!c.Busy || c.Coverage >= th.CPUWaitMinCoverage)
+}
+
+// mergeCPUWait folds one pod's CPU wait into its workload's, worst case per
+// field. The normal is each pod's own, so a stall only counts from a pod with
+// the history to have one: a replica an hour old next to one a week old has a
+// normal made of that hour, and twice it is no evidence. Short pods decide
+// only while no pod has a history, and the row is then withdrawn as short
+// history anyway. Coverage is taken from every pod: one replica the agent
+// cannot see is enough to doubt the workload. So is a run of stalled stretches
+// its node confirmed: the node, not the pod's normal, established its cause,
+// so a replacement pod starved since its first hour is starved whatever its
+// predecessor's history says.
+//
+// The stall fields travel together, from the most stalled pod, since that is
+// the pod the verdict is about; among equally stalled pods, the highest
+// normal, so a never-quiet replica is not hidden by a quiet one.
+func mergeCPUWait(dst *metrics.CPUWait, c metrics.CPUWait, first bool, th Thresholds) {
+	if first {
+		*dst = c
+		return
+	}
+	long, settled := c.Stretches >= th.CPUWaitMinStretches, dst.Stretches >= th.CPUWaitMinStretches
+	cov, busy, confirmed := dst.Coverage, dst.Busy, dst.LongestConfirmedRun
+	switch {
+	case long && !settled:
+		// The first pod with a history of its own replaces the short ones.
+		*dst = c
+	case !long && settled:
+		// Only its coverage and confirmed run below.
+	default:
+		if c.Stalled > dst.Stalled || (c.Stalled == dst.Stalled && c.HasNormal && c.Normal > dst.Normal) {
+			dst.Stalled, dst.Normal, dst.HasNormal = c.Stalled, c.Normal, c.HasNormal
+			dst.NodeKnown, dst.NodeContended = c.NodeKnown, c.NodeContended
+		}
+		dst.LongestRun = max(dst.LongestRun, c.LongestRun)
+		dst.Mean = max(dst.Mean, c.Mean)
+		dst.Stretches = max(dst.Stretches, c.Stretches)
+	}
+	dst.LongestConfirmedRun = max(confirmed, dst.LongestConfirmedRun, c.LongestConfirmedRun)
+	switch {
+	case busy && c.Busy:
+		dst.Coverage, dst.Busy = min(cov, c.Coverage), true
+	case busy:
+		dst.Coverage, dst.Busy = cov, true
+	case c.Busy:
+		dst.Coverage, dst.Busy = c.Coverage, true
+	}
 }
 
 type groupKey struct{ ns, workload, container string }

@@ -220,6 +220,15 @@ func runCluster(sub string, o *options, namespaces []string) error {
 	if o.redact {
 		srcLabel = report.RedactSource(srcLabel)
 	}
+	// Listing nodes is a cluster-scoped read a namespace-scoped user may not
+	// have. Its absence costs the per-node findings, the node-count delta and
+	// the node half of the CPU wait rule, and is reported rather than silently
+	// producing a report that looks complete.
+	inv := kc.Nodes(ctx)
+	if pl, ok := src.(metrics.Placer); ok {
+		pl.SetPlacement(placements(containers, inv))
+	}
+
 	progressf("querying %s over %s", srcLabel, windowNote)
 	obs, err := src.Observe(namespaces, window)
 	if err != nil {
@@ -228,11 +237,6 @@ func runCluster(sub string, o *options, namespaces []string) error {
 	coverage, covCounts := coverageNote(containers, obs)
 
 	constraints := kc.LoadConstraints(ctx, namespaces)
-	// Listing nodes is a cluster-scoped read a namespace-scoped user may not
-	// have. Its absence costs the per-node findings and the node-count delta,
-	// and is reported rather than silently producing a report that looks
-	// complete.
-	inv := kc.Nodes(ctx)
 	cluster := analyze.Cluster{Constraints: constraints, Nodes: inv, NodeUtil: observeNodes(src, inv, window)}
 	findings := analyze.RunWithCluster(containers, obs, cluster, window, analyze.DefaultThresholds())
 
@@ -279,6 +283,30 @@ func resolveWindow(src metrics.Source, namespaces []string, want time.Duration) 
 		window = avail
 	}
 	return window, note
+}
+
+// placements is each container's node address, for the node half of the CPU
+// wait rule. A Guaranteed container with whole CPUs may be pinned to them by
+// the kubelet's CPU manager, so its node's idle CPUs prove nothing about it.
+// An inventory that could not be read places nothing.
+func placements(containers []discover.Container, inv discover.Inventory) map[metrics.Key]metrics.Placement {
+	out := map[metrics.Key]metrics.Placement{}
+	if inv.Partial {
+		return out
+	}
+	ips := map[string]string{}
+	for _, n := range inv.Nodes {
+		ips[n.Name] = n.InternalIP
+	}
+	for _, c := range containers {
+		ip := ips[c.Node]
+		if ip == "" {
+			continue
+		}
+		pinned := c.QoS == "Guaranteed" && c.CPURequest > 0 && c.CPURequest%1000 == 0 && c.CPURequest == c.CPULimit
+		out[metrics.Key{Namespace: c.Namespace, Pod: c.Pod, Container: c.Name}] = metrics.Placement{NodeIP: ip, Pinned: pinned}
+	}
+	return out
 }
 
 // observeNodes reads node utilisation, keyed by node name. It is optional:
