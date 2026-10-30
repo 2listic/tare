@@ -93,6 +93,12 @@ type Finding struct {
 	// cannot vouch for a reduction.
 	cpuWaitStalledRun bool
 
+	// cpuWaitUnseen counts the live replicas with no CPU wait of their own
+	// (no agent on their node, or one that failed its self-checks). Their
+	// silence is not evidence, so the replicas the agent does see cannot
+	// vouch for the workload.
+	cpuWaitUnseen int
+
 	// RecCPU and RecMem are the recommended requests, zero when none is
 	// offered. RecCPULimit is the recommended CPU limit, which is deliberately
 	// higher: a request sized to a percentile must not become a limit that

@@ -76,6 +76,9 @@ const (
 	// own normal.
 	CPUWaitLowCoverage  Code = "CPU_WAIT_LOW_COVERAGE"
 	CPUWaitShortHistory Code = "CPU_WAIT_SHORT_HISTORY"
+	// CPUWaitReplicaUnseen: some live replicas have no CPU wait at all, so
+	// the ones the agent sees cannot vouch for the workload.
+	CPUWaitReplicaUnseen Code = "CPU_WAIT_REPLICA_UNSEEN"
 	// CPUWaitNeverQuiet: the container is contended all the time, so its
 	// normal is the contention and the rule cannot see it.
 	CPUWaitNeverQuiet Code = "CPU_WAIT_NEVER_QUIET"

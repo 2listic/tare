@@ -208,9 +208,18 @@ func assessSaturation(f *Finding, th Thresholds) starved {
 			"CPU pressure peaked at %.3f s/s but the container used only %.0f%% of its allocation (window mean pressure %.4f), so this is contention on the node rather than a shortage of its own: a larger request would not remove it",
 			f.PSIWaitingPeak, util*100, f.PSIWaiting)))
 	} else if !wantsCPU && f.cpuWaitStalled(th) && !f.throttleStalled(th) {
-		f.Reasons = append(f.Reasons, measured(NodeContention, f.CPUWait.Stalled, th.CPUWaitStalledShare, Ratio, fmt.Sprintf(
-			"CPU wait (tare-agent) shows it stalled in %.0f%% of 5-minute stretches but the container used only %.0f%% of its allocation, so this is contention on the node rather than a shortage of its own: a larger request would not remove it",
-			f.CPUWait.Stalled*100, util*100)))
+		const notOwn = "but the container used only %.0f%% of its allocation, so this is contention on the node rather than a shortage of its own: a larger request would not remove it"
+		if f.CPUWait.Stalled >= th.CPUWaitStalledShare {
+			f.Reasons = append(f.Reasons, measured(NodeContention, f.CPUWait.Stalled, th.CPUWaitStalledShare, Ratio, fmt.Sprintf(
+				"CPU wait (tare-agent) shows it stalled in %.0f%% of 5-minute stretches "+notOwn,
+				f.CPUWait.Stalled*100, util*100)))
+		} else {
+			// The run fired, not the share: quote the run, or the reason
+			// shows a share under its own threshold.
+			f.Reasons = append(f.Reasons, measured(NodeContention, float64(f.CPUWait.LongestConfirmedRun), float64(th.CPUWaitStalledRun), Count, fmt.Sprintf(
+				"CPU wait (tare-agent) shows its tasks waiting for CPU for %s in a row while its node was short of CPU, "+notOwn,
+				stretchesDuration(f.CPUWait.LongestConfirmedRun), util*100)))
+		}
 	}
 	return st
 }
@@ -265,6 +274,11 @@ func maskUnusableCPUWait(f *Finding, th Thresholds) {
 	}
 	c := f.CPUWait
 	switch {
+	case c.LongestConfirmedRun >= th.CPUWaitStalledRun:
+		// The node, not the container's normal, established the cause, so
+		// neither a short history nor a partial view of its tasks undoes it:
+		// a view that misses tasks only misses wait.
+		return
 	case c.Stretches < th.CPUWaitMinStretches:
 		f.Reasons = append(f.Reasons, measured(CPUWaitShortHistory, float64(c.Stretches), float64(th.CPUWaitMinStretches), Count, fmt.Sprintf(
 			"tare-agent has %s of CPU wait for this container, and the rule compares it with its own normal, which needs at least %s, quiet periods included. CPU wait is not used yet",
@@ -274,9 +288,14 @@ func maskUnusableCPUWait(f *Finding, th Thresholds) {
 			"tare-agent accounted only %.0f%% of this container's CPU time (needs %.0f%%), so it is not seeing the container's tasks and their lack of wait is not evidence. "+
 				"CPU wait is not used; see tare_agent_exits_unattributed_total on its node",
 			c.Coverage*100, th.CPUWaitMinCoverage*100)))
-	case c.Stalled >= th.CPUWaitStalledShare, c.LongestConfirmedRun >= th.CPUWaitStalledRun:
+	case c.Stalled >= th.CPUWaitStalledShare:
 		// Starved by the rule: whatever else is true, that answer stands.
 		return
+	case f.cpuWaitUnseen > 0:
+		f.Reasons = append(f.Reasons, measured(CPUWaitReplicaUnseen, float64(f.cpuWaitUnseen), 0, Count, fmt.Sprintf(
+			"%d of its %d live replicas have no CPU wait from tare-agent (no agent on their node, or one that failed its self-checks), "+
+				"so the replicas it sees cannot vouch for them. CPU wait is not used",
+			f.cpuWaitUnseen, f.Pods)))
 	case c.HasNormal && c.Normal >= th.CPUWaitMaxNormal && c.NodeKnown < th.CPUWaitMinNodeKnown:
 		// With its node known, a high normal needs no mask: had the node been
 		// contended, its stretches would be confirmed and stalled above; it was

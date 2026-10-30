@@ -141,6 +141,10 @@ type CPUWait struct {
 	// the container never ran enough for coverage to be measured.
 	Coverage float64
 	Busy     bool
+	// first and last are the Unix times of the container's first and last
+	// stretch. The node's shares are counted between them: a pod that lived
+	// three hours of a week on its node was not there for the rest.
+	first, last int64
 }
 
 // stalled is the relative slowdown rule for one stretch.
@@ -340,6 +344,14 @@ func cpuWaitQueries(sel, agentSel string, window time.Duration) []cpuWaitQuery {
 			expr:   fmt.Sprintf(`quantile_over_time(0.5, (%s / %s)[%s:%s])`, run, busy, w, step),
 			assign: func(c *CPUWait, v float64) { c.Coverage, c.Busy = v, true },
 		},
+		{
+			expr:   fmt.Sprintf(`min_over_time(timestamp(%s and %s)[%s:%s])`, wait, usage, w, step),
+			assign: func(c *CPUWait, v float64) { c.first = int64(v) },
+		},
+		{
+			expr:   fmt.Sprintf(`max_over_time(timestamp(%s and %s)[%s:%s])`, wait, usage, w, step),
+			assign: func(c *CPUWait, v float64) { c.last = int64(v) },
+		},
 	}
 	for i := range qs {
 		qs[i].expr = fmt.Sprintf(`max by (namespace,pod,container) (%s)`, qs[i].expr)
@@ -519,7 +531,7 @@ func (p *Prom) observeCPUWait(out map[Key]*Observation, sel string, window time.
 		}
 		c.LongestRun, c.LongestConfirmedRun = runs.longest, runs.longestConfirmed
 		c.Stalled = min(float64(n)/float64(c.Stretches), 1)
-		c.NodeKnown, c.NodeContended = nodes.shares(p.placement[k], c.Stretches)
+		c.NodeKnown, c.NodeContended = nodes.shares(p.placement[k], c.first, c.last, c.Stretches)
 		out[k].CPUWait = *c
 		out[k].Mark(SigCPUWait)
 	}
@@ -614,14 +626,19 @@ func (nc nodeContext) of(k Key, pl Placement) func(t int64) NodeState {
 	}
 }
 
-// shares is how much of the window the container's node was known, and
-// contended, as shares of the container's stretches.
-func (nc nodeContext) shares(pl Placement, stretches int) (known, contended float64) {
-	if pl.NodeIP == "" || stretches == 0 || nc.waited == nil {
+// shares is how much of the container's life its node was known, and
+// contended, as shares of the container's stretches. Only the node's stretches
+// from the container's first to its last count. Without those bounds the
+// node is not known, never known for the whole window.
+func (nc nodeContext) shares(pl Placement, first, last int64, stretches int) (known, contended float64) {
+	if pl.NodeIP == "" || stretches == 0 || nc.waited == nil || first == 0 || last < first {
 		return 0, 0
 	}
 	var k, c int
 	for t, q := range nc.queue[pl.NodeIP] {
+		if t < first || t > last {
+			continue
+		}
 		if _, ok := nc.busy[pl.NodeIP][t]; !ok {
 			continue
 		}

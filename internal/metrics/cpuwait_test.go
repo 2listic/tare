@@ -156,6 +156,10 @@ func (c agentCluster) respond(expr string) (string, int) {
 		return matrix("app", c.candidates, c.steps), 200
 	case strings.Contains(expr, "count_over_time((sum by (namespace,pod,container) (sum by (id)"):
 		return vector("app", float64(c.stretches)), 200
+	case strings.Contains(expr, "min_over_time(timestamp("):
+		return vector("app", 1700000000), 200
+	case strings.Contains(expr, "max_over_time(timestamp("):
+		return vector("app", float64(1700000000+300*max(c.stretches-1, 0))), 200
 	case strings.Contains(expr, "quantile_over_time(0.1,"):
 		return vector("app", c.normal), 200
 	case strings.Contains(expr, "quantile_over_time(0.5, (sum by (namespace,pod,container) (sum by (id) (rate(tare_cpu_run"):

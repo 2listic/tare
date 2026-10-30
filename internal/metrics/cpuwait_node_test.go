@@ -302,3 +302,28 @@ func TestObserveCPUWaitNodeExporterMissing(t *testing.T) {
 		t.Errorf("want the relative rule alone, got %+v", w)
 	}
 }
+
+// A pod that lived 4 stretches on a node with 12 stretches of node-exporter
+// data: its node shares count only its own life, not the node's whole window.
+func TestObserveCPUWaitNodeSharesOwnLife(t *testing.T) {
+	c := nodeCluster{
+		agentCluster: agentCluster{agent: true, normal: 0.9, stretches: 4,
+			candidates: []float64{1.2}, steps: []int{0}},
+		waited:       []int{0},
+		queue:        []float64{0.1, 0.1, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2},
+		busy:         []float64{0.5, 0.5, 0.99, 0.99, 0.99, 0.99, 0.99, 0.99, 0.99, 0.99, 0.99, 0.99},
+		nodeInstance: "10.0.0.5:9100",
+	}
+	f := newFakeProm(c.respond)
+	defer f.Close()
+	key := Key{Namespace: "ns", Pod: "p-0", Container: "app"}
+	p := NewProm(f.URL)
+	p.SetPlacement(map[Key]Placement{key: {NodeIP: "10.0.0.5"}})
+	obs, err := p.Observe([]string{"ns"}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := obs[key].CPUWait; w.NodeKnown != 1 || w.NodeContended != 0.5 {
+		t.Errorf("want known 1 and contended 2/4 over the pod's own 4 stretches, got known %v contended %v", w.NodeKnown, w.NodeContended)
+	}
+}

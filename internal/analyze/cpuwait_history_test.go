@@ -1,6 +1,8 @@
 package analyze_test
 
 import (
+	"maps"
+	"strings"
 	"testing"
 	"time"
 
@@ -162,4 +164,63 @@ func TestShortPodsConfirmedRunCounts(t *testing.T) {
 			check(t, judge(t, cs, obs))
 		})
 	}
+}
+
+// A live replica with no CPU wait at all (no agent on its node, or one that
+// failed its self-checks) may be the starved one. The quiet replica beside it
+// cannot vouch for it, whichever is folded first.
+func TestUnseenReplicaWithdrawsCPUWait(t *testing.T) {
+	for _, unseen := range []string{"api-0", "api-1"} {
+		t.Run(unseen, func(t *testing.T) {
+			cs, obs := twoReplicas(quietWait, quietWait)
+			o := obs[metrics.Key{Namespace: "shop", Pod: unseen, Container: "api"}]
+			o.Have = maps.Clone(o.Have)
+			delete(o.Have, metrics.SigCPUWait)
+			o.CPUWait = metrics.CPUWait{}
+			f := judge(t, cs, obs)
+			if !hasCode(f, analyze.CPUWaitReplicaUnseen) || f.HasCPUWait() || f.Verdict == analyze.Waste {
+				t.Fatalf("a replica the agent cannot see was vouched for: verdict %s, %v", f.Verdict, analyze.ReasonTexts(f.Reasons))
+			}
+		})
+	}
+	// A replica the agent sees starved is starvation whatever the unseen one did.
+	cs, obs := twoReplicas(starvedWait, quietWait)
+	o := obs[metrics.Key{Namespace: "shop", Pod: "api-1", Container: "api"}]
+	o.Have = maps.Clone(o.Have)
+	delete(o.Have, metrics.SigCPUWait)
+	if f := judge(t, cs, obs); f.Verdict != analyze.Saturated || hasCode(f, analyze.CPUWaitReplicaUnseen) {
+		t.Fatalf("a seen starved replica beside an unseen one: verdict %s, %v", f.Verdict, analyze.ReasonTexts(f.Reasons))
+	}
+}
+
+// A workload rolled out under a day ago is short of history, but a run its
+// node confirmed does not need the container's normal: it stays SATURATED.
+func TestShortHistoryKeepsNodeConfirmedRun(t *testing.T) {
+	w := metrics.CPUWait{Stretches: 36, Stalled: 0.03, LongestRun: 6, LongestConfirmedRun: 6,
+		Normal: 0.05, HasNormal: true, Mean: 0.2, Coverage: 0.85, Busy: true, NodeKnown: 1}
+	f := judgeWait(t, w)
+	if f.Verdict != analyze.Saturated || hasCode(f, analyze.CPUWaitShortHistory) || !hasCode(f, analyze.CPUWaitNodeConfirmed) {
+		t.Fatalf("node-confirmed starvation withdrawn as short history: verdict %s, %v", f.Verdict, analyze.ReasonTexts(f.Reasons))
+	}
+}
+
+// Node contention found by the confirmed run alone quotes the run, not a
+// share under its own threshold.
+func TestNodeContentionByConfirmedRunQuotesTheRun(t *testing.T) {
+	w := quietWait
+	w.Stalled, w.LongestRun, w.LongestConfirmedRun, w.NodeKnown = 0.02, 6, 6, 1
+	cs, obs := waitContainer(w)
+	for _, o := range obs {
+		o.CPUUsageMax, o.CPUSteadyMax = 0.1, 0.1
+	}
+	f := judge(t, cs, obs)
+	for _, r := range f.Reasons {
+		if r.Code == analyze.NodeContention {
+			if r.Unit != analyze.Count || r.Observed < r.Against || strings.Contains(r.Text, "% of 5-minute stretches") {
+				t.Fatalf("reason does not meet its own threshold: %+v", r)
+			}
+			return
+		}
+	}
+	t.Fatalf("no NODE_CONTENTION: %v", analyze.ReasonTexts(f.Reasons))
 }

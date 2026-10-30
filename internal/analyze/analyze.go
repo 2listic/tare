@@ -222,6 +222,9 @@ func fold(f *Finding, o *metrics.Observation, live bool, th Thresholds) {
 	f.Throttle = max(f.Throttle, o.ThrottleAvg)
 	f.ThrottlePeak = max(f.ThrottlePeak, o.ThrottleRatio)
 	wait := o.Has(metrics.SigCPUWait) && (live || usableAlone(o.CPUWait, th))
+	if live && !o.Has(metrics.SigCPUWait) {
+		f.cpuWaitUnseen++
+	}
 	if wait {
 		mergeCPUWait(&f.CPUWait, o.CPUWait, !f.hasSignal(metrics.SigCPUWait), th)
 	}
