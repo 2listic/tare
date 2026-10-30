@@ -108,6 +108,11 @@ type Thresholds struct {
 	// days, which is the failure mode this project keeps finding: a clean,
 	// confident answer computed from data that was never there.
 	IdleMinCoverage float64
+	// GPUUnderused: a device whose use stays below this fraction is a
+	// candidate to share or give up. Read from SM activity p95 when the card
+	// exports it, else from mean busy-time, which bounds use from above and so
+	// can prove underuse but never use.
+	GPUUnderused float64
 	// CPUWaitStalledShare: a container is starved by tare-agent's CPU wait when
 	// at least this share of its 5-minute stretches is stalled under the
 	// relative slowdown rule (metrics/cpuwait.go). It plays the role
@@ -187,9 +192,13 @@ func DefaultThresholds() Thresholds {
 		// are exactly the population worth questioning. Unswept: no archetype
 		// in the catalog is idle, and one must be added before this number is
 		// defended as anything but a starting point.
-		IdleCPUMillicores:      5,
-		IdleMemGrowth:          1.1,
-		IdleMinCoverage:        0.5,
+		IdleCPUMillicores: 5,
+		IdleMemGrowth:     1.1,
+		IdleMinCoverage:   0.5,
+		// Chosen, not derived, and unswept: a device used under a fifth of
+		// the time could carry four more like it. Errs toward silence: above
+		// it nothing is said.
+		GPUUnderused:           0.2,
 		NodeIdleCeiling:        0.50,
 		NodeBusyP95:            0.85,
 		PlateauHeadroom:        0.70,

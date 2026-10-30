@@ -69,6 +69,11 @@ func tuiDetail(f analyze.Finding) []string {
 		// definition, and this is what decided instead.
 		out = append(out[:len(out)-1], fmt.Sprintf("%-15s%s", "cpu wait", w), out[len(out)-1])
 	}
+	if f.GPUs > 0 {
+		u := render.GPUCells(f)
+		out = append(out, fmt.Sprintf("%-15s%d %s   idle %s   busy %s   sm %s   vram %s",
+			"gpu", f.GPUs, f.GPUResource, u.IdleDevices, u.Busy, u.SMActive, u.VRAM))
+	}
 	if len(f.Nodes) > 0 {
 		out = append(out, fmt.Sprintf("%-15s%s", "nodes", strings.Join(f.Nodes, " ")))
 	}

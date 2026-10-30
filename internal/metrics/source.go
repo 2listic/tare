@@ -123,6 +123,10 @@ type Observation struct {
 	// kube-state-metrics is not scraped.
 	Owner string
 
+	// GPU is what the devices attributed to this container did, nil when
+	// none were or nobody asked (see GPUObserver).
+	GPU *GPUObservation
+
 	// Have records which signals actually produced data for this container.
 	Have map[Signal]bool
 }

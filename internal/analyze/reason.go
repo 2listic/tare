@@ -113,6 +113,18 @@ const (
 	VRAMOverPool      Code = "VRAM_EXCEEDS_RESERVED_POOL"
 	VRAMFits          Code = "VRAM_FITS"
 	GPUOversubscribed Code = "GPU_OVERSUBSCRIBED"
+	VRAMMIGUnchecked  Code = "VRAM_MIG_UNCHECKED"
+
+	// Measured accelerator use.
+	GPUIdle           Code = "GPU_IDLE"
+	GPUDeviceUnused   Code = "GPU_DEVICE_UNUSED"
+	GPUUnderused      Code = "GPU_UNDERUSED"
+	GPUBusyUnverified Code = "GPU_BUSY_UNVERIFIED"
+	GPUCPUBound       Code = "GPU_CPU_BOUND"
+	GPUCPUHeld        Code = "GPU_CPU_HELD"
+	GPUNotMeasured    Code = "GPU_NOT_MEASURED"
+	GPUSharedDevice   Code = "GPU_SHARED_UNATTRIBUTED"
+	GPUMIGUnverified  Code = "GPU_MIG_UNVERIFIED"
 )
 
 // Unit says how to read Observed and Against. Without it a consumer comparing

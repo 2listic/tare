@@ -234,6 +234,7 @@ func runCluster(sub string, o *options, namespaces []string) error {
 	if err != nil {
 		return fail(err)
 	}
+	observeGPUs(src, containers, obs, namespaces, window)
 	coverage, covCounts := coverageNote(containers, obs)
 
 	constraints := kc.LoadConstraints(ctx, namespaces)
@@ -330,6 +331,39 @@ func observeNodes(src metrics.Source, inv discover.Inventory, window time.Durati
 		}
 	}
 	return out
+}
+
+// observeGPUs attaches device use to the observations of containers that hold
+// a GPU. Optional, like observeNodes, and asked only when some container
+// requests one, so a cluster without GPUs gets no GPU gaps in its report. The
+// holder set comes from here because only the API server knows which pods were
+// allocated a device; the metrics backend needs it to attribute series whose
+// owner labels are ambiguous. A device of a container with no observation at
+// all is dropped: that container is NO-DATA whatever its GPU did.
+func observeGPUs(src metrics.Source, containers []discover.Container, obs map[metrics.Key]*metrics.Observation,
+	namespaces []string, window time.Duration) {
+	g, ok := src.(metrics.GPUObserver)
+	if !ok {
+		return
+	}
+	holders := map[metrics.Key]bool{}
+	for _, c := range containers {
+		if c.GPUs > 0 {
+			holders[metrics.Key{Namespace: c.Namespace, Pod: c.Pod, Container: c.Name}] = true
+		}
+	}
+	if len(holders) == 0 {
+		return
+	}
+	byKey, err := g.ObserveGPUs(holders, namespaces, window)
+	if err != nil {
+		return
+	}
+	for k, o := range byKey {
+		if ob := obs[k]; ob != nil {
+			ob.GPU = &o
+		}
+	}
 }
 
 // replayNodes computes the node-count delta, what each node has promised, and

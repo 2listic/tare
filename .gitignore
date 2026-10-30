@@ -1,3 +1,5 @@
+*.gif
+.DS_Store
 bin/
 .demo/
 __pycache__/

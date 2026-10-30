@@ -155,6 +155,31 @@ func (p *printer) printEvidence(fs []analyze.Finding) {
 	w.Flush()
 }
 
+// printGPUs is one row per container that holds a GPU: what the device did,
+// beside the codes decided from it. Busy and SM columns are avg/max and
+// avg/p95 percentages; busy-time bounds use from above only, so a high BUSY
+// next to an SM of "?" is not evidence of work. VRAM_MAX is the device's,
+// display server included, and only ever a floor. Nothing at all when no
+// container holds a GPU.
+func (p *printer) printGPUs(fs []analyze.Finding) {
+	var w *tabwriter.Writer
+	for _, f := range fs {
+		if f.GPUs == 0 {
+			continue
+		}
+		if w == nil {
+			w = p.section("gpus", "NAMESPACE", "WORKLOAD", "CONTAINER", "RESOURCE", "DEVICES", "IDLE_DEVICES",
+				"BUSY_AVG/MAX", "SM_ACTIVE_AVG/P95", "VRAM_MAX", "CODES")
+		}
+		u := GPUCells(f)
+		row(w, f.Namespace, f.Workload, f.Container, f.GPUResource, strconv.FormatInt(f.GPUs, 10),
+			u.IdleDevices, u.Busy, u.SMActive, u.VRAM, strings.Join(GPUCodes(f), ","))
+	}
+	if w != nil {
+		w.Flush()
+	}
+}
+
 // evidenceValue renders a measurement for a terminal. The raw float is in the
 // JSON output; here the unit column says how to read a figure a person can
 // take in at a glance. A zero means the reason had no comparand, not that
@@ -216,6 +241,21 @@ func (p *printer) printTotals(fs []analyze.Finding) {
 	if s.MemUnknown > 0 {
 		row(w, "unknown", strconv.Itoa(s.MemUnknown), "-", "?", string(analyze.MemDemandCensored))
 	}
+	w.Flush()
+}
+
+// printGPUTotals is the devices the GPU containers hold, apart from totals
+// because a GPU is given back, not resized. IDLE is proven by busy-time;
+// UNMEASURED is held with nothing known, never folded into "not idle". Nothing
+// at all when no container holds a GPU.
+func (p *printer) printGPUTotals(fs []analyze.Finding) {
+	s := report.Totals(fs)
+	if s.GPUsHeld == 0 && s.MIGSlices == 0 {
+		return
+	}
+	w := p.section("gpu_totals", "HELD", "IDLE", "UNMEASURED", "MIG_SLICES")
+	row(w, strconv.FormatInt(s.GPUsHeld, 10), strconv.FormatInt(s.GPUsIdle, 10),
+		strconv.FormatInt(s.GPUsUnmeasured, 10), strconv.FormatInt(s.MIGSlices, 10))
 	w.Flush()
 }
 

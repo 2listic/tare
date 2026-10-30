@@ -61,6 +61,7 @@ func decide(f *Finding, window time.Duration, th Thresholds) {
 	f.RecCPULimit = sizeCPULimit(f, th, st.cpu, f.RecCPU, cpuCap, hasCPUCap)
 	f.RecMem = sizeMemRequest(f, th, floor)
 	f.RecMemLimit = memLimitFor(f.RecMem, th)
+	holdCPUForGPU(f, window, th)
 
 	switch {
 	case st.any():
@@ -569,7 +570,7 @@ func classifyWaste(f *Finding, th Thresholds) {
 		f.Verdict = Unset
 		return
 	}
-	wastedCPU := f.CPURequest > 0 && f.CPUUsageP95*1000 < float64(f.CPURequest)*th.WasteRatio
+	wastedCPU := !f.cpuHeldForGPU && f.CPURequest > 0 && f.CPUUsageP95*1000 < float64(f.CPURequest)*th.WasteRatio
 	wastedMem := f.MemRequest > 0 && f.MemUsageMax < float64(f.MemRequest)*th.WasteRatio
 	if !wastedCPU && !wastedMem {
 		f.Verdict = Healthy
@@ -638,7 +639,12 @@ func isIdle(f *Finding, window time.Duration, th Thresholds) *Reason {
 	// have unset requests, and all are load-bearing. Telling an operator the
 	// larger saving is to delete their metrics pipeline is exactly the clean,
 	// plausible, wrong answer this tool exists not to produce.
-	if f.CPURequest <= th.MinCPUMillicores && f.MemRequest <= th.MinMemBytes {
+	if f.CPURequest <= th.MinCPUMillicores && f.MemRequest <= th.MinMemBytes && f.GPUs == 0 {
+		return nil
+	}
+	// A GPU workload's work happens on the device, and a process waiting on
+	// a kernel can sit at almost no CPU. Quiet CPU says nothing about it.
+	if f.GPUs > 0 && !gpuProvedIdle(f, window, th) {
 		return nil
 	}
 	peak := max(f.CPUUsageMax, f.CPUSteadyMax, f.CPUStartupMax) * 1000
