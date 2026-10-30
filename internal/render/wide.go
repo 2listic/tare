@@ -244,6 +244,21 @@ func (p *printer) printTotals(fs []analyze.Finding) {
 	w.Flush()
 }
 
+// printGPUTotals is the devices the GPU containers hold, apart from totals
+// because a GPU is given back, not resized. IDLE is proven by busy-time;
+// UNMEASURED is held with nothing known, never folded into "not idle". Nothing
+// at all when no container holds a GPU.
+func (p *printer) printGPUTotals(fs []analyze.Finding) {
+	s := report.Totals(fs)
+	if s.GPUsHeld == 0 && s.MIGSlices == 0 {
+		return
+	}
+	w := p.section("gpu_totals", "HELD", "IDLE", "UNMEASURED", "MIG_SLICES")
+	row(w, strconv.FormatInt(s.GPUsHeld, 10), strconv.FormatInt(s.GPUsIdle, 10),
+		strconv.FormatInt(s.GPUsUnmeasured, 10), strconv.FormatInt(s.MIGSlices, 10))
+	w.Flush()
+}
+
 // CPUDelta and memDelta sign a change so its direction is in the cell, in the
 // units the findings table already uses. A zero change is "0": it is a sum, not
 // an unset field.

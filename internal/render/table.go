@@ -79,6 +79,13 @@ func (p *printer) printSummary(r *report.Report, listed int) {
 		}
 		line += ";"
 	}
+	if s.GPUsHeld > 0 {
+		line += fmt.Sprintf(" GPUs idle %d of %d", s.GPUsIdle, s.GPUsHeld)
+		if s.GPUsUnmeasured > 0 {
+			line += fmt.Sprintf(" (%d unmeasured)", s.GPUsUnmeasured)
+		}
+		line += ";"
+	}
 	line += fmt.Sprintf(" requests lowered on %d (%s CPU, %s mem)",
 		s.Workloads, CPUDelta(-s.CPUMillicores), MemDelta(-s.MemBytes))
 	if s.AddWorkloads > 0 {

@@ -1,9 +1,11 @@
 package report
 
 import (
+	"slices"
 	"sort"
 
 	"github.com/2listic/tare/internal/analyze"
+	"github.com/2listic/tare/internal/discover"
 )
 
 // Savings is what a reader actually wants from a cluster-wide run: not three
@@ -41,6 +43,18 @@ type Savings struct {
 	// (MemCensored). They contribute nothing to either direction, and a total
 	// that silently left them out would read as "nothing needs more memory".
 	MemUnknown int
+
+	// GPUs are whole devices, per pod times pods like every figure here, and
+	// counted apart from requests: a GPU is not resized, it is given back.
+	// Left out, a container holding an idle GPU headlined as a few millicores
+	// of CPU. GPUsIdle is only what busy-time proved idle (GPU_IDLE,
+	// GPU_DEVICE_UNUSED); GPUsUnmeasured is held devices nothing could be
+	// said about, so "0 idle" is never read off a missing exporter. MIG slices
+	// are not devices and get no usage verdict, so they are only counted.
+	GPUsHeld       int64
+	GPUsIdle       int64
+	GPUsUnmeasured int64
+	MIGSlices      int64
 }
 
 func Totals(fs []analyze.Finding) Savings {
@@ -50,6 +64,7 @@ func Totals(fs []analyze.Finding) Savings {
 		if f.MemCensored {
 			s.MemUnknown++
 		}
+		addGPUs(&s, f)
 		if f.Verdict == analyze.Idle {
 			s.IdleWorkloads++
 			s.IdleCPUMillicores += max(c, 0)
@@ -82,6 +97,30 @@ func Totals(fs []analyze.Finding) Savings {
 		}
 	}
 	return s
+}
+
+func addGPUs(s *Savings, f analyze.Finding) {
+	if f.GPUs == 0 {
+		return
+	}
+	pods := int64(max(f.Pods, 1))
+	if discover.IsMIGResource(f.GPUResource) {
+		s.MIGSlices += f.GPUs * pods
+		return
+	}
+	s.GPUsHeld += f.GPUs * pods
+	has := func(c analyze.Code) bool {
+		return slices.ContainsFunc(f.Reasons, func(r analyze.Reason) bool { return r.Code == c })
+	}
+	switch {
+	case has(analyze.GPUIdle):
+		s.GPUsIdle += f.GPUs * pods
+	case has(analyze.GPUDeviceUnused):
+		// The fewest any one pod left unused, so a lower bound.
+		s.GPUsIdle += int64(f.GPUIdleDevices) * pods
+	case has(analyze.GPUNotMeasured), has(analyze.GPUSharedDevice):
+		s.GPUsUnmeasured += f.GPUs * pods
+	}
 }
 
 // Reclaimable is per-workload, multiplied by replica count: a 100m saving on a

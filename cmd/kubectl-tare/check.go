@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -130,8 +132,16 @@ func runCheck(ctx context.Context, out io.Writer, kc *discover.Client, namespace
 		degraded = append(degraded, "tare-agent")
 	}
 
+	containers, listErr := kc.Containers(ctx, namespaces)
+	if listErr == nil && !all {
+		containers = slices.DeleteFunc(containers, func(c discover.Container) bool { return discover.SkipNamespace(c.Namespace) })
+	}
+	if listErr == nil {
+		degraded = append(degraded, checkGPUs(out, src, containers, namespaces, window)...)
+	}
+
 	fmt.Fprintln(out)
-	if note, ok := checkCoverage(ctx, kc, src, namespaces, all, window); !ok {
+	if note, ok := checkCoverage(containers, listErr, src, namespaces, window); !ok {
 		degraded = append(degraded, "metrics coverage")
 		mark(out, false, "coverage", note)
 	} else {
@@ -145,10 +155,9 @@ func runCheck(ctx context.Context, out io.Writer, kc *discover.Client, namespace
 // backend holds series for. It costs one pod list and one instant query, which
 // is worth paying to find out that Prometheus is scraping two namespaces out of
 // forty before a report says nothing about the other thirty-eight.
-func checkCoverage(ctx context.Context, kc *discover.Client, src *metrics.Prom, namespaces []string, all bool, window time.Duration) (string, bool) {
-	containers, err := kc.Containers(ctx, namespaces)
-	if err != nil {
-		return "could not list containers: " + err.Error(), false
+func checkCoverage(containers []discover.Container, listErr error, src *metrics.Prom, namespaces []string, window time.Duration) (string, bool) {
+	if listErr != nil {
+		return "could not list containers: " + listErr.Error(), false
 	}
 	covered, err := src.CoveredKeys(namespaces, window)
 	if err != nil {
@@ -158,9 +167,6 @@ func checkCoverage(ctx context.Context, kc *discover.Client, src *metrics.Prom, 
 	missingBy := map[string]int{}
 	var total, have int
 	for _, c := range containers {
-		if !all && discover.SkipNamespace(c.Namespace) {
-			continue
-		}
 		total++
 		if covered[metrics.Key{Namespace: c.Namespace, Pod: c.Pod, Container: c.Name}] {
 			have++
@@ -187,6 +193,67 @@ func checkCoverage(ctx context.Context, kc *discover.Client, src *metrics.Prom, 
 		"Those arrive as NO-DATA rows rather than as recommendations. Usual causes: Prometheus "+
 		"scrapes a subset of namespaces, a kubelet has stopped reporting, or the pods are newer "+
 		"than the first scrape", have, total, strings.Join(worst, ", ")), false
+}
+
+// checkGPUs describes dcgm-exporter, the only source of what a GPU did, and
+// returns the gaps it leaves. Nothing at all when no container in scope holds
+// a GPU, the same rule the report follows.
+//
+// It runs the report's own attribution rather than counting series: an
+// exporter outside Kubernetes mode exports every device and names no pod,
+// which a count calls healthy and the report calls GPU_NOT_MEASURED on every
+// GPU container.
+func checkGPUs(out io.Writer, src *metrics.Prom, containers []discover.Container, namespaces []string, window time.Duration) []string {
+	holders := map[metrics.Key]bool{}
+	for _, c := range containers {
+		if c.GPUs > 0 {
+			holders[metrics.Key{Namespace: c.Namespace, Pod: c.Pod, Container: c.Name}] = true
+		}
+	}
+	if len(holders) == 0 {
+		return nil
+	}
+	fmt.Fprintf(out, "\ngpu (%d containers hold one)\n", len(holders))
+	byKey, err := src.ObserveGPUs(holders, namespaces, window)
+	health := map[metrics.Signal]metrics.SignalHealth{}
+	for _, h := range src.Health() {
+		health[h.Signal] = h
+	}
+
+	busy := health[metrics.SigGPUBusy]
+	switch {
+	case err != nil || busy.Err != nil:
+		mark(out, false, "DCGM_FI_DEV_GPU_UTIL", "could not be checked: "+errors.Join(err, busy.Err).Error())
+		return []string{"dcgm-exporter"}
+	case busy.Series == 0:
+		mark(out, false, "DCGM_FI_DEV_GPU_UTIL", "absent: no GPU container's use can be measured, so an idle "+
+			"GPU and a busy one look the same and every one is reported GPU_NOT_MEASURED. Install NVIDIA's "+
+			"dcgm-exporter (part of the GPU Operator) with its ServiceMonitor")
+		return []string{"dcgm-exporter"}
+	case busy.Suspect != "":
+		mark(out, false, "DCGM_FI_DEV_GPU_UTIL", busy.Suspect)
+		return []string{"dcgm-exporter"}
+	}
+	mark(out, true, "DCGM_FI_DEV_GPU_UTIL", fmt.Sprintf("%d device series", busy.Series))
+
+	var gaps []string
+	if len(byKey) < len(holders) {
+		mark(out, false, "attribution", fmt.Sprintf("%d of %d GPU containers have device metrics. The rest are "+
+			"reported GPU_NOT_MEASURED: usually pods newer than the last scrape, or nodes the exporter does not run on",
+			len(byKey), len(holders)))
+		gaps = append(gaps, "gpu attribution")
+	} else {
+		mark(out, true, "attribution", fmt.Sprintf("all %d GPU containers have device metrics", len(holders)))
+	}
+
+	if health[metrics.SigGPUSMActive].Series == 0 {
+		mark(out, false, "DCGM_FI_PROF_SM_ACTIVE", "absent: busy-time can prove a GPU idle or underused but never "+
+			"used, so a busy GPU stays GPU_BUSY_UNVERIFIED. It is a DCGM profiling metric; GeForce cards never export it")
+		gaps = append(gaps, "gpu SM activity")
+	} else {
+		mark(out, true, "DCGM_FI_PROF_SM_ACTIVE", fmt.Sprintf("%d device series", health[metrics.SigGPUSMActive].Series))
+	}
+	return gaps
 }
 
 // checkAgent describes tare-agent, the source of CPU wait where PSI is

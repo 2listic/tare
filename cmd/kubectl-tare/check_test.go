@@ -181,3 +181,51 @@ func TestCheckAgent(t *testing.T) {
 		})
 	}
 }
+
+// dcgm-exporter is checked the way the report reads it, by attribution: an
+// exporter that names no pod passes a series count and leaves every GPU
+// container GPU_NOT_MEASURED.
+func TestCheckGPUs(t *testing.T) {
+	owned := `{"metric":{"UUID":"GPU-1","exported_namespace":"ml","exported_pod":"train-0","exported_container":"app"},"value":[0,"40"]}`
+	anonymous := `{"metric":{"UUID":"GPU-1"},"value":[0,"40"]}`
+	holder := discover.Container{Namespace: "ml", Pod: "train-0", Name: "app", GPUs: 1}
+	other := discover.Container{Namespace: "ml", Pod: "train-1", Name: "app", GPUs: 1}
+	cases := []struct {
+		name       string
+		busy, sm   string
+		containers []discover.Container
+		gaps       []string
+		want       string
+	}{
+		{"no GPU container", owned, owned, []discover.Container{{Namespace: "ml", Pod: "web", Name: "app"}}, nil, ""},
+		{"no exporter", "", "", []discover.Container{holder}, []string{"dcgm-exporter"}, "GPU_NOT_MEASURED"},
+		{"exporter names no pod", anonymous, "", []discover.Container{holder}, []string{"dcgm-exporter"}, "none names a pod"},
+		{"one of two attributed", owned, owned, []discover.Container{holder, other}, []string{"gpu attribution"}, "1 of 2"},
+		{"consumer card", owned, "", []discover.Container{holder}, []string{"gpu SM activity"}, "GeForce"},
+		{"complete", owned, owned, []discover.Container{holder}, nil, "all 1 GPU containers"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				result := c.busy
+				if strings.Contains(r.URL.Query().Get("query"), "SM_ACTIVE") {
+					result = c.sm
+				}
+				fmt.Fprintf(w, `{"status":"success","data":{"resultType":"vector","result":[%s]}}`, result)
+			}))
+			defer srv.Close()
+			var b strings.Builder
+			gaps := checkGPUs(&b, metrics.NewProm(srv.URL), c.containers, nil, 24*time.Hour)
+			if fmt.Sprint(gaps) != fmt.Sprint(c.gaps) {
+				t.Errorf("gaps = %v, want %v:\n%s", gaps, c.gaps, b.String())
+			}
+			out := strings.Join(strings.Fields(b.String()), " ")
+			if c.want == "" && out != "" {
+				t.Errorf("printed a gpu section with no GPU container:\n%s", b.String())
+			}
+			if !strings.Contains(out, c.want) {
+				t.Errorf("output lacks %q:\n%s", c.want, b.String())
+			}
+		})
+	}
+}

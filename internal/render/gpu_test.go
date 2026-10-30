@@ -116,8 +116,27 @@ func TestGPUSectionWithholdsOtherPodsNumbers(t *testing.T) {
 }
 
 func TestNoGPUSectionWithoutGPUs(t *testing.T) {
-	if out := renderTable(t, sampleReport(), false); strings.Contains(out, "section=gpus") {
-		t.Errorf("a report with no GPU container has a gpus section:\n%s", out)
+	if out := renderTable(t, sampleReport(), false); strings.Contains(out, "section=gpu") {
+		t.Errorf("a report with no GPU container has a gpu section:\n%s", out)
+	}
+	if _, stderr := renderCompact(t, sampleReport()); strings.Contains(stderr, "GPU") {
+		t.Errorf("a report with no GPU container mentions GPUs in its summary:\n%s", stderr)
+	}
+}
+
+// An idle GPU is usually the largest waste in a report and is not a request,
+// so it was missing from both totals: the lab sleeper's summary was 40m of
+// CPU. Unmeasured devices are counted apart, or "0 idle" off a missing
+// exporter reads as every device in use. gpuReport holds 5 whole devices:
+// sleeper idle, unmeasured and shared unmeasured, and one MIG slice.
+func TestGPUTotals(t *testing.T) {
+	out := renderTable(t, gpuReport(), false)
+	checkTableShape(t, out, []string{"gpu_totals"})
+	if !strings.Contains(out, "# section=gpu_totals\nHELD  IDLE  UNMEASURED  MIG_SLICES\n5     1     2           1\n") {
+		t.Errorf("gpu_totals wrong:\n%s", out)
+	}
+	if _, stderr := renderCompact(t, gpuReport()); !strings.Contains(stderr, "GPUs idle 1 of 5 (2 unmeasured);") {
+		t.Errorf("summary does not count the GPUs:\n%s", stderr)
 	}
 }
 
