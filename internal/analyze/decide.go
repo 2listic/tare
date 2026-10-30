@@ -32,6 +32,7 @@ func decide(f *Finding, window time.Duration, th Thresholds) {
 		return
 	}
 	maskTrendAfterOOM(f)
+	maskUnusableCPUWait(f, th)
 	st := assessSaturation(f, th)
 
 	// The spec is often silent about a ceiling that behaviour makes obvious.
@@ -172,6 +173,25 @@ func assessSaturation(f *Finding, th Thresholds) starved {
 		f.Reasons = append(f.Reasons, measured(CPUPressure, f.PSIWaitingPeak, th.PSIWaiting, SecPerSec, fmt.Sprintf(
 			"CPU pressure %.3f s/s exceeds %.3f while using %.0f%% of its allocation: the container is waiting on CPU it was denied (window mean %.4f)",
 			f.PSIWaitingPeak, th.PSIWaiting, util*100, f.PSIWaiting)))
+	} else if f.cpuWaitStalled(th) && wantsCPU {
+		f.Verdict, st.cpu = Saturated, true
+		if f.CPUWait.Stalled >= th.CPUWaitStalledShare {
+			f.Reasons = append(f.Reasons, measured(CPUWaitRelative, f.CPUWait.Stalled, th.CPUWaitStalledShare, Ratio, fmt.Sprintf(
+				"CPU wait (tare-agent; this container has no PSI) shows it stalled in %.0f%% of 5-minute stretches against a %.0f%% threshold, "+
+					"while using %.0f%% of its allocation: its tasks waited for CPU %s",
+				f.CPUWait.Stalled*100, th.CPUWaitStalledShare*100, util*100, cpuWaitStall(f.CPUWait))))
+		} else {
+			// The run may be a short pod's and the share the quiet history
+			// beside it: the run is part of the window whichever.
+			share := f.CPUWait.Stalled
+			if f.CPUWait.Stretches > 0 {
+				share = max(share, float64(f.CPUWait.LongestConfirmedRun)/float64(f.CPUWait.Stretches))
+			}
+			f.Reasons = append(f.Reasons, measured(CPUWaitNodeConfirmed, float64(f.CPUWait.LongestConfirmedRun), float64(th.CPUWaitStalledRun), Count, fmt.Sprintf(
+				"CPU wait (tare-agent; this container has no PSI) shows its tasks waiting for CPU for %s in a row while its node was short of CPU, "+
+					"using %.0f%% of its allocation. Only %.1f%% of the window, but the node confirms the cause: a starvation at one time of day, a batch run or an incident",
+				stretchesDuration(f.CPUWait.LongestConfirmedRun), util*100, share*100)))
+		}
 	} else if f.throttleStalled(th) && wantsCPU {
 		f.Verdict, st.cpu = Saturated, true
 		f.Reasons = append(f.Reasons, measured(CPUThrottled, f.ThrottlePeak, th.ThrottleRatio, Ratio, fmt.Sprintf(
@@ -182,13 +202,131 @@ func assessSaturation(f *Finding, th Thresholds) starved {
 	// A throttled container's stalls are its own quota, however low its
 	// averaged usage reads: CFS enforces the quota per 100ms period and a
 	// 5-minute rate hides the bursts that hit it. Blaming the node there
-	// contradicts LIMIT_NOT_NODE on the same row.
+	// contradicts LIMIT_NOT_NODE on the same row, whichever signal saw the
+	// stall.
 	if !wantsCPU && f.psiStalled(th) && !f.throttleStalled(th) {
 		f.Reasons = append(f.Reasons, measured(NodeContention, f.PSIWaitingPeak, th.PSIWaiting, SecPerSec, fmt.Sprintf(
 			"CPU pressure peaked at %.3f s/s but the container used only %.0f%% of its allocation (window mean pressure %.4f), so this is contention on the node rather than a shortage of its own: a larger request would not remove it",
 			f.PSIWaitingPeak, util*100, f.PSIWaiting)))
+	} else if !wantsCPU && f.cpuWaitStalled(th) && !f.throttleStalled(th) {
+		const notOwn = "but the container used only %.0f%% of its allocation, so this is contention on the node rather than a shortage of its own: a larger request would not remove it"
+		if f.CPUWait.Stalled >= th.CPUWaitStalledShare {
+			f.Reasons = append(f.Reasons, measured(NodeContention, f.CPUWait.Stalled, th.CPUWaitStalledShare, Ratio, fmt.Sprintf(
+				"CPU wait (tare-agent) shows it stalled in %.0f%% of 5-minute stretches "+notOwn,
+				f.CPUWait.Stalled*100, util*100)))
+		} else {
+			// The run fired, not the share: quote the run, or the reason
+			// shows a share under its own threshold.
+			f.Reasons = append(f.Reasons, measured(NodeContention, float64(f.CPUWait.LongestConfirmedRun), float64(th.CPUWaitStalledRun), Count, fmt.Sprintf(
+				"CPU wait (tare-agent) shows its tasks waiting for CPU for %s in a row while its node was short of CPU, "+notOwn,
+				stretchesDuration(f.CPUWait.LongestConfirmedRun), util*100)))
+		}
 	}
 	return st
+}
+
+// cpuWaitStalled reports the relative slowdown rule firing on enough of the
+// window. PSI comes first wherever it exists: the two disagree mostly about
+// mild waiting, and picking a winner per disagreement would make the verdict
+// depend on which instrument happened to be louder. CPU wait fills the gap
+// where PSI is missing; it is not a second opinion beside it.
+//
+// A run of stalled stretches its node confirmed counts too, however short
+// against the window: its cause is known, as a PSI peak's is.
+func (f *Finding) cpuWaitStalled(th Thresholds) bool {
+	return !f.hasSignal(metrics.SigPSI) && f.hasSignal(metrics.SigCPUWait) &&
+		(f.CPUWait.Stalled >= th.CPUWaitStalledShare || f.CPUWait.LongestConfirmedRun >= th.CPUWaitStalledRun)
+}
+
+// cpuWaitStall says how much worse than usual the stalled stretches were.
+func cpuWaitStall(c metrics.CPUWait) string {
+	if !c.HasNormal {
+		return "at least as long as they ran"
+	}
+	if c.NodeKnown > 0 {
+		return fmt.Sprintf("while its node was short of CPU, or at least twice as long per second of running as is normal for it (normal %.3f s waited per s run)", c.Normal)
+	}
+	return fmt.Sprintf("at least twice as long per second of running as is normal for it (normal %.3f s waited per s run), or as long as they ran", c.Normal)
+}
+
+// maskUnusableCPUWait withdraws CPU wait the agent measured but that cannot be
+// believed for this container, and says why. Withdrawn, the container falls
+// to throttling or to UNVERIFIED, as if the agent were absent, which is the
+// truth: a container whose tasks the agent cannot see shows no wait, and no
+// wait reads as "safe to shrink". The same holds for a container contended
+// all the time, whose normal is the contention.
+//
+// A long run of stalled stretches under the stalled share is the other way
+// the rule's "not starved" is wrong: the share is diluted by the window. That
+// keeps CPU wait but marks the finding, so a reduction becomes UNVERIFIED.
+// Neither case adds SATURATED: both are where the rule cannot tell, not where
+// it found starvation.
+//
+// The node, where it is known, tells in both cases. A run its node's
+// contention confirmed is starvation (cpuWaitStalled). A container with no
+// quiet normal on a node known not to be contended is not contended all the
+// time: its high normal is how it runs (many short wake-ups), and stands.
+//
+// Only for containers without PSI. Where PSI decides, CPU wait is not read,
+// and a caveat about it would be noise.
+func maskUnusableCPUWait(f *Finding, th Thresholds) {
+	if !f.hasSignal(metrics.SigCPUWait) || f.hasSignal(metrics.SigPSI) {
+		return
+	}
+	c := f.CPUWait
+	switch {
+	case c.LongestConfirmedRun >= th.CPUWaitStalledRun:
+		// The node, not the container's normal, established the cause, so
+		// neither a short history nor a partial view of its tasks undoes it:
+		// a view that misses tasks only misses wait.
+		return
+	case c.Stretches < th.CPUWaitMinStretches:
+		f.Reasons = append(f.Reasons, measured(CPUWaitShortHistory, float64(c.Stretches), float64(th.CPUWaitMinStretches), Count, fmt.Sprintf(
+			"tare-agent has %s of CPU wait for this container, and the rule compares it with its own normal, which needs at least %s, quiet periods included. CPU wait is not used yet",
+			stretchesDuration(c.Stretches), stretchesDuration(th.CPUWaitMinStretches))))
+	case c.Busy && c.Coverage < th.CPUWaitMinCoverage:
+		f.Reasons = append(f.Reasons, measured(CPUWaitLowCoverage, c.Coverage, th.CPUWaitMinCoverage, Ratio, fmt.Sprintf(
+			"tare-agent accounted only %.0f%% of this container's CPU time (needs %.0f%%), so it is not seeing the container's tasks and their lack of wait is not evidence. "+
+				"CPU wait is not used; see tare_agent_exits_unattributed_total on its node",
+			c.Coverage*100, th.CPUWaitMinCoverage*100)))
+	case c.Stalled >= th.CPUWaitStalledShare:
+		// Starved by the rule: whatever else is true, that answer stands.
+		return
+	case f.cpuWaitUnseen > 0:
+		f.Reasons = append(f.Reasons, measured(CPUWaitReplicaUnseen, float64(f.cpuWaitUnseen), 0, Count, fmt.Sprintf(
+			"%d of its %d live replicas have no CPU wait from tare-agent (no agent on their node, or one that failed its self-checks), "+
+				"so the replicas it sees cannot vouch for them. CPU wait is not used",
+			f.cpuWaitUnseen, f.Pods)))
+	case c.HasNormal && c.Normal >= th.CPUWaitMaxNormal && c.NodeKnown < th.CPUWaitMinNodeKnown:
+		// With its node known, a high normal needs no mask: had the node been
+		// contended, its stretches would be confirmed and stalled above; it was
+		// not, so the high normal is how this container runs, and is its normal.
+		f.Reasons = append(f.Reasons, measured(CPUWaitNeverQuiet, c.Normal, th.CPUWaitMaxNormal, SecPerSec, fmt.Sprintf(
+			"its tasks usually wait %.2f s for every second they run (limit %.2f): it is contended nearly all the time, so its own normal is the contention "+
+				"and CPU wait cannot show starvation against it. CPU wait is not used",
+			c.Normal, th.CPUWaitMaxNormal)))
+	case c.LongestRun >= th.CPUWaitStalledRun:
+		// The measurement is sound and stays; it just cannot vouch for a
+		// reduction. applySignalGaps turns a reduction into UNVERIFIED.
+		f.cpuWaitStalledRun = true
+		f.Reasons = append(f.Reasons, measured(CPUWaitStalledRun, float64(c.LongestRun), float64(th.CPUWaitStalledRun), Count, fmt.Sprintf(
+			"CPU wait shows it stalled for %s in a row, too short a part of the window (%.1f%% of stretches, threshold %.0f%%) to call it starved, "+
+				"too long to call it noise: a starvation at one time of day, a batch run or an incident looks like this. A reduction cannot be shown safe",
+			stretchesDuration(c.LongestRun), c.Stalled*100, th.CPUWaitStalledShare*100)))
+		return
+	default:
+		return
+	}
+	delete(f.Have, metrics.SigCPUWait)
+}
+
+// stretchesDuration renders a count of 5-minute stretches as time.
+func stretchesDuration(n int) string {
+	d := time.Duration(n) * 5 * time.Minute
+	if d >= time.Hour {
+		return fmt.Sprintf("%.0fh", d.Hours())
+	}
+	return fmt.Sprintf("%.0fm", d.Minutes())
 }
 
 // psiStalled reports CPU pressure above the threshold at its worst bucket.

@@ -113,6 +113,35 @@ type Thresholds struct {
 	// exports it, else from mean busy-time, which bounds use from above and so
 	// can prove underuse but never use.
 	GPUUnderused float64
+	// CPUWaitStalledShare: a container is starved by tare-agent's CPU wait when
+	// at least this share of its 5-minute stretches is stalled under the
+	// relative slowdown rule (metrics/cpuwait.go). It plays the role
+	// PSIWaiting plays for PSI, on a different scale.
+	CPUWaitStalledShare float64
+	// CPUWaitMinCoverage: below this share of the container's CPU time
+	// accounted, the agent is not seeing the container's tasks, and no wait
+	// is not evidence of no starvation.
+	CPUWaitMinCoverage float64
+	// CPUWaitMinStretches is the history the rule needs before it is believed:
+	// the normal a stretch is compared with must include quiet periods.
+	CPUWaitMinStretches int
+	// CPUWaitStalledRun: this many stalled stretches in a row, with the share
+	// under CPUWaitStalledShare, is a starvation the share diluted. A run its
+	// node confirmed has a known cause and makes SATURATED. Any other run
+	// cannot be told apart from a load peak the container's own normal does
+	// not cover, so it only holds a reduction (UNVERIFIED).
+	CPUWaitStalledRun int
+	// CPUWaitMaxNormal: a container whose normal slowdown is at least this is
+	// contended all the time, so it has no quiet normal to be compared with
+	// and only the ceiling, just above it, could flag it. Its CPU wait is not
+	// used unless it already shows starvation.
+	CPUWaitMaxNormal float64
+	// CPUWaitMinNodeKnown: the share of the window the container's node state
+	// must be known for before the node, not CPUWaitMaxNormal, decides a
+	// container with no quiet normal. Its node contended means its stretches
+	// are confirmed; its node not contended means the high normal is the
+	// container's own way of running, and is its normal.
+	CPUWaitMinNodeKnown float64
 }
 
 func DefaultThresholds() Thresholds {
@@ -176,5 +205,27 @@ func DefaultThresholds() Thresholds {
 		LimitMoveRatio:         0.20,
 		MinSamplesForInference: 2880, // twelve hours at a 15s scrape
 		MinSamplesForSizing:    240,  // an hour at a 15s scrape
+		// 0.05, as agent/compare-pressure's --share, which is what the rule was
+		// evaluated with on the harness clusters. Unswept in this catalog.
+		CPUWaitStalledShare: 0.05,
+		// 0.5. Measured on the harness: the agent's failures to see a container
+		// sat at 0.01-0.09, healthy fork-heavy containers at 0.66-0.88.
+		CPUWaitMinCoverage: 0.5,
+		// A day of 5-minute stretches, so the normal has seen a night.
+		CPUWaitMinStretches: 288,
+		// 4 stretches, 20 minutes: the shortest starvation a reduction should
+		// not walk past. On the harness the 35-minute batch episodes ran to 7
+		// in a row. Unvalidated over week-long windows: the harness runs an
+		// hour, and high-load phases there also made short runs, so expect
+		// some UNVERIFIED on containers that were only busy.
+		CPUWaitStalledRun: 4,
+		// 0.5: half a second waited per second run as the usual state. The
+		// harness's always-contended k6 sat at 0.95, its quiet containers
+		// below 0.15.
+		CPUWaitMaxNormal: 0.5,
+		// Half the window: less, and the stretches without node state are
+		// judged by the relative rule alone, which is the case
+		// CPUWaitMaxNormal guards.
+		CPUWaitMinNodeKnown: 0.5,
 	}
 }

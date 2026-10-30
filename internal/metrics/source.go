@@ -35,12 +35,15 @@ const (
 	SigLimitTrend  Signal = "limit-trend"
 	SigNodeUtil    Signal = "node-utilisation"
 	SigOwner       Signal = "pod-owner"
+	// SigCPUWait is tare-agent's CPU wait, the saturation signal for nodes
+	// without PSI. See cpuwait.go.
+	SigCPUWait Signal = "cpu-wait"
 )
 
 // SaturationSignals are the ones that reveal a container is being starved.
 // With none of them, a shrink recommendation cannot be made safely: there is
 // no way to tell a comfortable container from a throttled one.
-var SaturationSignals = []Signal{SigPSI, SigThrottle}
+var SaturationSignals = []Signal{SigPSI, SigCPUWait, SigThrottle}
 
 // Key identifies one container of one pod.
 type Key struct {
@@ -97,6 +100,9 @@ type Observation struct {
 
 	OOMEvents float64
 	Restarts  float64
+
+	// CPUWait is tare-agent's view of the container, valid when Has(SigCPUWait).
+	CPUWait CPUWait
 
 	// Samples is populated buckets seen for this container, which drives the
 	// confidence rating.
@@ -208,6 +214,15 @@ type NodeObserver interface {
 	// and no node name at all; resolving that to a Kubernetes node is the
 	// caller's job, since only the caller holds the node inventory.
 	ObserveNodes(ips []string, window time.Duration) (map[string]NodeObservation, error)
+}
+
+// Placer is a Source that can use each container's node. Like NodeObserver it
+// is not part of Source: the simulator has no nodes.
+type Placer interface {
+	// SetPlacement gives each container's node before Observe, for the node
+	// half of the CPU wait rule. Optional: without it that rule decides from
+	// the containers alone.
+	SetPlacement(map[Key]Placement)
 }
 
 // WindowProber is an optional Source capability: reporting how much history the

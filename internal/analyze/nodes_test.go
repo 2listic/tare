@@ -281,21 +281,38 @@ func TestZeroSamplesIsNotAMeasurement(t *testing.T) {
 	}
 }
 
-// PSI and CFS are alternatives, not a conjunction: CFS counters exist only for
-// containers that already have a limit, and PSI covers every container.
-func TestPSIAloneIsEnough(t *testing.T) {
+// Without CFS counters, pressure under a limit on a node idle on average is
+// reported, but blames neither the limit nor the node: pressure says the tasks
+// waited, not why, and a node idle on average can be full for the minutes that
+// made it (KNOWN-FAILURES 56).
+func TestPSIAloneCannotTellLimitFromNode(t *testing.T) {
 	f := throttledFinding()
 	f.ThrottlePeak = 0
 	f.PSIWaitingPeak = 0.9
 	f.Have = map[metrics.Signal]bool{metrics.SigPSI: true}
 	applyNodes(f, inv(big("n1", 16)), map[string]metrics.NodeObservation{"n1": util(0.05, 0.03)}, DefaultThresholds())
 	r := reasons(f)
-	if !strings.Contains(r, "CPU pressure peaked") {
-		t.Fatalf("pressure alone must produce the finding: %s", r)
+	if !strings.Contains(r, "CPU pressure peaked") || !hasReason(f, ThrottleUnknown) {
+		t.Fatalf("pressure alone must still be reported, as %s: %s", ThrottleUnknown, r)
+	}
+	if hasReason(f, LimitNotNode) {
+		t.Errorf("unmeasured throttling must not be read as the limit: %s", r)
 	}
 	if strings.Contains(r, "scheduling periods") {
 		t.Errorf("without CFS data the message must not quote a throttle ratio: %s", r)
 	}
+	if !strings.Contains(r, "container_cpu_cfs_throttled_periods_total") {
+		t.Errorf("the missing metric must be named: %s", r)
+	}
+}
+
+func hasReason(f *Finding, c Code) bool {
+	for _, r := range f.Reasons {
+		if r.Code == c {
+			return true
+		}
+	}
+	return false
 }
 
 // The one thing this feature must never do. tare has no latency signal until

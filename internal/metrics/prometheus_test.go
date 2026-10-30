@@ -165,6 +165,9 @@ func TestNamespaceSelectorIsApplied(t *testing.T) {
 	NewProm(f.URL).Observe([]string{"alpha", "beta"}, 24*time.Hour)
 
 	for _, expr := range f.seen {
+		if agentWide(expr) {
+			continue
+		}
 		if !strings.Contains(expr, `namespace=~"alpha|beta"`) {
 			t.Errorf("query is not namespace-scoped: %s", truncate(expr))
 		}
@@ -185,10 +188,7 @@ func TestQueriesAreWellFormed(t *testing.T) {
 	NewProm(f.URL).Observe(nil, 24*time.Hour)
 
 	var peak, p95 string
-	for _, raw := range f.seen {
-		if isOwnerQuery(raw) {
-			continue
-		}
+	for _, raw := range containerQueries(f.seen) {
 		e := unwrapReduce(t, raw)
 		if strings.HasPrefix(e, "max_over_time(rate(container_cpu_usage_seconds_total") {
 			peak = e
@@ -213,10 +213,7 @@ func TestQueriesAreWellFormed(t *testing.T) {
 	// mean and must span the whole window, because deciding saturation on a
 	// peak marks a container starved for one bad minute.
 	var psiPeak, psiAvg int
-	for _, raw := range f.seen {
-		if isOwnerQuery(raw) {
-			continue
-		}
+	for _, raw := range containerQueries(f.seen) {
 		e := unwrapReduce(t, raw)
 		if !strings.Contains(e, "container_pressure_cpu_waiting") {
 			continue
@@ -292,10 +289,7 @@ func TestIncarnationsAreAggregated(t *testing.T) {
 		t.Fatal("no queries were sent")
 	}
 	var summed int
-	for _, e := range f.seen {
-		if isOwnerQuery(e) {
-			continue
-		}
+	for _, e := range containerQueries(f.seen) {
 		unwrapReduce(t, e)
 		if strings.HasPrefix(e, "sum by (namespace,pod,container) (count_over_time(container_memory_working_set_bytes") {
 			summed++
@@ -306,6 +300,26 @@ func TestIncarnationsAreAggregated(t *testing.T) {
 			"partition the window, so maxing the count freezes confidence at the "+
 			"longest-lived one instead of totalling the container's coverage", summed)
 	}
+}
+
+// agentWide reports a query about tare-agent itself rather than about
+// containers: whether it is scraped at all, and its per-node self-checks. Those
+// are labelled by node, not by namespace or container, and are exempt from the
+// container-query rules above for that reason alone.
+func agentWide(expr string) bool {
+	return expr == agentPresentExpr || strings.Contains(expr, "tare_agent_")
+}
+
+// containerQueries is what was queried about containers: neither agent-wide
+// nor an owner lookup.
+func containerQueries(seen []string) []string {
+	var out []string
+	for _, e := range seen {
+		if !agentWide(e) && !isOwnerQuery(e) {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 func truncate(s string) string {

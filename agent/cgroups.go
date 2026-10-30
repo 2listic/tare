@@ -23,10 +23,12 @@ var containerID = regexp.MustCompile(`^(.*?/[^/]*[0-9a-f]{64}[^/]*)(/.*)?$`)
 // containerScope folds a cgroup path into the container it belongs to: the path
 // is cut after the component carrying the container id. CRI-O runs a container's
 // processes in crio-<id>.scope/container while the kubelet reports
-// crio-<id>.scope. ok is false for paths that belong to no container.
+// crio-<id>.scope. ok is false for paths that belong to no container, including
+// the systemd mount units of containerd's rootfs and shm mounts
+// (run-containerd-...-<id>-rootfs.mount), which carry the id but no processes.
 func containerScope(path string) (scope string, ok bool) {
 	m := containerID.FindStringSubmatch(path)
-	if m == nil {
+	if m == nil || strings.HasSuffix(m[1], ".mount") {
 		return path, false
 	}
 	return m[1], true

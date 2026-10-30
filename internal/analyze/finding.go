@@ -88,9 +88,13 @@ type Finding struct {
 	// the pressure pair above.
 	Throttle     float64
 	ThrottlePeak float64
-	OOMKilled    bool
-	Restarts     float64
-	Samples      int
+	// CPUWait is tare-agent's view, the pressure source where PSI is missing.
+	// Across pods it holds the worst stalled share and mean, and the lowest
+	// coverage: one replica the agent cannot see is enough to doubt the rest.
+	CPUWait   metrics.CPUWait
+	OOMKilled bool
+	Restarts  float64
+	Samples   int
 
 	Ceilings []ceilings.Ceiling
 
@@ -110,6 +114,17 @@ type Finding struct {
 	// was measured across. It is not the same as the signal never having been
 	// exported, and the caveat it drives says so.
 	trendKilledByRestart bool
+
+	// cpuWaitStalledRun records a long run of stalled stretches that the
+	// stalled share did not reach. CPU wait stays a usable signal; it only
+	// cannot vouch for a reduction.
+	cpuWaitStalledRun bool
+
+	// cpuWaitUnseen counts the live replicas with no CPU wait of their own
+	// (no agent on their node, or one that failed its self-checks). Their
+	// silence is not evidence, so the replicas the agent does see cannot
+	// vouch for the workload.
+	cpuWaitUnseen int
 
 	// RecCPU and RecMem are the recommended requests, zero when none is
 	// offered. RecCPULimit is the recommended CPU limit, which is deliberately

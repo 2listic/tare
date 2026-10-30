@@ -125,15 +125,54 @@ func PressureCell(f analyze.Finding) string {
 			return fmt.Sprintf("psi ?/%.3f", f.PSIWaitingPeak)
 		}
 		return fmt.Sprintf("psi %.4f/%.3f", f.PSIWaiting, f.PSIWaitingPeak)
+	// CPU wait: the share of 5-minute stretches stalled, then the normal
+	// slowdown it was judged against ("-" when it never waited enough to have
+	// one). Not on PSI's scale, hence its own prefix.
+	case f.HasCPUWait() && f.CPUWait.Stalled > 0:
+		return fmt.Sprintf("wait %.0f%%/%s", f.CPUWait.Stalled*100, cpuWaitNormal(f))
 	case f.HasThrottle() && f.ThrottlePeak > 0.001:
 		if !f.HasThrottleAvg() {
 			return fmt.Sprintf("thr ?/%.1f%%", f.ThrottlePeak*100)
 		}
 		return fmt.Sprintf("thr %.1f/%.1f%%", f.Throttle*100, f.ThrottlePeak*100)
-	case f.HasPSI() || f.HasThrottle():
+	case f.HasPSI() || f.HasCPUWait() || f.HasThrottle():
 		return "none"
 	}
 	return "unmeasured"
+}
+
+func cpuWaitNormal(f analyze.Finding) string {
+	if !f.CPUWait.HasNormal {
+		return "-"
+	}
+	return fmt.Sprintf("%.3f", f.CPUWait.Normal)
+}
+
+// CPUWaitDetail is tare-agent's view of a container in one line, for the
+// views that have room for it, or "" when CPU wait is not its pressure source.
+func CPUWaitDetail(f analyze.Finding) string {
+	if !f.HasCPUWait() {
+		return ""
+	}
+	c := f.CPUWait
+	cover := "-"
+	if c.Busy {
+		cover = fmt.Sprintf("%.0f%%", c.Coverage*100)
+	}
+	return fmt.Sprintf("stalled %.1f%% of %d stretches   longest run %s   normal %s   mean %.3f s/s   coverage %s",
+		c.Stalled*100, c.Stretches, runDuration(c.LongestRun), cpuWaitNormal(f), c.Mean, cover)
+}
+
+// runDuration renders a count of 5-minute stretches as time.
+func runDuration(n int) string {
+	switch m := n * 5; {
+	case n == 0:
+		return "-"
+	case m < 120:
+		return fmt.Sprintf("%dm", m)
+	default:
+		return fmt.Sprintf("%.1fh", float64(m)/60)
+	}
 }
 
 func Milli(m int64) string {

@@ -11,7 +11,10 @@ ready to run but waiting for a CPU, summed over all of its tasks, including task
 that have already exited. On every scrape it reads the scheduler counters of every
 live thread (`/proc/<pid>/task/<tid>/schedstat`); in between, the kernel sends it
 the final counters of every task that exits (taskstats exit notifications), so
-short-lived processes are counted too.
+short-lived processes are counted too. To know which container an exited task
+belonged to, it also notes the container of every task that starts a program
+(process connector exec events): exec probes are started from outside the
+container and are usually gone before their exit can be traced back.
 
 This is a proof of concept. tare does not need it, does not install it, and does
 not read the agent's metrics yet.
@@ -107,19 +110,21 @@ kubectl -n tare-agent rollout status ds/tare-agent
 kubectl -n tare-agent logs ds/tare-agent
 ```
 
-The log should show the cgroup version and `registration sent for cpus ...`, and the
-pods should become ready. If the exit listener cannot register or stops (no
-`CAP_NET_ADMIN`, not in the host network namespace), the agent logs why, keeps serving
-the live threads, reports `tare_agent_exit_listener_up 0`, and fails its readiness
-probe: without exit records CPU wait misses every task that exited between scrapes.
+The log should show the cgroup version, `registration sent for cpus ...` and
+`process connector: listening for execs`, and the pods should become ready. If the exec
+listener cannot start, the agent keeps serving what it has and logs why. If the exit
+listener cannot register or stops (no `CAP_NET_ADMIN`, not in the host network
+namespace), the agent logs why, keeps serving the live threads, reports
+`tare_agent_exit_listener_up 0`, and fails its readiness probe: without exit records CPU
+wait misses every task that exited between scrapes.
 
 Why the pod is privileged:
 
 | setting | reason |
 |---|---|
 | `hostPID: true` | the PIDs in the cgroups are host PIDs, and `/proc` must be the host's |
-| `hostNetwork: true` | the kernel's taskstats interface only answers in the host network namespace |
-| `privileged: true` | for the POC. What is actually needed: `CAP_NET_ADMIN` (taskstats exit events, a large receive buffer) and read access to every task's `/proc` entry |
+| `hostNetwork: true` | the kernel's taskstats interface and process connector only answer in the host network namespace |
+| `privileged: true` | for the POC. What is actually needed: `CAP_NET_ADMIN` (taskstats exit events, process connector exec events, large receive buffers) and read access to every task's `/proc` entry |
 | `/sys/fs/cgroup` mounted read-only | to find the containers' cgroups |
 
 The namespace carries `pod-security.kubernetes.io/enforce: privileged`. On
@@ -244,6 +249,9 @@ curl -s localhost:9105/metrics | grep '^tare_'
 | `tare_agent_exits_layout_total{layout}` | records decoded per kernel record layout (`upstream`, `rhel10`) |
 | `tare_agent_exits_layout_unknown_total` | records from a kernel whose layout the agent does not know. Must be 0 |
 | `tare_agent_netlink_drops_total` | exit records the kernel dropped. Must be 0 |
+| `tare_agent_execs_total{location}` | exec events from the process connector, by where the task was (`container`, `outside`). 0 means the exec listener is not running (see its log line) |
+| `tare_agent_exits_placed_by_exec_total` | exit records assigned to a container through their process's exec event (exec probes, and short tasks no scrape saw) |
+| `tare_agent_exec_drops_total` | exec events the kernel dropped; those tasks fall back to the exit-time lookup. Should be 0 |
 | `tare_agent_containers{location}` | containers found under the kubelet's `kubepods` hierarchy, or `outside` it (see Troubleshooting) |
 | `tare_agent_build_info{version,kernel,cgroup}` | one per node |
 
@@ -352,6 +360,7 @@ time, wait, usage, slowdown, psi, normal, and 0/1 per rule.
 | `tare-agent series exist but none matches a container` | the kubelet's cAdvisor series lack the `id` label, or the kubelet job has another name | keep `id` (some setups drop it with a metric relabelling); pass `--kubelet-job` |
 | `tare_agent_containers{location="outside"}` above 0 | the kubelet and the container runtime use different cgroup drivers (e.g. kubelet `systemd`, containerd `SystemdCgroup = false`): containers live under the runtime's service, not under `kubepods` | the agent still finds them by their container id; whether the kubelet's `id` matches depends on the setup. Fixing the driver mismatch is the real cure |
 | `AGENT_LOW_COVERAGE` on fork-heavy containers | processes torn down after their exit record is sent; values of 0.7–0.9 are normal for them | below 0.5, look at `tare_agent_exits_unattributed_total` |
+| `AGENT_LOW_COVERAGE` on idle containers with exec probes (databases, caches) | the probes' processes are started by the runtime's shim, outside the container, and were counted as host processes | an agent with the exec listener places them: check `tare_agent_execs_total{location="container"}` grows on that node |
 | `AGENT_LAYOUT_UNKNOWN` | a kernel whose taskstats record layout the agent does not know | report the kernel version; exits on that node are not counted |
 | `AGENT_DROPS` | the kernel dropped exit records (very high process churn) | the agent requests a 64 MB receive buffer; check the agent's CPU |
 | `sudo: ctr: command not found` | `/usr/local/bin` is not in `sudo`'s `PATH` (RHEL family) | use `sudo /usr/local/bin/ctr` |

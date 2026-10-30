@@ -19,21 +19,28 @@ type Code string
 
 const (
 	// Evidence about the container's own behaviour.
-	NoSamples         Code = "NO_SAMPLES"
-	MemLeak           Code = "MEM_LEAK"
-	OOMKilled         Code = "OOMKILLED"
-	LeakMasked        Code = "LEAK_MASKED_BY_RESTART"
-	CPUPressure       Code = "CPU_PRESSURE"
-	CPUThrottled      Code = "CPU_THROTTLED"
-	NodeContention    Code = "NODE_CONTENTION"
-	RestartChurn      Code = "RESTART_CHURN"
-	IdleWindow        Code = "IDLE_NO_WORK"
-	IdleCaveat        Code = "IDLE_NOT_RULED_OUT"
-	CPUUnderused      Code = "CPU_UNDERUSED"
-	MemUnderused      Code = "MEM_UNDERUSED"
-	CPULimitUnderused Code = "CPU_LIMIT_UNDERUSED"
-	MemLimitUnderused Code = "MEM_LIMIT_UNDERUSED"
-	CPUAtLimit        Code = "CPU_PINNED_AT_LIMIT"
+	NoSamples    Code = "NO_SAMPLES"
+	MemLeak      Code = "MEM_LEAK"
+	OOMKilled    Code = "OOMKILLED"
+	LeakMasked   Code = "LEAK_MASKED_BY_RESTART"
+	CPUPressure  Code = "CPU_PRESSURE"
+	CPUThrottled Code = "CPU_THROTTLED"
+	// CPUWaitRelative: starved by tare-agent's CPU wait, where PSI is missing.
+	// The name is agent/compare-pressure's, so the two outputs match.
+	CPUWaitRelative Code = "CPU_WAIT_RELATIVE"
+	// CPUWaitNodeConfirmed: starved by CPU wait during a run of stretches its
+	// node's contention confirmed, too short a part of the window for the
+	// share.
+	CPUWaitNodeConfirmed Code = "CPU_WAIT_NODE_CONFIRMED"
+	NodeContention       Code = "NODE_CONTENTION"
+	RestartChurn         Code = "RESTART_CHURN"
+	IdleWindow           Code = "IDLE_NO_WORK"
+	IdleCaveat           Code = "IDLE_NOT_RULED_OUT"
+	CPUUnderused         Code = "CPU_UNDERUSED"
+	MemUnderused         Code = "MEM_UNDERUSED"
+	CPULimitUnderused    Code = "CPU_LIMIT_UNDERUSED"
+	MemLimitUnderused    Code = "MEM_LIMIT_UNDERUSED"
+	CPUAtLimit           Code = "CPU_PINNED_AT_LIMIT"
 
 	// How the recommendation was arrived at.
 	CPUFloor   Code = "CPU_FLOOR"
@@ -61,6 +68,23 @@ const (
 	NoMemTrendOnRaise  Code = "NO_MEM_TREND_ON_RAISE"
 	NoMemP95           Code = "NO_MEM_P95"
 	NodeUtilUnknown    Code = "NODE_UTIL_UNKNOWN"
+	// ThrottleUnknown: pressure under a CPU limit on a node idle on average,
+	// with throttling unmeasured, so neither the limit nor the node is blamed.
+	ThrottleUnknown Code = "THROTTLE_UNKNOWN"
+	// CPU wait was measured and not used: the agent saw too little of the
+	// container's CPU time, or the container has too little history for its
+	// own normal.
+	CPUWaitLowCoverage  Code = "CPU_WAIT_LOW_COVERAGE"
+	CPUWaitShortHistory Code = "CPU_WAIT_SHORT_HISTORY"
+	// CPUWaitReplicaUnseen: some live replicas have no CPU wait at all, so
+	// the ones the agent sees cannot vouch for the workload.
+	CPUWaitReplicaUnseen Code = "CPU_WAIT_REPLICA_UNSEEN"
+	// CPUWaitNeverQuiet: the container is contended all the time, so its
+	// normal is the contention and the rule cannot see it.
+	CPUWaitNeverQuiet Code = "CPU_WAIT_NEVER_QUIET"
+	// CPUWaitStalledRun: stalled for a long run of stretches, too short a
+	// part of the window for the share; a reduction is not shown safe.
+	CPUWaitStalledRun Code = "CPU_WAIT_STALLED_RUN"
 
 	// Facts about the workload that bound what may be recommended.
 	VPAManaged      Code = "VPA_MANAGES_WORKLOAD"

@@ -25,6 +25,10 @@ type Prom struct {
 	// which is the failure mode of a proxied query against an overloaded
 	// backend.
 	Ctx context.Context
+
+	// placement is each container's node, for the node half of the CPU wait
+	// rule; see SetPlacement.
+	placement map[Key]Placement
 }
 
 // New builds a source over any transport.
@@ -150,6 +154,7 @@ func (p *Prom) Observe(namespaces []string, window time.Duration) (map[Key]*Obse
 		}
 	}
 	p.flagDeadPressure(out)
+	p.observeCPUWait(out, selector(namespaces), window)
 	dropStartupTrends(out, window, time.Now())
 	dropHalfTrends(out)
 	p.attribute(namespaces, window, out)
