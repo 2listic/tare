@@ -17,6 +17,12 @@ import (
 // and a node count built on it would count the same unconfirmed saving twice.
 // UNVERIFIED likewise: the totals leave it out because the reduction cannot be
 // shown to be safe.
+//
+// A pod's spec.overhead belongs to no container, so it is added back to the
+// containers' sum: a VM's virt-launcher pod, or any pod with a RuntimeClass,
+// would otherwise be packed smaller than the scheduler reserves for it. A VM's
+// memory recommendation is already the guest's share plus virt-launcher's
+// overhead (analyze.placeVMMemory), never QEMU's resident memory.
 func Sizer(fs []analyze.Finding) packing.Sizer {
 	type agg struct {
 		cpu, mem int64
@@ -42,6 +48,6 @@ func Sizer(fs []analyze.Finding) packing.Sizer {
 		if !ok || !a.usable {
 			return 0, 0, false
 		}
-		return a.cpu, a.mem, true
+		return a.cpu + p.OverheadCPU, a.mem + p.OverheadMem, true
 	}
 }

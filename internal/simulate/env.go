@@ -190,6 +190,12 @@ func (c *Cluster) Run(d time.Duration) {
 func (c *Cluster) Observe(namespaces []string, window time.Duration) (map[metrics.Key]*metrics.Observation, error) {
 	out := map[metrics.Key]*metrics.Observation{}
 	for name, e := range c.Envs {
+		if e.Demand.VM != nil {
+			for k, o := range e.observeVM(c.Namespace, name, window) {
+				out[k] = o
+			}
+			continue
+		}
 		// A sidecar shares its app's pod, and an observation is keyed by pod:
 		// keying it by its own name would put it in a pod the inventory does
 		// not contain, and the join in Run would silently drop it.
@@ -204,9 +210,15 @@ func (c *Cluster) Observe(namespaces []string, window time.Duration) (map[metric
 }
 
 func (e *Env) observe(k metrics.Key, window time.Duration) *metrics.Observation {
-	cutoff := e.now.Add(-window)
+	return e.observeRange(k, e.now.Add(-window), e.now, window)
+}
+
+// observeRange is observe over [cutoff, end): the part of the window one pod
+// of the container was alive for, when a live migration or a rollout split it
+// between two.
+func (e *Env) observeRange(k metrics.Key, cutoff, end time.Time, window time.Duration) *metrics.Observation {
 	earlyEnd := cutoff.Add(time.Hour)
-	lateStart := e.now.Add(-time.Hour)
+	lateStart := end.Add(-time.Hour)
 	o := &metrics.Observation{Key: k}
 	// The simulator can produce every signal, which is exactly why tests that
 	// exercise missing ones have to remove them deliberately.
@@ -241,7 +253,7 @@ func (e *Env) observe(k metrics.Key, window time.Duration) *metrics.Observation 
 	var curN int
 	const perStretch = int(5 * time.Minute / Tick)
 	for _, s := range e.samples {
-		if s.T.Before(cutoff) {
+		if s.T.Before(cutoff) || !s.T.Before(end) {
 			continue
 		}
 		cur.Wait += s.PSIWaiting * s.CPUDemand

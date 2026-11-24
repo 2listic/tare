@@ -64,3 +64,17 @@ func TestSizerKeepsUnverifiedWorkloadsAsTheyAre(t *testing.T) {
 		t.Error("an UNVERIFIED workload must keep its current requests in the replay")
 	}
 }
+
+// A pod's spec.overhead is in no container's request. Dropping it packed a
+// VM's virt-launcher pod, or any RuntimeClass pod, smaller than the scheduler
+// reserves for it.
+func TestSizerKeepsPodOverhead(t *testing.T) {
+	size := Sizer([]analyze.Finding{{
+		Namespace: "vms", Workload: "VirtualMachine/db", Container: "compute", Verdict: analyze.Waste,
+		RecCPU: 200, RecMem: 2 << 30,
+	}})
+	cpu, mem, ok := size(discover.Pod{Namespace: "vms", Workload: "VirtualMachine/db", OverheadCPU: 100, OverheadMem: 64 << 20})
+	if !ok || cpu != 300 || mem != 2<<30+64<<20 {
+		t.Errorf("got %d %d %v", cpu, mem, ok)
+	}
+}

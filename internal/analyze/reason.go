@@ -113,6 +113,39 @@ const (
 	VRAMOverPool      Code = "VRAM_EXCEEDS_RESERVED_POOL"
 	VRAMFits          Code = "VRAM_FITS"
 	GPUOversubscribed Code = "GPU_OVERSUBSCRIBED"
+
+	// KubeVirt VMs. A VM's pod resources are derived from its spec, so these
+	// speak in the VM's terms: vCPUs, guest memory, QEMU overhead.
+	//
+	// VMRSSTouched: QEMU's resident memory grew; that is pages the guest
+	// touched, not a leak and not guest use.
+	VMRSSTouched Code = "VM_RSS_IS_TOUCHED_MEMORY"
+	// VMVCPUDelay: the vCPUs waited on the host run queue; a CPU reduction
+	// is not shown safe.
+	VMVCPUDelay Code = "VM_VCPU_DELAY"
+	// VMCPUSplit: evidence only, the guest's share of the compute
+	// container's CPU against QEMU/libvirt's.
+	VMCPUSplit Code = "VM_CPU_SPLIT"
+	// VMVCPUsUnused and VMGuestNeedsVCPUs are vCPU-count advice, never
+	// patched: it changes what the guest sees.
+	VMVCPUsUnused     Code = "VM_VCPUS_UNUSED"
+	VMGuestNeedsVCPUs Code = "VM_GUEST_NEEDS_VCPUS"
+	// VMPinnedCoresIdle: dedicated cores whose vCPUs barely run.
+	VMPinnedCoresIdle Code = "VM_PINNED_CORES_IDLE"
+	// Guest memory, the real memory knob.
+	VMGuestMemOversized  Code = "VM_GUEST_MEMORY_OVERSIZED"
+	VMGuestMemPressure   Code = "VM_GUEST_MEMORY_PRESSURE"
+	VMGuestMemUnreported Code = "VM_GUEST_MEMORY_UNREPORTED"
+	VMHugepages          Code = "VM_HUGEPAGES_RESERVED"
+	// VMOverheadExceeded: the compute container used more than the guest
+	// plus KubeVirt's overhead estimate.
+	VMOverheadExceeded Code = "VM_OVERHEAD_EXCEEDED"
+	// VMOOMOverhead: an OOMKilled VM, whose usual cause is the overhead
+	// estimate rather than the guest.
+	VMOOMOverhead Code = "VM_OOM_OVERHEAD_HINT"
+	// How a VM change reaches the running guest.
+	VMChangeNeedsRestart Code = "VM_CHANGE_NEEDS_RESTART"
+	VMLiveUpdate         Code = "VM_LIVE_UPDATE"
 )
 
 // Unit says how to read Observed and Against. Without it a consumer comparing

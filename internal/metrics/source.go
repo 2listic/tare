@@ -42,8 +42,10 @@ const (
 
 // SaturationSignals are the ones that reveal a container is being starved.
 // With none of them, a shrink recommendation cannot be made safely: there is
-// no way to tell a comfortable container from a throttled one.
-var SaturationSignals = []Signal{SigPSI, SigCPUWait, SigThrottle}
+// no way to tell a comfortable container from a throttled one. A VM's vCPU
+// delay is the same quantity as CPU wait, measured by the hypervisor, and is
+// only ever present on a VM's compute container.
+var SaturationSignals = []Signal{SigPSI, SigCPUWait, SigThrottle, SigVMVCPUDelay}
 
 // Key identifies one container of one pod.
 type Key struct {

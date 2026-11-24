@@ -1211,7 +1211,104 @@ metric, and the `NODE_CONTENTION` already on the row is withdrawn
 the node was full in the stretches the container waited, which the CPU wait
 rule already reads per stretch.
 
+## 57. A VM's touched memory read as a leak
+
+**Looked like:** nothing yet: no cluster tare has run on had KubeVirt VMs. On
+one that does, an idle Linux VM whose page cache fills over a week would read
+`LEAKING` with every recommendation withheld.
+
+**Was actually:** the `compute` container of a virt-launcher pod is QEMU, and
+its working set is every guest page ever touched. It grows as the guest's page
+cache fills and gives nothing back without a balloon, so late/early crossed
+`LeakRatio` (1.5) on a guest using a fraction of its memory. A Windows guest is
+worse: it touches all of it at boot, so its RSS is its whole guest from the
+first minute and says nothing about use, in either direction. The pod memory
+was also sized from that RSS, below what the guest had been promised.
+
+**Caught by:** reading the analyzer against KubeVirt's pod model before adding
+VM support, 2026-11-16.
+
+**Fixed by:** a VM never gets `MEM_LEAK` from RSS growth (`VM_RSS_IS_TOUCHED_MEMORY`
+instead); its pod memory is floored by a `vm-guest-memory` ceiling at guest share
+plus overhead; guest memory is lowered only on the guest's own report.
+`TestVMArchetypes` (idle-linux-vm, windows-vm), `TestVMPodMemoryNeverBelowTheGuest`.
+A deliberately reverted leak guard turns the first red.
+
+## 58. A live migration made one VM two replicas and dropped its history
+
+**Looked like:** nothing yet, for the same reason as 57.
+
+**Was actually:** during a live migration a VMI runs two virt-launcher pods,
+source and target, and both were folded into the workload as replicas:
+`Pods: 2`, and every total counting the VM twice. Once the source was gone,
+kube-state-metrics attributed it to `VirtualMachineInstance/<name>` while live
+pods were attributed to the same name, so the history before the migration
+matched nothing and the VM was measured from its newest pod. Pods were also
+never walked from the VMI up to the VirtualMachine, the object people edit.
+
+**Caught by:** reading `aggregate` against KubeVirt's migration flow,
+2026-11-16.
+
+**Fixed by:** pods owned by a VMI resolve to its VirtualMachine; a VM group
+counts distinct VMIs, not pods; a dead pod credited to a VMI is translated to
+its VM; a VM's sample count is at least the VMI's own (`kubevirt_vmi_memory_domain_bytes`).
+`TestMigratingVMIsOneVM`, `TestPodsReplacedByMigrationAreCreditedToTheVM`,
+`TestVirtLauncherPodsResolveToTheirVirtualMachine`.
+
+## 59. Every VM was pinned in the node replay, for the wrong reason
+
+**Looked like:** nothing yet; on a KubeVirt cluster, every VM in
+`PinReasons` as "has a nodeSelector".
+
+**Was actually:** KubeVirt gives every virt-launcher pod a nodeSelector from
+its node-labeller (`kubevirt.io/schedulable`, CPU model and feature labels),
+requests `devices.kubevirt.io/kvm`, and backs disks with PVCs. Each of those
+pinned the pod. Pinning is the safe direction, so the savings were understated
+rather than invented, but the reason was false, and the one that matters (a VM
+that cannot live-migrate, or is not asked to on a drain) was never examined.
+
+**Caught by:** reading `pinReason`, 2026-11-16.
+
+**Fixed by:** a virt-launcher pod is pinned by its VM: not live-migratable, an
+eviction strategy that shuts it down on a drain, dedicated CPUs, hugepages, host
+devices or SR-IOV, or a VMI that could not be read. KubeVirt's own selectors,
+devices and (for a migratable VM) PVCs are ignored. `TestVMPinRules`.
+
+## 60. A VM patch was refused as "pod template is immutable"
+
+**Looked like:** nothing yet; on a KubeVirt cluster `-o patch` would print
+`skipped vms/VirtualMachineInstance/db [compute]: a VirtualMachineInstance pod
+template is immutable`.
+
+**Was actually:** the refusal was right and the reason wrong. A VM's pod
+resources are derived from `VirtualMachine.spec.template.spec.domain`, so the
+change belongs there, as a merge patch on a CRD, and takes effect only on a
+restart (or a live update, for a memory raise under `LiveUpdate`).
+
+**Caught by:** reading `Patchable`, 2026-11-16.
+
+**Fixed by:** `-o patch`, `diff --write` and `--kustomize` write
+`domain.resources.requests.cpu` and `domain.memory.guest` on the
+VirtualMachine, with `VM_CHANGE_NEEDS_RESTART` or `VM_LIVE_UPDATE`. A VM sized
+by an instancetype, and a bare VMI, are refused with their own reasons.
+`TestPatchTargetsTheVirtualMachineDomain`, `TestVMEditWritesTheDomain`,
+`TestVMPatchable`.
+
 ## Open, and not yet solved
+
+**KubeVirt support has not met a cluster with VMs.** Everything in 57-60 and
+the VM sizing behind it is tested against the simulator and fakes only. The
+queries are written from KubeVirt's metric reference and three details are
+unconfirmed on a live virt-handler: the case of the `state` label on
+`kubevirt_vmi_vcpu_seconds_total` (matched case-insensitively for now), whether
+migration series name the VMI `name` or `vmi` (both are read), and whether
+`kubevirt_vmi_memory_swap_*_traffic_bytes` behave as counters under `rate()`.
+The guest-pressure thresholds (64KiB/s swap, 50 major faults/s) and the 0.8
+shrink ratio are chosen with margin, not measured. `kubevirt_vmi_node_cpu_affinity`
+and `kubevirt_vm_resource_requests` are not read: dedicated CPUs and requests come
+from the VMI spec, so a token that cannot read VMIs leaves a VM unsized in VM
+terms and pinned, rather than falling back to those series. Settling this needs
+the lab run in docs/plan.md (KubeVirt).
 
 **A workload redeployed more than once a day never has usable CPU wait.**
 CPU wait compares each pod with its own normal (55), which needs a day of

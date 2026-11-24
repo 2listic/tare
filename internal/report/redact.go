@@ -55,6 +55,11 @@ func Redact(r *Report) {
 		}
 		add(f.Constraints.HPAName)
 		add(f.Constraints.VPAName)
+		if f.VM != nil {
+			add(f.VM.VM)
+			add(f.VM.VMI)
+			add(f.VM.Instancetype)
+		}
 	}
 	// A budget is named only inside the sentences that report it, so its
 	// name has to be read back out of them.
@@ -106,6 +111,17 @@ func Redact(r *Report) {
 		}
 		for j := range f.Ceilings {
 			f.Ceilings[j].Note = rep(f.Ceilings[j].Note)
+		}
+		// Copies, not edits in place: both are shared with the run's inputs.
+		if f.VM != nil {
+			vm := *f.VM
+			vm.VM, vm.VMI, vm.Instancetype = rep(vm.VM), rep(vm.VMI), rep(vm.Instancetype)
+			f.VM = &vm
+		}
+		if f.VMObs != nil {
+			o := *f.VMObs
+			o.Namespace, o.Name = rep(o.Namespace), rep(o.Name)
+			f.VMObs = &o
 		}
 	}
 	for i := range r.Commitment {
@@ -200,6 +216,7 @@ func splitName(s string) []string {
 var publicWord = map[string]bool{
 	"Deployment": true, "StatefulSet": true, "DaemonSet": true, "ReplicaSet": true,
 	"ReplicationController": true, "CronJob": true, "Job": true, "Pod": true,
+	"VirtualMachine": true, "VirtualMachineInstance": true, "compute": true,
 	"latest": true,
 }
 

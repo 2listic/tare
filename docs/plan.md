@@ -1768,6 +1768,85 @@ Republic at 0 gCO2e/kWh (a gap in Ember, which would have printed 0 kg) and
 Western Sahara's last figure from 2009. The generator now drops zeros and
 anything more than three years behind the newest figure.
 
+## KubeVirt VMs (2026-11-16)
+
+KubeVirt runs a VM as a virt-launcher pod (pod → VirtualMachineInstance →
+VirtualMachine) whose `compute` container is QEMU. tare saw these pods and
+treated them as an application, which went wrong in four ways
+(KNOWN-FAILURES 57-60): QEMU's RSS read as a leak and sized the pod, a live
+migration doubled the VM and dropped its history, the node-labeller selector
+pinned every VM, and the patch was refused for the wrong reason.
+
+**Discover.** `internal/discover/kubevirt.go` reads `virtualmachineinstances`,
+`virtualmachines` and the `KubeVirt` CR with the dynamic client, VPA-style: a
+missing CRD is silent, any other failure is a warning. The workload index walks
+VMI → VM like ReplicaSet → Deployment. A `VMSpec` (vCPUs, guest memory, explicit
+domain resources, authored fields, instancetype, dedicated CPUs, hugepages, host
+devices, eviction strategy, `LiveMigratable`, `maxGuest`/`maxSockets`, rollout
+strategy, guest OS, `cpuAllocationRatio`, `memoryOvercommit`) rides on the
+`compute` container only. RBAC and `kubectl tare check` list the three reads,
+only where `kubevirt.io/v1` is served.
+
+**Metrics.** `internal/metrics/vm.go`, an optional `VMObserver` capability asked
+only when the inventory holds a VM, keyed by namespace + VMI name so it survives
+migrations. Host-side: vCPU running time (`state` matched case-insensitively),
+overhead CPU (total − vCPU), vCPU delay (added to `SaturationSignals`), RSS,
+domain size, launcher overhead, non-evictable, migration times. Guest-reported:
+used memory (available − usable), its coverage of the window, balloon, swap
+traffic and major faults, guest load. `check` has a virt-handler block.
+
+**Decisions** (`internal/analyze/vm.go`, after `decide`):
+
+- Pod CPU request: the usual sizing on the `compute` container; vCPU delay above
+  `PSIWaiting` is SATURATED when the VM uses its allocation and holds the request
+  either way. Dedicated CPUs follow the vCPU count and are never changed
+  (`VM_PINNED_CORES_IDLE` when idle, low confidence). Limits are KubeVirt's.
+- vCPU count: advice only (`VM_VCPUS_UNUSED`, `VM_GUEST_NEEDS_VCPUS`).
+- Pod memory: floored by a `vm-guest-memory` ceiling (guest share + overhead) and
+  otherwise set to what KubeVirt will derive; above it by 5% is
+  `VM_OVERHEAD_EXCEEDED`.
+- Guest memory, the real memory knob: lowered to used × 1.15 (128Mi steps, 1Gi
+  floor, only below 80% of the current guest) when the guest reported for 90% of
+  the window with swap and faults under threshold; a sustained swapper is
+  SATURATED and offered +25%; hugepages and silent guests are left alone.
+- A VM is never LEAKING from RSS, and a LEAKING or BLOCKED finding gets no VM
+  numbers.
+
+**Patch.** `Patchable` accepts a VirtualMachine with a CPU request or guest
+memory change, refuses instancetype-sized VMs and bare VMIs. `-o patch` writes a
+merge patch on `spec.template.spec.domain`; `diff --write` splices the same
+fields (`spliceVM`); `--kustomize` emits a `kubevirt.io/v1` patch. An authored
+`domain.resources.requests.memory` above the new guest is lowered with it. Every
+change carries `VM_CHANGE_NEEDS_RESTART`, or `VM_LIVE_UPDATE` for a guest memory
+raise within `maxGuest` under `LiveUpdate` (memory cannot be unplugged).
+
+**Packing.** A virt-launcher pod is pinned by its VM (not migratable, eviction
+strategy that shuts it down, dedicated CPUs, hugepages, host devices, unreadable
+VMI); KubeVirt's selectors, devices and PVCs no longer pin it. The sizer adds
+back `spec.overhead`, which belongs to no container (this also fixes RuntimeClass
+pods). `-o wide` has `vms` and `vm-density` sections.
+
+**Simulator.** `simulate.VMCatalog()`, kept apart from `Catalog()` so the
+application sweeps stay as they were, has the nine archetypes (idle Linux,
+Windows, vCPU-delayed, load-bound, swapping, no balloon, dedicated idle,
+hugepages, migrated mid-window) and is in `--demo`.
+
+**Not done.** Phase 4 (tare-agent per-vCPU split) is deferred as planned:
+`kubevirt_vmi_cpu_usage_seconds_total` − vCPU time and vCPU delay cover it while
+virt-handler is scraped. The lab verification below has not run: no cluster tare
+has met had VMs.
+
+**Lab verification, to do.** KubeVirt with nested KVM (or `useEmulation: true`),
+Prometheus scraping virt-handler with KubeVirt's PrometheusRule installed; one
+idle Linux VM, one under `stress-ng`, one without the balloon driver, one forced
+to swap, one migrated mid-window, and a noisy neighbour for vCPU delay. Check
+`kubectl tare check` (RBAC and virt-handler series), `report -o wide` (VM rows,
+density), tare's margins against
+`pod_container:kubevirt_vm_memory_request_margin_based_on_working_set_bytes:sum`,
+and that `-o patch` passes `kubectl apply --dry-run=server` and yields the
+expected pod request after a restart. Confirm the three open label questions in
+KNOWN-FAILURES (Open).
+
 ## Roadmap after v0.1
 
 - **v0.2**: CRD for policy and scoping; degraded no-Prometheus mode; PR bot

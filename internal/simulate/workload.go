@@ -95,6 +95,12 @@ type Demand struct {
 	// containers of different shapes is a case no single-container fixture
 	// reaches.
 	Sidecar *Demand
+
+	// VM makes this a KubeVirt VM: the container is virt-launcher's compute
+	// container, and the behaviour above is QEMU's as cAdvisor sees it -
+	// BaseMem and growth are resident memory, BaseCPU is guest plus
+	// hypervisor. What the guest itself does is in VM.
+	VM *VMDemand
 }
 
 // Shape is how a container's resources are declared in its manifest.

@@ -94,6 +94,18 @@ func detectLeak(f *Finding, th Thresholds) bool {
 	if !f.hasSignal(metrics.SigMemTrend) || f.MemEarly <= 0 || f.MemLate <= f.MemEarly*th.LeakRatio {
 		return false
 	}
+	// A VM's compute container is QEMU, and QEMU's resident memory is every
+	// guest page that has ever been touched. It grows as the guest's page
+	// cache fills and never gives a page back without a balloon, so a guest
+	// using a fraction of its memory reads as a leak against its own boot.
+	if f.VM != nil {
+		f.Reasons = append(f.Reasons, measured(VMRSSTouched, f.MemLate, f.MemEarly, Bytes, fmt.Sprintf(
+			"QEMU's resident memory grew from %s to %s across the window. For a VM that is the guest touching "+
+				"pages it had not touched before (page cache, a burst, a Windows guest zeroing memory at boot), "+
+				"not a leak: resident pages are only returned through the balloon. It is not read as guest use either.",
+			HumanBytes(int64(f.MemEarly)), HumanBytes(int64(f.MemLate)))))
+		return false
+	}
 	f.Verdict = Leaking
 	f.Reasons = append(f.Reasons, measured(MemLeak, f.MemLate, f.MemEarly, Bytes, fmt.Sprintf(
 		"memory grew from %s to %s across the window, a %.1fx increase: this is unbounded growth and no limit will hold it. Sizing cannot fix a leak; the recommendation is withheld deliberately.",
@@ -196,6 +208,16 @@ func assessSaturation(f *Finding, th Thresholds) starved {
 		f.Reasons = append(f.Reasons, measured(CPUThrottled, f.ThrottlePeak, th.ThrottleRatio, Ratio, fmt.Sprintf(
 			"CFS throttling peaks at %.1f%% of scheduling periods against a %.1f%% threshold (window mean %.1f%%), while using %.0f%% of its allocation",
 			f.ThrottlePeak*100, th.ThrottleRatio*100, f.Throttle*100, util*100)))
+	}
+
+	// A VM's vCPUs waiting on the host run queue is the hypervisor's own
+	// measure of the same stall, and it exists where PSI does not.
+	if !st.cpu && f.vcpuDelayStalled(th) && wantsCPU {
+		f.Verdict, st.cpu = Saturated, true
+		f.Reasons = append(f.Reasons, measured(VMVCPUDelay, f.VMObs.VCPUDelayAvg, th.PSIWaiting, SecPerSec, fmt.Sprintf(
+			"the VM's vCPUs waited %.3f s/s for a host CPU on average (worst minute %.3f) against a %.3f threshold, "+
+				"while using %.0f%% of its allocation: the guest is being denied host CPU",
+			f.VMObs.VCPUDelayAvg, f.VMObs.VCPUDelayMax, th.PSIWaiting, util*100)))
 	}
 
 	// A throttled container's stalls are its own quota, however low its
@@ -326,6 +348,12 @@ func stretchesDuration(n int) string {
 		return fmt.Sprintf("%.0fh", d.Hours())
 	}
 	return fmt.Sprintf("%.0fm", d.Minutes())
+}
+
+// vcpuDelayStalled reports a VM whose vCPUs waited for host CPU above the
+// pressure threshold, on the window mean.
+func (f *Finding) vcpuDelayStalled(th Thresholds) bool {
+	return f.hasSignal(metrics.SigVMVCPUDelay) && f.VMObs != nil && f.VMObs.VCPUDelayAvg > th.PSIWaiting
 }
 
 // psiStalled reports CPU pressure above the threshold at its worst bucket.

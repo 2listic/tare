@@ -34,6 +34,14 @@ type Change struct {
 	CPULimit   *int64
 	MemLimit   *int64
 
+	// VM marks a KubeVirt VirtualMachine. Its fields then address the VM's
+	// domain, not a container: CPURequest is domain.resources.requests.cpu,
+	// MemRequest domain.resources.requests.memory (set only when it would
+	// otherwise exceed the new guest memory), and GuestMemory is
+	// domain.memory.guest. The limits are never set.
+	VM          bool
+	GuestMemory *int64
+
 	// Reasons is the evidence, carried through so it can land in the pull
 	// request body. It is the only part of this output a reviewer cannot get
 	// from the diff itself, and the reason they might say yes.
@@ -55,6 +63,13 @@ func Plan(fs []analyze.Finding) ([]Change, []Skipped) {
 	var out []Change
 	var skipped []Skipped
 	for _, f := range fs {
+		if f.IsVM() {
+			_, cpu := analyze.VMCPUChange(f)
+			_, guest := analyze.VMGuestChange(f)
+			if !cpu && !guest {
+				continue // a VM with nothing to change is not a skip
+			}
+		}
 		if ok, why := analyze.Patchable(f); !ok {
 			// A finding with nothing to say is not a skip worth reporting: the
 			// report is full of healthy containers that need no change.
@@ -64,6 +79,10 @@ func Plan(fs []analyze.Finding) ([]Change, []Skipped) {
 			continue
 		}
 		kind, name, _ := analyze.WorkloadParts(f)
+		if f.IsVM() {
+			out = append(out, vmChange(f, kind, name))
+			continue
+		}
 		c := Change{
 			Namespace: f.Namespace, Kind: kind, Name: name, Container: f.Container,
 			Reasons: analyze.ReasonTexts(f.Reasons),
@@ -93,6 +112,27 @@ func Plan(fs []analyze.Finding) ([]Change, []Skipped) {
 		out = append(out, c)
 	}
 	return out, skipped
+}
+
+// vmChange is a VirtualMachine's edit: its CPU request and guest memory.
+// When the domain authors a memory request above the new guest size, it is
+// lowered with it, or the pod would keep requesting the old size and the
+// shrink would save nothing.
+func vmChange(f analyze.Finding, kind, name string) Change {
+	c := Change{
+		Namespace: f.Namespace, Kind: kind, Name: name, Container: f.Container, VM: true,
+		Reasons: analyze.ReasonTexts(f.Reasons),
+	}
+	if cpu, ok := analyze.VMCPUChange(f); ok {
+		c.CPURequest = ptr(cpu)
+	}
+	if g, ok := analyze.VMGuestChange(f); ok {
+		c.GuestMemory = ptr(g)
+		if f.VM.AuthoredMemRequest > g {
+			c.MemRequest = ptr(g)
+		}
+	}
+	return c
 }
 
 // workload is the change's namespace/Kind/name, as a skip names it.
@@ -154,17 +194,29 @@ func PullRequestBody(changes []Change, skipped []Skipped, source, window string)
 	for _, c := range changes {
 		fmt.Fprintf(&b, "\n### %s/%s %s [%s]\n\n", c.Namespace, c.Kind, c.Name, c.Container)
 		b.WriteString("| field | new value |\n| --- | --- |\n")
-		if c.CPURequest != nil {
-			fmt.Fprintf(&b, "| requests.cpu | `%s` |\n", CPUQuantity(*c.CPURequest))
-		}
-		if c.CPULimit != nil {
-			fmt.Fprintf(&b, "| limits.cpu | `%s` |\n", CPUQuantity(*c.CPULimit))
-		}
-		if c.MemRequest != nil {
-			fmt.Fprintf(&b, "| requests.memory | `%s` |\n", MemQuantity(*c.MemRequest))
-		}
-		if c.MemLimit != nil {
-			fmt.Fprintf(&b, "| limits.memory | `%s` |\n", MemQuantity(*c.MemLimit))
+		if c.VM {
+			if c.CPURequest != nil {
+				fmt.Fprintf(&b, "| domain.resources.requests.cpu | `%s` |\n", CPUQuantity(*c.CPURequest))
+			}
+			if c.MemRequest != nil {
+				fmt.Fprintf(&b, "| domain.resources.requests.memory | `%s` |\n", MemQuantity(*c.MemRequest))
+			}
+			if c.GuestMemory != nil {
+				fmt.Fprintf(&b, "| domain.memory.guest | `%s` |\n", MemQuantity(*c.GuestMemory))
+			}
+		} else {
+			if c.CPURequest != nil {
+				fmt.Fprintf(&b, "| requests.cpu | `%s` |\n", CPUQuantity(*c.CPURequest))
+			}
+			if c.CPULimit != nil {
+				fmt.Fprintf(&b, "| limits.cpu | `%s` |\n", CPUQuantity(*c.CPULimit))
+			}
+			if c.MemRequest != nil {
+				fmt.Fprintf(&b, "| requests.memory | `%s` |\n", MemQuantity(*c.MemRequest))
+			}
+			if c.MemLimit != nil {
+				fmt.Fprintf(&b, "| limits.memory | `%s` |\n", MemQuantity(*c.MemLimit))
+			}
 		}
 		if len(c.Reasons) > 0 {
 			b.WriteString("\nEvidence:\n\n")

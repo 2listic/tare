@@ -3,6 +3,7 @@ package discover
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -25,6 +26,12 @@ type Pod struct {
 	// the scheduler computes what a pod reserves.
 	CPU int64 // millicores
 	Mem int64 // bytes
+
+	// OverheadCPU and OverheadMem are the pod's spec.overhead (RuntimeClass),
+	// already inside CPU and Mem. They belong to no container, so a sizer
+	// replacing the containers' requests has to add them back.
+	OverheadCPU int64
+	OverheadMem int64
 
 	// CPULimit and MemLimit are what the pod may consume, summed the same way.
 	// A node's limits can exceed its allocatable many times over: that is
@@ -76,7 +83,7 @@ func (c *Client) Pods(ctx context.Context, namespaces []string, pdbs []PDB) ([]P
 			if p.Spec.NodeName == "" || p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
 				continue // not occupying a node
 			}
-			out = append(out, podFrom(p, idx.ownerOf(ctx, p), pdbs))
+			out = append(out, podFromVM(p, idx.ownerOf(ctx, p), pdbs, idx.vmFor(ctx, p)))
 		}
 	}
 	return out, nil
@@ -88,6 +95,12 @@ func (c *Client) Pods(ctx context.Context, namespaces []string, pdbs []PDB) ([]P
 // computed from, and a field that is declared and never assigned is a defect
 // this project has shipped before.
 func podFrom(p *corev1.Pod, workload string, pdbs []PDB) Pod {
+	return podFromVM(p, workload, pdbs, nil)
+}
+
+// podFromVM is podFrom for a pod that may be a KubeVirt virt-launcher, whose
+// VM decides whether it can move.
+func podFromVM(p *corev1.Pod, workload string, pdbs []PDB, vm *VMSpec) Pod {
 	cpu, mem := effectiveRequests(p)
 	cpuLim, memLim, noCPULim, noMemLim := effectiveLimits(p)
 	pod := Pod{
@@ -98,7 +111,14 @@ func podFrom(p *corev1.Pod, workload string, pdbs []PDB) Pod {
 		UnlimitedCPU: noCPULim, UnlimitedMem: noMemLim,
 		NodeSelector: p.Spec.NodeSelector,
 	}
-	pod.PinReason = pinReason(p, pod.WorkloadKind)
+	if o := p.Spec.Overhead; o != nil {
+		pod.OverheadCPU, pod.OverheadMem = milli(o, corev1.ResourceCPU), bytes(o, corev1.ResourceMemory)
+	}
+	if isVirtLauncher(p) {
+		pod.PinReason = vmPinReason(p, vm)
+	} else {
+		pod.PinReason = pinReason(p, pod.WorkloadKind)
+	}
 	if pod.PinReason == "" {
 		pod.PinReason = blockedByPDB(pdbs, p.Namespace, p.Labels)
 	}
@@ -186,8 +206,67 @@ func pinReason(p *corev1.Pod, kind string) string {
 	case "":
 		return "not owned by a controller, so nothing would recreate it elsewhere"
 	}
-	if len(p.Spec.NodeSelector) > 0 {
-		return "has a nodeSelector"
+	return placementPin(p, pinRules{})
+}
+
+// pinRules relaxes the generic placement checks for a pod whose constraints
+// tare understands better than the generic rules do.
+type pinRules struct {
+	ignoreSelector func(key string) bool
+	ignoreResource func(name corev1.ResourceName) bool
+	sharedVolumes  bool // its PVCs are known not to bind it to a node
+}
+
+// isVirtLauncher reports a KubeVirt VM's pod.
+func isVirtLauncher(p *corev1.Pod) bool {
+	if ref := metav1.GetControllerOf(p); ref != nil && ref.Kind == "VirtualMachineInstance" {
+		return true
+	}
+	return p.Labels["kubevirt.io"] == "virt-launcher"
+}
+
+// vmPinReason is pinReason for a virt-launcher pod. The generic rules pin
+// every VM: KubeVirt gives each pod a nodeSelector from its node-labeller,
+// requests devices.kubevirt.io/kvm, and backs disks with PVCs. None of those
+// stops a live-migratable VM from moving, and a drain migrates it. What does
+// stop it is the VM itself: not migratable, not asked to migrate, or tied to
+// hardware or memory reserved on one node.
+func vmPinReason(p *corev1.Pod, vm *VMSpec) string {
+	switch {
+	case vm == nil:
+		return "is a KubeVirt VM whose VirtualMachineInstance could not be read, so whether it can live-migrate is unknown"
+	case vm.HostDevices:
+		return "is a VM using host devices, GPUs or SR-IOV, which do not move with it"
+	case vm.DedicatedCPU:
+		return "is a VM with dedicated CPUs, which need whole free cores on the target node"
+	case vm.HugepageSize != "":
+		return "is a VM backed by hugepages, which are reserved per node"
+	case !vm.LiveMigratableKnown:
+		return "is a VM that does not report whether it is live-migratable"
+	case !vm.LiveMigratable:
+		return "VM is not live-migratable"
+	case !vm.Migratable():
+		strategy := vm.EvictionStrategy
+		if strategy == "" {
+			strategy = "unset"
+		}
+		return "is a VM whose eviction strategy (" + strategy + ") shuts it down on a drain rather than migrating it"
+	}
+	return placementPin(p, pinRules{
+		ignoreSelector: func(k string) bool { return strings.Contains(k, "kubevirt.io") },
+		ignoreResource: func(n corev1.ResourceName) bool { return strings.HasPrefix(string(n), "devices.kubevirt.io/") },
+		// Live migration needs storage both nodes can reach, so a VM that
+		// is migratable has none that binds it.
+		sharedVolumes: true,
+	})
+}
+
+// placementPin is the generic placement checks.
+func placementPin(p *corev1.Pod, r pinRules) string {
+	for k := range p.Spec.NodeSelector {
+		if r.ignoreSelector == nil || !r.ignoreSelector(k) {
+			return "has a nodeSelector"
+		}
 	}
 	if p.Spec.Affinity != nil {
 		return "has affinity or anti-affinity rules"
@@ -198,16 +277,16 @@ func pinReason(p *corev1.Pod, kind string) string {
 	if hasNonDefaultToleration(p.Spec.Tolerations) {
 		return "tolerates a taint, so it may be placed where other pods cannot follow"
 	}
-	if usesExtendedResources(p) {
+	if usesExtendedResources(p, r.ignoreResource) {
 		return "requests an extended resource such as a GPU"
 	}
 	for _, v := range p.Spec.Volumes {
 		switch {
-		case v.PersistentVolumeClaim != nil:
+		case v.PersistentVolumeClaim != nil && !r.sharedVolumes:
 			return "has a PersistentVolumeClaim, which may bind it to a zone or a node"
 		case v.HostPath != nil:
 			return "mounts a hostPath"
-		case v.Ephemeral != nil:
+		case v.Ephemeral != nil && !r.sharedVolumes:
 			return "has an ephemeral volume claim"
 		}
 	}
@@ -230,14 +309,14 @@ func hasNonDefaultToleration(ts []corev1.Toleration) bool {
 	return false
 }
 
-func usesExtendedResources(p *corev1.Pod) bool {
+func usesExtendedResources(p *corev1.Pod, ignore func(corev1.ResourceName) bool) bool {
 	std := map[corev1.ResourceName]bool{
 		corev1.ResourceCPU: true, corev1.ResourceMemory: true,
 		corev1.ResourceEphemeralStorage: true,
 	}
 	check := func(rl corev1.ResourceList) bool {
 		for name, q := range rl {
-			if !std[name] && !q.IsZero() {
+			if !std[name] && !q.IsZero() && (ignore == nil || !ignore(name)) {
 				return true
 			}
 		}

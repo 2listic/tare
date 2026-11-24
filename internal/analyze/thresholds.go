@@ -137,6 +137,24 @@ type Thresholds struct {
 	// are confirmed; its node not contended means the high normal is the
 	// container's own way of running, and is its normal.
 	CPUWaitMinNodeKnown float64
+
+	// VMGuestMinCoverage: the share of the window the guest must have
+	// reported its memory for before that report can support a reduction.
+	VMGuestMinCoverage float64
+	// VMGuestShrinkRatio: guest memory is only proposed lower when the sized
+	// value is below this fraction of the current one. A VM change costs a
+	// restart, and a few percent is not worth one.
+	VMGuestShrinkRatio float64
+	// VMMinGuestMem floors a guest memory recommendation.
+	VMMinGuestMem int64
+	// VMGuestSwapRate (bytes/s) and VMGuestMajFaults (per s) are guest memory
+	// pressure: either, in any 5-minute bucket, blocks a guest memory
+	// reduction; either as a window mean is sustained and asks for a raise.
+	VMGuestSwapRate  float64
+	VMGuestMajFaults float64
+	// VMPinnedIdleShare: dedicated cores whose vCPUs run below this share
+	// of them at p95 are reported idle.
+	VMPinnedIdleShare float64
 }
 
 func DefaultThresholds() Thresholds {
@@ -218,5 +236,19 @@ func DefaultThresholds() Thresholds {
 		// judged by the relative rule alone, which is the case
 		// CPUWaitMaxNormal guards.
 		CPUWaitMinNodeKnown: 0.5,
+
+		// KubeVirt. None of these is swept: the simulator's VM archetypes
+		// sit far from every one of them, and the lab cluster has not run
+		// VMs yet. Chosen with margin in the safe direction.
+		VMGuestMinCoverage: 0.9,
+		VMGuestShrinkRatio: 0.8,
+		VMMinGuestMem:      1 << 30,
+		// 64KiB/s is sixteen pages a second: a guest that swaps at all,
+		// rather than one that once paged out a dormant daemon.
+		VMGuestSwapRate: 64 << 10,
+		// Major faults also count reads of mapped files from disk, which
+		// every guest does; 50/s is sustained paging, not a binary loading.
+		VMGuestMajFaults:  50,
+		VMPinnedIdleShare: 0.2,
 	}
 }

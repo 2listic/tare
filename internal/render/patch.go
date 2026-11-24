@@ -38,7 +38,7 @@ func (p *printer) printPatches(fs []analyze.Finding, kubeContext, kubeconfig str
 	byWorkload := map[wl][]gitops.Change{}
 	var order []wl
 	for _, c := range changes {
-		if c.CPURequest == nil && c.CPULimit == nil && c.MemRequest == nil && c.MemLimit == nil {
+		if c.CPURequest == nil && c.CPULimit == nil && c.MemRequest == nil && c.MemLimit == nil && c.GuestMemory == nil {
 			continue // nothing to apply, and a partial patch is worse than none
 		}
 		k := wl{c.Namespace, c.Kind, c.Name}
@@ -82,6 +82,17 @@ func (p *printer) printPatches(fs []analyze.Finding, kubeContext, kubeconfig str
 
 	for _, k := range order {
 		fmt.Fprintf(p.out, "\n# %s/%s/%s\n", k.ns, k.kind, k.name)
+		if k.kind == "VirtualMachine" {
+			for _, c := range byWorkload[k] {
+				for _, r := range reasons[ctr{c.Namespace, c.Kind + "/" + c.Name, c.Container}] {
+					fmt.Fprintf(p.out, "#   %s %s\n", r.Code, wrapComment(r.Text))
+				}
+			}
+			b, _ := json.Marshal(vmPatch(byWorkload[k]))
+			fmt.Fprintf(p.out, "kubectl%s -n %s patch vm %s --type=merge -p %s\n",
+				target, shellQuote(k.ns), shellQuote(k.name), shellQuote(string(b)))
+			continue
+		}
 		var containers []map[string]any
 		for _, c := range byWorkload[k] {
 			for _, r := range reasons[ctr{c.Namespace, c.Kind + "/" + c.Name, c.Container}] {
@@ -125,6 +136,29 @@ func (p *printer) printPatches(fs []analyze.Finding, kubeContext, kubeconfig str
 		fmt.Fprintf(p.out, "kubectl%s -n %s patch %s %s --type=strategic -p %s\n",
 			target, shellQuote(k.ns), strings.ToLower(k.kind), shellQuote(k.name), shellQuote(string(b)))
 	}
+}
+
+// vmPatch is a JSON merge patch on a VirtualMachine's domain. A CRD has no
+// strategic merge, and a merge patch touches only the keys it names: the
+// other requests and the rest of the domain are left as they are.
+func vmPatch(changes []gitops.Change) map[string]any {
+	domain := map[string]any{}
+	for _, c := range changes {
+		req := map[string]string{}
+		if c.CPURequest != nil {
+			req["cpu"] = gitops.CPUQuantity(*c.CPURequest)
+		}
+		if c.MemRequest != nil {
+			req["memory"] = gitops.MemQuantity(*c.MemRequest)
+		}
+		if len(req) > 0 {
+			domain["resources"] = map[string]any{"requests": req}
+		}
+		if c.GuestMemory != nil {
+			domain["memory"] = map[string]string{"guest": gitops.MemQuantity(*c.GuestMemory)}
+		}
+	}
+	return map[string]any{"spec": map[string]any{"template": map[string]any{"spec": map[string]any{"domain": domain}}}}
 }
 
 // shellQuote makes a JSON document safe as a single shell argument.

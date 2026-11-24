@@ -25,6 +25,13 @@ type workloadIndex struct {
 	tmpl    map[string]map[string]Authored // ns/Kind/name -> container -> authored
 	rsOwner map[string]string              // ns/name -> "Kind/Name" of the ReplicaSet's own controller
 	loaded  map[string]bool                // kind -> already listed
+
+	// KubeVirt. vmiOwner is the VirtualMachine above each VMI, vmis what the
+	// running instance says, vms what each VirtualMachine's template authored.
+	vmiOwner map[string]string
+	vmis     map[string]VMSpec
+	vms      map[string]vmAuthored
+	kvConf   kubevirtConfig
 }
 
 func newWorkloadIndex(c *Client, namespaces []string) *workloadIndex {
@@ -34,6 +41,10 @@ func newWorkloadIndex(c *Client, namespaces []string) *workloadIndex {
 		tmpl:    map[string]map[string]Authored{},
 		rsOwner: map[string]string{},
 		loaded:  map[string]bool{},
+
+		vmiOwner: map[string]string{},
+		vmis:     map[string]VMSpec{},
+		vms:      map[string]vmAuthored{},
 	}
 }
 
@@ -48,6 +59,16 @@ func (x *workloadIndex) ownerOf(ctx context.Context, pod *corev1.Pod) string {
 	if ref.Kind == "ReplicaSet" {
 		x.load(ctx, "ReplicaSet")
 		if owner, ok := x.rsOwner[pod.Namespace+"/"+ref.Name]; ok {
+			return owner
+		}
+	}
+	// A virt-launcher pod belongs to a VMI, which a VirtualMachine owns; the
+	// VirtualMachine is the object people edit and the one that outlives a
+	// live migration, which replaces the pod, or a restart, which replaces
+	// the VMI.
+	if ref.Kind == "VirtualMachineInstance" {
+		x.load(ctx, "VirtualMachineInstance")
+		if owner, ok := x.vmiOwner[pod.Namespace+"/"+ref.Name]; ok {
 			return owner
 		}
 	}
@@ -78,6 +99,13 @@ func (x *workloadIndex) load(ctx context.Context, kind string) {
 	x.loaded[kind] = true
 	for _, ns := range x.scope {
 		if err := x.list(ctx, kind, ns); err != nil {
+			if kind == "VirtualMachineInstance" || kind == "VirtualMachine" {
+				x.c.warn("%ss in %s could not be read (%v): KubeVirt VMs there are sized as ordinary "+
+					"containers, from QEMU's resident memory rather than the guest's, attributed to the "+
+					"instance rather than the VirtualMachine, and pinned in the node replay",
+					kind, describeScope(ns), err)
+				return
+			}
 			x.c.warn("%ss in %s could not be read (%v): for those workloads tare cannot tell a request its "+
 				"author wrote from one Kubernetes copied out of the limit, and pods are attributed to "+
 				"the object that owns them rather than to the controller above it",
@@ -147,6 +175,10 @@ func (x *workloadIndex) list(ctx context.Context, kind, ns string) error {
 		for i := range l.Items {
 			x.put(kind, l.Items[i].Namespace, l.Items[i].Name, &l.Items[i].Spec.JobTemplate.Spec.Template.Spec)
 		}
+	case "VirtualMachineInstance":
+		return x.listVMIs(ctx, ns)
+	case "VirtualMachine":
+		return x.listVMs(ctx, ns)
 	}
 	// Any other kind is a bare pod or a CRD-owned workload such as an Argo
 	// Rollout. There is no template to compare against, so the finding is

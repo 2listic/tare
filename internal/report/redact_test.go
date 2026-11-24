@@ -7,6 +7,8 @@ import (
 
 	"github.com/2listic/tare/internal/analyze"
 	"github.com/2listic/tare/internal/ceilings"
+	"github.com/2listic/tare/internal/discover"
+	"github.com/2listic/tare/internal/metrics"
 	"github.com/2listic/tare/internal/packing"
 )
 
@@ -155,5 +157,25 @@ func TestRedactionLeavesNoNameAnywhereInTheReport(t *testing.T) {
 	// independently; if they disagree the reader sees two Prometheuses.
 	if want := HashName("monitoring") + "/" + HashName("prometheus-operated"); !strings.Contains(r.Source, want) {
 		t.Errorf("source %q does not carry %q, the hash the using line prints", r.Source, want)
+	}
+}
+
+// A VM's name rides in its spec and its observation as well as the workload;
+// redacting the column and not those printed it in the JSON.
+func TestRedactHidesVMNames(t *testing.T) {
+	r := &Report{Findings: []analyze.Finding{{
+		Namespace: "finance", Workload: "VirtualMachine/ledger-db", Container: "compute",
+		VM:    &discover.VMSpec{VM: "ledger-db", VMI: "ledger-db", Instancetype: "finance-large"},
+		VMObs: &metrics.VMObservation{VMKey: metrics.VMKey{Namespace: "finance", Name: "ledger-db"}},
+	}}}
+	Redact(r)
+	f := r.Findings[0]
+	for _, s := range []string{f.Workload, f.VM.VM, f.VM.VMI, f.VM.Instancetype, f.VMObs.Name, f.VMObs.Namespace} {
+		if strings.Contains(s, "ledger") || strings.Contains(s, "finance") {
+			t.Errorf("name survived redaction: %q", s)
+		}
+	}
+	if !strings.HasPrefix(f.Workload, "VirtualMachine/") || f.Container != "compute" {
+		t.Errorf("the kind and KubeVirt's container name are not secrets: %q %q", f.Workload, f.Container)
 	}
 }

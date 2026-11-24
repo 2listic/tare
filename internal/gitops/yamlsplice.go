@@ -77,7 +77,11 @@ func editRaw(raw []byte, lookup func(kind, name, namespace string) ([]Change, []
 		want, no = oneChangePerContainer(want)
 		refused = append(refused, no...)
 		for _, c := range want {
-			sp, why, found := spliceContainer(root, c, lines)
+			splicer := spliceContainer
+			if c.VM {
+				splicer = spliceVM
+			}
+			sp, why, found := splicer(root, c, lines)
 			if !found {
 				continue
 			}
@@ -549,3 +553,122 @@ func keysFor(indent int, cpu, mem *int64) []string {
 }
 
 func pad(n int) string { return strings.Repeat(" ", n) }
+
+// kv is one key to set under a mapping, already rendered.
+type kv struct{ key, value string }
+
+// spliceVM produces the edits for a KubeVirt VirtualMachine. Its resources are
+// not a container's: the CPU request and any memory request live under
+// spec.template.spec.domain.resources, and the guest memory under
+// spec.template.spec.domain.memory.guest. The pod's own resources are derived
+// by KubeVirt and are never written.
+func spliceVM(root *yaml.Node, c Change, lines []string) (out []splice, why string, found bool) {
+	tmpl := mapValue(mapValue(root, "spec"), "template")
+	domain := mapValue(mapValue(tmpl, "spec"), "domain")
+	if domain == nil {
+		return nil, "", false
+	}
+	if anchored(domain) {
+		return nil, whyAnchor, true
+	}
+	if domain.Kind != yaml.MappingNode || len(domain.Content) == 0 {
+		return nil, whyShape, true
+	}
+	var requests []kv
+	if c.CPURequest != nil {
+		requests = append(requests, kv{"cpu", CPUQuantity(*c.CPURequest)})
+	}
+	if c.MemRequest != nil {
+		requests = append(requests, kv{"memory", MemQuantity(*c.MemRequest)})
+	}
+	if len(requests) > 0 {
+		sp, why := setUnder(domain, lines, []string{"resources", "requests"}, requests)
+		if why != "" {
+			return nil, why, true
+		}
+		out = append(out, sp...)
+	}
+	if c.GuestMemory != nil {
+		sp, why := setUnder(domain, lines, []string{"memory"}, []kv{{"guest", MemQuantity(*c.GuestMemory)}})
+		if why != "" {
+			return nil, why, true
+		}
+		out = append(out, sp...)
+	}
+	return out, "", true
+}
+
+// setUnder sets keys in the mapping at path below parent, creating whatever
+// part of the path is missing as block YAML at the indent of its siblings.
+// Every shape spliceContainer refuses is refused here for the same reasons.
+func setUnder(parent *yaml.Node, lines []string, path []string, keys []kv) ([]splice, string) {
+	cur := parent
+	for i, p := range path {
+		k, v := entry(cur, p)
+		if v == nil {
+			if cur.Style&yaml.FlowStyle != 0 {
+				return nil, whyFlow
+			}
+			body := nestedBlock(cur.Content[0].Column-1, path[i:], keys)
+			return []splice{{line: lastLineOf(cur), insertAfter: true, lines: body}}, ""
+		}
+		if anchored(v) {
+			return nil, whyAnchor
+		}
+		if isEmpty(v) {
+			if cur.Style&yaml.FlowStyle != 0 {
+				return nil, whyFlow
+			}
+			sp, why, _ := clearAndFill(k, lines, nestedBlock(k.Column+1, path[i+1:], keys))
+			return sp, why
+		}
+		if v.Kind != yaml.MappingNode {
+			return nil, whyShape
+		}
+		cur = v
+	}
+	var out []splice
+	var missing []kv
+	for _, want := range keys {
+		v := mapValue(cur, want.key)
+		if v == nil {
+			missing = append(missing, want)
+			continue
+		}
+		if anchored(v) {
+			return nil, whyAnchor
+		}
+		if v.Kind != yaml.ScalarNode {
+			return nil, whyShape
+		}
+		sp, ok, why := replaceScalar(lines, v, want.value)
+		if why != "" {
+			return nil, why
+		}
+		if ok {
+			out = append(out, sp)
+		}
+	}
+	if len(missing) > 0 {
+		if cur.Style&yaml.FlowStyle != 0 {
+			return nil, whyFlow
+		}
+		out = append(out, splice{line: lastLineOf(cur), insertAfter: true,
+			lines: nestedBlock(cur.Content[0].Column-1, nil, missing)})
+	}
+	return out, ""
+}
+
+// nestedBlock renders path as nested keys from indent, with keys at the
+// innermost level.
+func nestedBlock(indent int, path []string, keys []kv) []string {
+	var out []string
+	for _, p := range path {
+		out = append(out, pad(indent)+p+":")
+		indent += 2
+	}
+	for _, k := range keys {
+		out = append(out, pad(indent)+k.key+": "+k.value)
+	}
+	return out
+}

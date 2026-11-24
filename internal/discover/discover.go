@@ -64,6 +64,11 @@ type Container struct {
 
 	Spec          ceilings.Container
 	LastTermError string // e.g. "OOMKilled"
+
+	// VM is set on the compute container of a KubeVirt virt-launcher pod:
+	// the VirtualMachine whose spec this container's resources are derived
+	// from. Nil for every other container, including the pod's others.
+	VM *VMSpec
 }
 
 // Client wraps the Kubernetes clientset.
@@ -270,6 +275,7 @@ func podListHelp(ns string, err error) string {
 
 func (c *Client) fromPod(ctx context.Context, idx *workloadIndex, pod *corev1.Pod) []Container {
 	workload := idx.ownerOf(ctx, pod)
+	vm := idx.vmFor(ctx, pod)
 
 	var out []Container
 	for i := range pod.Spec.Containers {
@@ -294,6 +300,9 @@ func (c *Client) fromPod(ctx context.Context, idx *workloadIndex, pod *corev1.Po
 		}
 		cc.Spec = specFor(spec, cc.MemLimit)
 		cc.LastTermError = lastTermination(pod, spec.Name)
+		if vm != nil && spec.Name == VMComputeContainer {
+			cc.VM = vm
+		}
 		out = append(out, cc)
 	}
 	return out
