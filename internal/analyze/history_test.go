@@ -145,3 +145,36 @@ func TestWithoutSpansTheBestPodStands(t *testing.T) {
 		t.Errorf("samples %d, want the best single pod's %d", f.Samples, want)
 	}
 }
+
+// TestAPodYoungerThanTheSpanGridStillCounts is mig on the lab, 2026-11-24, in
+// the middle of its second live migration: the first pod ran 35 minutes and was
+// deleted, the second ran 25, and the third had started 5 seconds before tare
+// ran. Spans are sampled on a 5-minute grid, so the third had samples and no
+// span, and coverage fell back to the first pod alone: 140 samples of 240,
+// and the VM UNVERIFIED beside an identical one rated OK (KNOWN-FAILURES 61).
+func TestAPodYoungerThanTheSpanGridStillCounts(t *testing.T) {
+	const now = 1_800_000_000.0
+	minute := 60.0
+	c := discover.Container{
+		Namespace: "ns", Pod: "web-6d9f-ccccc", Name: "app", Workload: "Deployment/web",
+		CPURequest: 100, MemRequest: 64 * mib, QoS: "Burstable",
+	}
+	obs := map[metrics.Key]*metrics.Observation{}
+	add := func(pod string, from, to float64, spanned bool) {
+		k := metrics.Key{Namespace: "ns", Pod: pod, Container: "app"}
+		o := &metrics.Observation{Key: k, MemWorkingSet: 10 * mib, Samples: int((to - from) / 15),
+			Owner: "Deployment/web"}
+		if spanned {
+			o.FirstSeen, o.LastSeen = from, to
+		}
+		o.Mark(metrics.SigMemory)
+		obs[k] = o
+	}
+	add("web-6d9f-aaaaa", now-60*minute, now-25*minute, true)
+	add("web-6d9f-bbbbb", now-25*minute, now, true)
+	add(c.Pod, now-15, now, false)
+	f := analyze.Run([]discover.Container{c}, obs, time.Hour, analyze.DefaultThresholds())[0]
+	if f.Samples < 235 || f.Samples > 245 {
+		t.Errorf("samples %d, want about 240: a pod without a span yet dropped every pod but the best", f.Samples)
+	}
+}

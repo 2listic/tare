@@ -204,6 +204,20 @@ func TestVMPinRules(t *testing.T) {
 		{"hugepages", &VMSpec{LiveMigratable: true, LiveMigratableKnown: true, EvictionStrategy: "LiveMigrate", HugepageSize: "1Gi"}, nil, "hugepages"},
 		{"host devices", &VMSpec{LiveMigratable: true, LiveMigratableKnown: true, EvictionStrategy: "LiveMigrate", HostDevices: true}, nil, "host devices"},
 		{"user nodeSelector", &migratable, func(p *corev1.Pod) { p.Spec.NodeSelector["zone"] = "a" }, "nodeSelector"},
+		// KubeVirt v1.9 adds kubernetes.io/arch to every launcher pod, and a
+		// migrated VM's pods carry the CPU features and model it needs.
+		{"KubeVirt's own arch selector", &migratable, func(p *corev1.Pod) {
+			p.Spec.NodeSelector["kubernetes.io/arch"] = "amd64"
+			p.Spec.NodeSelector["machine-type.node.kubevirt.io/q35"] = "true"
+			p.Spec.NodeSelector["cpu-feature.node.kubevirt.io/x2apic"] = "true"
+			p.Spec.NodeSelector["cpu-model-migration.node.kubevirt.io/EPYC-Rome"] = "true"
+		}, ""},
+		{"arch set by the VM's author", &VMSpec{LiveMigratable: true, LiveMigratableKnown: true,
+			EvictionStrategy: "LiveMigrate", NodeSelector: map[string]string{"kubernetes.io/arch": "amd64"}},
+			func(p *corev1.Pod) { p.Spec.NodeSelector["kubernetes.io/arch"] = "amd64" }, "nodeSelector"},
+		{"a kubevirt.io key set by the VM's author", &VMSpec{LiveMigratable: true, LiveMigratableKnown: true,
+			EvictionStrategy: "LiveMigrate", NodeSelector: map[string]string{"cpu-model.node.kubevirt.io/Skylake": "true"}},
+			nil, "nodeSelector"},
 		{"a GPU", &migratable, func(p *corev1.Pod) {
 			p.Spec.Containers[0].Resources.Limits["nvidia.com/gpu"] = resource.MustParse("1")
 		}, "extended resource"},
@@ -275,5 +289,17 @@ func TestKubeVirtPermissionsOnlyWhereInstalled(t *testing.T) {
 	}
 	if n != 3 {
 		t.Errorf("want the three KubeVirt reads where it is installed, got %d", n)
+	}
+}
+
+// The VMI's own nodeSelector is read, so the pin rules can tell the author's
+// selectors from the ones KubeVirt adds to the pod.
+func TestVMINodeSelectorIsRead(t *testing.T) {
+	v := vmSpecFrom(map[string]any{"nodeSelector": map[string]any{"zone": "a"}}, kubevirtConfig{})
+	if v.NodeSelector["zone"] != "a" || len(v.NodeSelector) != 1 {
+		t.Errorf("got %v", v.NodeSelector)
+	}
+	if v := vmSpecFrom(map[string]any{}, kubevirtConfig{}); v.NodeSelector != nil {
+		t.Errorf("no selector read as %v", v.NodeSelector)
 	}
 }

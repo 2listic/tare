@@ -253,12 +253,29 @@ func vmPinReason(p *corev1.Pod, vm *VMSpec) string {
 		return "is a VM whose eviction strategy (" + strategy + ") shuts it down on a drain rather than migrating it"
 	}
 	return placementPin(p, pinRules{
-		ignoreSelector: func(k string) bool { return strings.Contains(k, "kubevirt.io") },
+		ignoreSelector: func(k string) bool { return kubevirtSelector(k) && !hasKey(vm.NodeSelector, k) },
 		ignoreResource: func(n corev1.ResourceName) bool { return strings.HasPrefix(string(n), "devices.kubevirt.io/") },
 		// Live migration needs storage both nodes can reach, so a VM that
 		// is migratable has none that binds it.
 		sharedVolumes: true,
 	})
+}
+
+// kubevirtSelector reports a nodeSelector key KubeVirt puts on every
+// virt-launcher pod itself: its node-labeller's (schedulable, machine type,
+// CPU model and features, all under kubevirt.io) and kubernetes.io/arch, from
+// the VMI's architecture. They choose which nodes can run a VM at all, and a
+// live migration goes only to such a node, so none of them holds the VM where
+// it is. Matching "kubevirt.io" alone pinned every VM on KubeVirt v1.9, which
+// adds kubernetes.io/arch (KNOWN-FAILURES 62). A key the VMI's own spec sets
+// is the author's, and pins it like any other pod's.
+func kubevirtSelector(k string) bool {
+	return strings.Contains(k, "kubevirt.io") || k == corev1.LabelArchStable
+}
+
+func hasKey(m map[string]string, k string) bool {
+	_, ok := m[k]
+	return ok
 }
 
 // placementPin is the generic placement checks.

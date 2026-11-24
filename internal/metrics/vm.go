@@ -199,7 +199,11 @@ func vmQueries(namespaces []string, window time.Duration) []vmQuery {
 			func(o *VMObservation, v float64) { o.MemResident = v }},
 		{SigVMMemDomain, fmt.Sprintf(`max by (namespace,name) (max_over_time(kubevirt_vmi_memory_domain_bytes{%s}[%s]))`, sel(), w),
 			func(o *VMObservation, v float64) { o.MemDomain = v }},
-		{SigVMMemDomain, fmt.Sprintf(`max by (namespace,name) (count_over_time(kubevirt_vmi_memory_domain_bytes{%s}[%s]))`, sel(), w),
+		// Summed: virt-handler reports a VMI from the node it runs on, so a
+		// migration continues it as another series, and the series partition
+		// the window between them (KNOWN-FAILURES 61). The max was one node's
+		// share. Only the seconds of a copy are counted twice.
+		{SigVMMemDomain, fmt.Sprintf(`sum by (namespace,name) (count_over_time(kubevirt_vmi_memory_domain_bytes{%s}[%s]))`, sel(), w),
 			func(o *VMObservation, v float64) { o.Samples = int(v) }},
 		{SigVMMemOverhead, fmt.Sprintf(`max by (namespace,name) (max_over_time(kubevirt_vmi_launcher_memory_overhead_bytes{%s}[%s]))`, sel(), w),
 			func(o *VMObservation, v float64) { o.MemOverhead = v }},
@@ -211,7 +215,7 @@ func vmQueries(namespaces []string, window time.Duration) []vmQuery {
 		{SigVMGuestMem, fmt.Sprintf(`max_over_time((max by (namespace,name) (kubevirt_vmi_memory_available_bytes{%s}) - max by (namespace,name) (kubevirt_vmi_memory_usable_bytes{%s}))[%s:%s])`,
 			sel(), sel(), w, step),
 			func(o *VMObservation, v float64) { o.GuestMemUsedMax = v }},
-		{SigVMGuestMem, fmt.Sprintf(`max by (namespace,name) (count_over_time(kubevirt_vmi_memory_usable_bytes{%s}[%s])) / max by (namespace,name) (count_over_time(kubevirt_vmi_memory_domain_bytes{%s}[%s]))`,
+		{SigVMGuestMem, fmt.Sprintf(`sum by (namespace,name) (count_over_time(kubevirt_vmi_memory_usable_bytes{%s}[%s])) / sum by (namespace,name) (count_over_time(kubevirt_vmi_memory_domain_bytes{%s}[%s]))`,
 			sel(), w, sel(), w),
 			func(o *VMObservation, v float64) { o.GuestMemCoverage = min(v, 1) }},
 		{SigVMBalloon, fmt.Sprintf(`min by (namespace,name) (min_over_time(kubevirt_vmi_memory_actual_balloon_bytes{%s}[%s]))`, sel(), w),

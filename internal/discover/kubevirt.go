@@ -71,6 +71,10 @@ type VMSpec struct {
 	// HostDevices is set when the VM uses GPUs, host devices or SR-IOV
 	// interfaces: hardware on one node it cannot take with it.
 	HostDevices bool
+	// NodeSelector is the VMI's own spec.nodeSelector: what its author asked
+	// for. KubeVirt copies it into the virt-launcher pod beside the selectors
+	// it adds itself, and only these can pin a migratable VM.
+	NodeSelector map[string]string
 
 	// EvictionStrategy is the VMI's own, or the cluster default when it sets
 	// none. LiveMigratable is the VMI's condition; LiveMigratableKnown is
@@ -291,6 +295,12 @@ func vmSpecFrom(spec map[string]any, conf kubevirtConfig) VMSpec {
 	}
 	if v.EvictionStrategy == "" {
 		v.EvictionStrategy = conf.evictionStrategy
+	}
+	if sel := mapAt(spec, "nodeSelector"); len(sel) > 0 {
+		v.NodeSelector = map[string]string{}
+		for k, val := range sel {
+			v.NodeSelector[k], _ = val.(string)
+		}
 	}
 	sockets, cores, threads := max(intAt(cpu, "sockets"), 1), max(intAt(cpu, "cores"), 1), max(intAt(cpu, "threads"), 1)
 	v.VCPUs = sockets * cores * threads

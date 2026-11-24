@@ -290,22 +290,30 @@ func fold(f *Finding, o *metrics.Observation, live bool, th Thresholds) {
 // alone are not enough, because a span is first-to-last and a pod that lived
 // through a week of outages spans the week; the samples are what was actually
 // taken. Never below the best single pod, which is what tare reported before
-// spans existed. Without spans for every pod - the simulator, or a failed
+// spans existed. Without a span for any pod - the simulator, or a failed
 // query - only the best single pod can be trusted.
+//
+// A pod without a span beside pods with one is not a failed query: spans are
+// sampled on a 5-minute grid, and a pod that started after the last grid
+// point (a rollout's or a migration's newest pod), or lived between two, has
+// none yet (KNOWN-FAILURES 61). Its samples are added as they are. They are
+// at most one step's worth, so a replica running beside the others is
+// overcounted by that much at most, where falling back to the best pod
+// dropped every pod but one.
 func coverage(obs []*metrics.Observation) int {
-	var best, sum int
+	var best, sum, young int
 	type span struct{ from, to float64 }
 	var ss []span
-	known := true
 	for _, o := range obs {
 		best = max(best, o.Samples)
-		sum += o.Samples
 		if o.LastSeen == 0 {
-			known = false
+			young += o.Samples
+			continue
 		}
+		sum += o.Samples
 		ss = append(ss, span{o.FirstSeen, o.LastSeen})
 	}
-	if !known {
+	if len(ss) == 0 {
 		return best
 	}
 	slices.SortFunc(ss, func(a, b span) int { return cmp.Compare(a.from, b.from) })
@@ -318,10 +326,11 @@ func coverage(obs []*metrics.Observation) int {
 		}
 		end = max(end, s.to)
 	}
-	if total <= 0 {
-		return best
+	spanned := 0
+	if total > 0 {
+		spanned = int(float64(sum) * union / total)
 	}
-	return max(best, int(float64(sum)*union/total))
+	return max(best, spanned+young)
 }
 
 // usableAlone reports whether a gone pod's CPU wait says anything about its

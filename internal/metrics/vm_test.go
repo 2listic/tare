@@ -149,3 +149,24 @@ func TestPreflightVMsCountsSeries(t *testing.T) {
 		}
 	}
 }
+
+// virt-handler reports a VMI from the node it runs on, so a live migration
+// continues it as a different series. A count over the window must add the
+// series up: the max was one node's share, 196 of 300 samples after two
+// migrations on the lab (KNOWN-FAILURES 61).
+func TestVMSampleCountsAddUpTheNodesSeries(t *testing.T) {
+	var n int
+	for _, q := range vmQueries([]string{"vms"}, 7*24*time.Hour) {
+		if !strings.Contains(q.expr, "count_over_time") {
+			continue
+		}
+		n++
+		if strings.Contains(q.expr, "max by (namespace,name) (count_over_time") ||
+			!strings.Contains(q.expr, "sum by (namespace,name) (count_over_time") {
+			t.Errorf("%s counts samples without summing the per-node series: %s", q.signal, q.expr)
+		}
+	}
+	if n < 2 {
+		t.Errorf("%d sample counts found, want the domain count and the guest coverage", n)
+	}
+}

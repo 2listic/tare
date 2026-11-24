@@ -1294,6 +1294,70 @@ by an instancetype, and a bare VMI, are refused with their own reasons.
 `TestPatchTargetsTheVirtualMachineDomain`, `TestVMEditWritesTheDomain`,
 `TestVMPatchable`.
 
+## 61. A pod minutes old cut its workload's evidence to one pod
+
+**Looked like:** on the lab cluster (KubeVirt v1.9.0, 2026-11-24), a VM
+reported in the middle of its second live migration had 140
+samples over a 60-minute window, and was `UNVERIFIED` with low confidence. An
+identical VM beside it, never migrated, had 240 and was `OK`. Two minutes after
+the first migration the same VM had 137 against 148.
+
+**Was actually:** two counts, both short, for different reasons.
+
+- `coverage` needs each pod's span, and returned the best single pod's samples
+  when any pod had none, which was meant for the simulator or a failed query.
+  Spans come from `timestamp()` subqueries on a 5-minute grid, so a pod that
+  started after the last grid point has samples and no span. The migration's
+  target pod had started 5 seconds before tare ran; the first pod's 35 minutes
+  stood alone and the second pod's 25 were dropped. Nothing here is specific to
+  VMs: any workload is cut to one pod for up to five minutes after a rollout,
+  a restart or a scale-up, and for its whole window if a pod lived under five
+  minutes between two grid points.
+- A VM's sample count is at least the VMI's own (58), the guard meant to hold
+  when the pods' history is lost. It took `max by (namespace,name)` of
+  `count_over_time(kubevirt_vmi_memory_domain_bytes)`, but virt-handler reports
+  a VMI from the node it runs on, labelled with the node and its own pod, so a
+  migration continues the VMI as another series. The max was one node's share:
+  140 of 240 in the middle of the second migration, 196 of 300 at the end.
+
+**Caught by:** the lab run's check that a migrated VM's samples match the
+control's, 2026-11-24.
+
+**Fixed by:** a pod without a span beside pods with one adds its samples as
+they are; it holds at most one grid step's worth, so a replica running beside
+the others is overcounted by that much at most. Only when no pod has a span is
+the best single pod kept. The VMI's sample counts, and the guest-memory
+coverage ratio built from them, sum the per-node series. Only the seconds of a
+copy, when both nodes report the VMI, are counted twice.
+`TestAPodYoungerThanTheSpanGridStillCounts`,
+`TestVMSampleCountsAddUpTheNodesSeries`; `TestWithoutSpansTheBestPodStands`
+still holds. Reverting either fix turns its test red.
+
+## 62. Every VM was still pinned, by `kubernetes.io/arch`
+
+**Looked like:** on the lab cluster (KubeVirt v1.9.0, 2026-11-24), every VM
+in the node replay was pinned,
+`has a nodeSelector`, as before 59 was fixed.
+
+**Was actually:** 59 ignored the nodeSelector keys containing `kubevirt.io`.
+KubeVirt v1.9 also gives every virt-launcher pod `kubernetes.io/arch: amd64`,
+from the VMI's architecture, and that one key pinned every VM. The fakes and
+the simulator's launcher pods had no arch selector, so the tests of 59 passed.
+After a migration the pods also carry about thirty `cpu-feature`,
+`cpu-model-migration` and `cpu-vendor` keys under `node.kubevirt.io`; those
+were already ignored.
+
+**Caught by:** the lab runs' check that a migratable VM with no affinity is not
+pinned, 2026-11-24.
+
+**Fixed by:** a migratable VM ignores the selectors KubeVirt adds itself
+(`kubevirt.io` keys and `kubernetes.io/arch`), unless the VMI's own
+`spec.nodeSelector` sets the key: then its author chose it, and it pins the VM
+like any pod's. A key that is neither KubeVirt's nor the author's, a webhook's
+say, still pins. `TestVMPinRules` (KubeVirt's own arch selector, arch set by
+the VM's author, a kubevirt.io key set by the VM's author),
+`TestVMINodeSelectorIsRead`.
+
 ## Open, and not yet solved
 
 **KubeVirt support has not met a cluster with VMs.** Everything in 57-60 and
