@@ -1,6 +1,7 @@
 package analyze_test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -330,5 +331,101 @@ func TestVMPatchable(t *testing.T) {
 	vmi.Workload = "VirtualMachineInstance/db"
 	if ok, _ := analyze.Patchable(vmi); ok {
 		t.Errorf("a bare VMI is not patched")
+	}
+}
+
+func reasonText(f analyze.Finding, c analyze.Code) string {
+	for _, r := range f.Reasons {
+		if r.Code == c {
+			return r.Text
+		}
+	}
+	return ""
+}
+
+// On the lab cluster (2026-11-24) a lowered guest, with a CPU change too, said
+// "memory cannot be hot-unplugged", which KubeVirt v1.9 can do for hotplugged
+// memory, and left out the CPU request, which alone forces the restart. A
+// raised guest said only "a CPU request change is not applied live".
+func TestVMChangeNotesNameEveryCause(t *testing.T) {
+	c := vmContainer("virt-launcher-db-aaaaa")
+	vm := *c.VM
+	vm.RolloutStrategy, vm.MaxGuest = "LiveUpdate", 32*gib
+	c.VM = &vm
+
+	// 8Gi guest using 1Gi -> 1280Mi; CPU 400m -> less.
+	f := judgeVM(t, []discover.Container{c}, []*metrics.Observation{vmObs(c, metrics.SigPSI)}, guestObs(nil))
+	txt := reasonText(f, analyze.VMChangeNeedsRestart)
+	for _, want := range []string{"guest memory 1280Mi", "CPU request change only at a restart", "booted with is removed only at a restart"} {
+		if !strings.Contains(txt, want) {
+			t.Errorf("shrink and CPU: no %q in %q", want, txt)
+		}
+	}
+	if strings.Contains(txt, "hot-unplugged") {
+		t.Errorf("shrink: %q", txt)
+	}
+
+	// A raise within maxGuest with a CPU change: the raise waits for the CPU.
+	o := vmObs(c, metrics.SigPSI)
+	o.CPUUsageP95, o.CPUUsageMax = 1.74, 1.8
+	sustained := func(o *metrics.VMObservation) { o.GuestSwapMax, o.GuestSwapAvg = 1<<20, 1<<20 }
+	f = judgeVM(t, []discover.Container{c}, []*metrics.Observation{o}, guestObs(sustained))
+	txt = reasonText(f, analyze.VMChangeNeedsRestart)
+	if !strings.Contains(txt, "guest memory 10Gi") || !strings.Contains(txt, "waits for it") {
+		t.Errorf("raise and CPU: %q", txt)
+	}
+}
+
+// A VMI nobody owns was told its change "takes effect only when the VM
+// restarts" beside the skip that says it cannot be changed at all.
+func TestBareVMIHasNoRestartNote(t *testing.T) {
+	c := vmContainer("virt-launcher-db-aaaaa")
+	c.Workload, c.WorkloadKind = "VirtualMachineInstance/db", "VirtualMachineInstance"
+	vm := *c.VM
+	vm.VM = ""
+	c.VM = &vm
+	f := judgeVM(t, []discover.Container{c}, []*metrics.Observation{vmObs(c, metrics.SigPSI)}, guestObs(nil))
+	if hasCode(f, analyze.VMChangeNeedsRestart) || hasCode(f, analyze.VMLiveUpdate) {
+		t.Errorf("a bare VMI: %v", analyze.ReasonTexts(f.Reasons))
+	}
+	if ok, why := analyze.Patchable(f); ok || !strings.Contains(why, "nobody owns") {
+		t.Errorf("a bare VMI patchable %v: %s", ok, why)
+	}
+}
+
+// MEM_RAISED_BY_CEILING named the current guest's ceiling (1.3Gi) on a pod
+// whose request follows a raised guest (1548Mi), and said "raised to 1.6Gi" on
+// a pod going from 1.6Gi to 1.3Gi with its guest lowered.
+func TestCeilingRestatedForTheNewGuest(t *testing.T) {
+	c := vmContainer("virt-launcher-db-aaaaa")
+	o := vmObs(c, metrics.SigPSI)
+	o.MemWorkingSet, o.MemP95 = 1*gib, 1*gib // usage sizes below the new guest's pod
+	f := judgeVM(t, []discover.Container{c}, []*metrics.Observation{o}, guestObs(nil))
+	if f.RecGuestMem != 1280<<20 {
+		t.Fatalf("guest -> %d", f.RecGuestMem)
+	}
+	txt := reasonText(f, analyze.MemRaised)
+	if !strings.Contains(txt, analyze.HumanBytes(f.RecMem)) || !strings.Contains(txt, "new 1280Mi guest") {
+		t.Errorf("RecMem %s: %q", analyze.HumanBytes(f.RecMem), txt)
+	}
+	if strings.Contains(txt, analyze.HumanBytes(8*gib+250<<20)) {
+		t.Errorf("the old ceiling: %q", txt)
+	}
+}
+
+// A swapping guest had load 1.7 on 1 vCPU and was told that raising the CPU
+// request "will not help" on the row that raised it.
+func TestNeedsVCPUsSaysWhatTheRequestIsFor(t *testing.T) {
+	c := vmContainer("virt-launcher-db-aaaaa")
+	mod := func(o *metrics.VMObservation) {
+		o.GuestLoadP95 = 5.5
+		o.Mark(metrics.SigVMGuestLoad)
+		o.GuestSwapMax, o.GuestSwapAvg = 1<<20, 1<<20
+	}
+	f := judgeVM(t, []discover.Container{c}, []*metrics.Observation{vmObs(c, metrics.SigPSI)}, guestObs(mod))
+	txt := reasonText(f, analyze.VMGuestNeedsVCPUs)
+	if strings.Contains(txt, "will not help") || !strings.Contains(txt, "reserves host CPU") ||
+		!strings.Contains(txt, "also swapping") {
+		t.Errorf("%q", txt)
 	}
 }

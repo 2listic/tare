@@ -3,6 +3,7 @@ package analyze
 import (
 	"fmt"
 	"math"
+	"strings"
 
 	"github.com/2listic/tare/internal/ceilings"
 	"github.com/2listic/tare/internal/metrics"
@@ -61,11 +62,11 @@ func attachVM(f *Finding, o *metrics.VMObservation) {
 	}
 	note := fmt.Sprintf("the guest was promised %s and virt-launcher needs about %s beside it (%s), so the compute "+
 		"container is never sized below %s. QEMU's resident memory is the pages the guest has touched, not what it uses.",
-		HumanBytes(guest), HumanBytes(f.VMOverhead), src, HumanBytes(share+f.VMOverhead))
+		guestSize(guest), HumanBytes(f.VMOverhead), src, HumanBytes(share+f.VMOverhead))
 	if f.VM.HugepageSize != "" {
 		note = fmt.Sprintf("the guest's %s is backed by %s hugepages, reserved apart from the pod's memory request; "+
 			"the compute container holds virt-launcher's overhead of about %s (%s).",
-			HumanBytes(guest), f.VM.HugepageSize, HumanBytes(f.VMOverhead), src)
+			guestSize(guest), f.VM.HugepageSize, HumanBytes(f.VMOverhead), src)
 	}
 	f.Ceilings = append(f.Ceilings, ceilings.Ceiling{
 		Kind: VMGuestMemory, Resource: ceilings.Memory, Source: "VirtualMachine",
@@ -172,11 +173,16 @@ func adviseVCPUs(f *Finding, th Thresholds) {
 	switch {
 	case hasLoad && o.GuestLoadP95 > float64(n) && delayLow:
 		f.RecVCPUs = int64(math.Ceil(o.GuestLoadP95))
-		f.Reasons = append(f.Reasons, measured(VMGuestNeedsVCPUs, o.GuestLoadP95, float64(n), CoreCount, fmt.Sprintf(
-			"the guest's 5-minute load reached %.1f at p95 against %d vCPUs while its vCPUs rarely waited for the host: "+
-				"it is short of vCPUs, not of host CPU, so raising the pod's CPU request will not help and more vCPUs would "+
-				"(guest-reported; a Linux load average also counts tasks waiting on I/O)",
-			o.GuestLoadP95, n)))
+		text := fmt.Sprintf("the guest's 5-minute load reached %.1f at p95 against %d vCPUs while its vCPUs rarely "+
+			"waited for the host: it is short of vCPUs, not of host CPU. More vCPUs would help it (advice only: tare "+
+			"never changes the vCPU count); the pod's CPU request would not, because it reserves host CPU for the vCPUs "+
+			"the guest already has, and any change tare makes to it sizes that reservation, not the guest's CPU "+
+			"(guest-reported; a Linux load average also counts tasks waiting on I/O)", o.GuestLoadP95, n)
+		if o.Has(metrics.SigVMGuestPressure) && (o.GuestSwapMax > th.VMGuestSwapRate || o.GuestMajFaultMax > th.VMGuestMajFaults) {
+			text += ". The guest is also swapping, and a task waiting for a swap-in counts in the load: part of this " +
+				"load is waiting for memory, not for a CPU. Give it the memory first, then look at the vCPUs again"
+		}
+		f.Reasons = append(f.Reasons, measured(VMGuestNeedsVCPUs, o.GuestLoadP95, float64(n), CoreCount, text))
 	case n > 1 && o.VCPUUsageP95 < float64(n-1) && (!hasLoad || o.GuestLoadP95 < float64(n-1)):
 		want := max(int64(math.Ceil(o.VCPUUsageP95*(1+th.Margin))), 1)
 		if hasLoad {
@@ -208,13 +214,13 @@ func decideGuestMemory(f *Finding, th Thresholds) {
 	if f.VM.HugepageSize != "" {
 		f.Reasons = append(f.Reasons, note(VMHugepages, fmt.Sprintf(
 			"the guest's %s is backed by %s hugepages, which the node reserves whole whatever the guest uses; "+
-				"guest memory is not changed", HumanBytes(guest), f.VM.HugepageSize)))
+				"guest memory is not changed", guestSize(guest), f.VM.HugepageSize)))
 		return
 	}
 	if !o.Has(metrics.SigVMGuestMem) {
 		f.Reasons = append(f.Reasons, measured(VMGuestMemUnreported, 0, float64(guest), Bytes, fmt.Sprintf(
 			"the guest does not report its memory (no balloon driver statistics), and QEMU's resident memory is what it "+
-				"touched, not what it uses: the %s guest memory is not changed", HumanBytes(guest))))
+				"touched, not what it uses: the %s guest memory is not changed", guestSize(guest))))
 		return
 	}
 	used := o.GuestMemUsedMax
@@ -223,10 +229,10 @@ func decideGuestMemory(f *Finding, th Thresholds) {
 		text := fmt.Sprintf("the guest swapped up to %s/s and took up to %.0f major faults/s (thresholds %s/s, %.0f/s) "+
 			"with %s used of %s: it is short of memory, so guest memory is not reduced",
 			HumanBytes(int64(o.GuestSwapMax)), o.GuestMajFaultMax, HumanBytes(int64(th.VMGuestSwapRate)), th.VMGuestMajFaults,
-			HumanBytes(int64(used)), HumanBytes(guest))
+			HumanBytes(int64(used)), guestSize(guest))
 		if sustained {
 			f.RecGuestMem = roundGuest(int64(float64(guest) * (1 + th.MemLimitHeadroom)))
-			text += fmt.Sprintf(". It did so on average across the window, not in a burst: %s is suggested", HumanBytes(f.RecGuestMem))
+			text += fmt.Sprintf(". It did so on average across the window, not in a burst: %s is suggested", guestSize(f.RecGuestMem))
 			switch f.Verdict {
 			case Leaking, Blocked, Conflicted, Saturated:
 			default:
@@ -240,7 +246,7 @@ func decideGuestMemory(f *Finding, th Thresholds) {
 	case !o.Has(metrics.SigVMGuestPressure):
 		f.Reasons = append(f.Reasons, measured(VMGuestMemUnreported, used, float64(guest), Bytes, fmt.Sprintf(
 			"the guest reports %s used of %s but not its swap or major faults, so a reduction cannot be shown not to "+
-				"push it into swap: guest memory is not changed", HumanBytes(int64(used)), HumanBytes(guest))))
+				"push it into swap: guest memory is not changed", HumanBytes(int64(used)), guestSize(guest))))
 		return
 	case o.GuestMemCoverage < th.VMGuestMinCoverage:
 		f.Reasons = append(f.Reasons, measured(VMGuestMemUnreported, o.GuestMemCoverage, th.VMGuestMinCoverage, Ratio, fmt.Sprintf(
@@ -261,7 +267,7 @@ func decideGuestMemory(f *Finding, th Thresholds) {
 		"the guest itself reports at most %s in use (page cache excluded) of the %s it was given, across the whole window "+
 			"and without swapping: %s would cover it.%s Guest-reported, through the balloon driver, so it is medium "+
 			"confidence at best; the pod's memory request follows the guest's",
-		HumanBytes(int64(used)), HumanBytes(guest), HumanBytes(rec), balloon)))
+		HumanBytes(int64(used)), guestSize(guest), guestSize(rec), balloon)))
 	if f.Confidence == High {
 		f.Confidence = Medium
 	}
@@ -270,6 +276,19 @@ func decideGuestMemory(f *Finding, th Thresholds) {
 	if f.Verdict == Healthy {
 		f.Verdict = Waste
 	}
+}
+
+// guestSize spells a guest memory the way the patch writes it, whole Gi or
+// Mi: one decimal of Gi turned 1280Mi into "1.2Gi" in a sentence beside a
+// patch that writes 1280Mi.
+func guestSize(b int64) string {
+	switch {
+	case b > 0 && b%(1<<30) == 0:
+		return fmt.Sprintf("%dGi", b>>30)
+	case b > 0 && b%(1<<20) == 0:
+		return fmt.Sprintf("%dMi", b>>20)
+	}
+	return HumanBytes(b)
 }
 
 // roundGuest rounds a guest size up to 128Mi, the granularity people write.
@@ -307,6 +326,9 @@ func placeVMMemory(f *Finding) {
 		derived = peak
 	}
 	f.RecMem = max(derived, 1)
+	if f.RecGuestMem > 0 && f.RecGuestMem != guest {
+		restateGuestCeiling(f, target)
+	}
 	// A VM's pod limits are KubeVirt's to set; tare does not propose one. A
 	// Guaranteed VM's limit is its request, and moves with it.
 	f.RecMemLimit = f.MemLimit
@@ -317,6 +339,28 @@ func placeVMMemory(f *Finding) {
 	if f.CPULimit > 0 {
 		f.RecCPULimit = max(f.CPULimit, f.RecCPU)
 	}
+}
+
+// restateGuestCeiling rewrites MEM_RAISED_BY_CEILING for a VM whose guest
+// changes. decide raised the usage-sized request to the current guest's
+// ceiling, and said so; the request now follows the new guest, and the old
+// sentence would name a number the patch does not write ("raised to 1.6Gi" on
+// a pod that goes from 1.6Gi to 1.3Gi).
+func restateGuestCeiling(f *Finding, guest int64) {
+	out := f.Reasons[:0]
+	for _, r := range f.Reasons {
+		if r.Code == MemRaised {
+			if float64(f.RecMem) <= r.Observed {
+				continue // usage alone sizes it at least as high: nothing was raised
+			}
+			r = measured(MemRaised, r.Observed, float64(f.RecMem), Bytes, fmt.Sprintf(
+				"memory recommendation raised from %s to %s, the new %s guest plus %s of virt-launcher overhead: "+
+					"the pod must hold the whole guest, whatever QEMU's resident memory says",
+				HumanBytes(int64(r.Observed)), HumanBytes(f.RecMem), guestSize(guest), HumanBytes(f.VMOverhead)))
+		}
+		out = append(out, r)
+	}
+	f.Reasons = out
 }
 
 // VMCPUChange is the domain.resources.requests.cpu a finding proposes, if it
@@ -340,7 +384,9 @@ func VMGuestChange(f Finding) (int64, bool) {
 // a VirtualMachine's spec reaches its pod until KubeVirt builds a new one, so
 // a change that looks applied is not, until a restart or a live update.
 func noteVMChange(f *Finding) {
-	if f.VM == nil {
+	// A VMI nobody owns has no spec a restart would apply: deleted, it is
+	// gone. Patchable says so; a restart note beside it would contradict it.
+	if f.VM == nil || strings.HasPrefix(f.Workload, "VirtualMachineInstance/") {
 		return
 	}
 	switch f.Verdict {
@@ -362,7 +408,7 @@ func noteVMChange(f *Finding) {
 	if f.VM.RolloutStrategy == "LiveUpdate" && !cpuOK && guestOK && guest > cur && guest <= maxGuest {
 		f.Reasons = append(f.Reasons, measured(VMLiveUpdate, float64(guest), float64(maxGuest), Bytes, fmt.Sprintf(
 			"the cluster rolls VM changes out live and %s is within the %s maxGuest, so KubeVirt hotplugs the memory "+
-				"and live-migrates the VM to a pod of the new size, without a restart", HumanBytes(guest), HumanBytes(maxGuest))))
+				"and live-migrates the VM to a pod of the new size, without a restart", guestSize(guest), guestSize(maxGuest))))
 		return
 	}
 	what := []string{}
@@ -370,14 +416,34 @@ func noteVMChange(f *Finding) {
 		what = append(what, fmt.Sprintf("CPU request %s", milliString(cpu)))
 	}
 	if guestOK {
-		what = append(what, "guest memory "+HumanBytes(guest))
+		what = append(what, "guest memory "+guestSize(guest))
 	}
+	// Every reason that applies, not the first: a lowered guest whose CPU
+	// request also changes needs the restart for the CPU whatever happens to
+	// the memory, and a raise that LiveUpdate could add on its own waits too.
 	why := "the cluster's vmRolloutStrategy is not LiveUpdate"
-	switch {
-	case f.VM.RolloutStrategy == "LiveUpdate" && guestOK && guest < cur:
-		why = "memory cannot be hot-unplugged"
-	case f.VM.RolloutStrategy == "LiveUpdate":
-		why = "a CPU request change is not applied live"
+	if f.VM.RolloutStrategy == "LiveUpdate" {
+		whys := []string{}
+		if cpuOK {
+			w := "KubeVirt applies a CPU request change only at a restart"
+			if guestOK && guest > cur && guest <= maxGuest {
+				w += ", and the memory raise, which it would add live on its own, waits for it"
+			}
+			whys = append(whys, w)
+		}
+		if guestOK && guest < cur {
+			// KubeVirt v1.9 removed hotplugged memory from a running guest on
+			// the lab cluster; what it booted with is the domain's base
+			// memory, which only a new domain changes.
+			whys = append(whys, "memory the guest booted with is removed only at a restart (live, KubeVirt removes only memory hotplugged after boot)")
+		}
+		if guestOK && guest > maxGuest {
+			whys = append(whys, fmt.Sprintf("%s is above the %s maxGuest that memory can be hotplugged up to",
+				guestSize(guest), guestSize(maxGuest)))
+		}
+		if len(whys) > 0 {
+			why = strings.Join(whys, "; ")
+		}
 	}
 	f.Reasons = append(f.Reasons, note(VMChangeNeedsRestart, fmt.Sprintf(
 		"the VirtualMachine change (%s) takes effect only when the VM restarts: %s. Until then the running pod "+

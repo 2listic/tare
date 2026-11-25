@@ -240,7 +240,7 @@ func TestVMPinRules(t *testing.T) {
 			p.Spec.Affinity = a
 		}, "affinity"},
 		// A migration's target pod, which is the VM's pod once it is done,
-		// as read on the lab cluster (tare-vm-migration mig-1).
+		// as read on the lab cluster after a live migration.
 		{"after a live migration", &migratable, func(p *corev1.Pod) {
 			p.Labels["kubevirt.io/created-by"] = "3cb402c8"
 			a := kubevirtLauncherAffinity()

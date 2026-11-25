@@ -1379,8 +1379,8 @@ carries a required pod anti-affinity against the VMI's own pods
 would have stayed pinned with only the node terms ignored. Both are in KubeVirt
 from v0.59 to v1.9 unchanged, read from the source of each.
 
-**Caught by:** tare-vm-pinned's check that `control`, a migratable VM with no
-affinity, is movable, 2026-11-24.
+**Caught by:** the lab run's check that an ordinary migratable VM with no
+affinity is movable, 2026-11-24.
 
 **Fixed by:** a migratable VM ignores an affinity made only of the terms
 KubeVirt adds itself, unless the VMI's own `spec.affinity` is set: then its
@@ -1395,6 +1395,53 @@ KubeVirt version. `TestVMPinRules` (KubeVirt's own node affinity, after a live
 and a decentralized migration, affinity set by the VM's author, a key not
 KubeVirt's, matchFields, anti-affinity against another VMI or not KubeVirt's,
 hostname In), `TestVMINodeSelectorIsRead`.
+
+## 64. A VM's report contradicted itself, and its patch
+
+**Looked like:** on the lab cluster (KubeVirt v1.9.0, 2026-11-24) every VM
+patch was right, accepted and gave the predicted pod, but the sentences around
+them were not:
+
+- a VM whose guest was lowered, with a CPU change too, needed a restart because
+  "memory cannot be hot-unplugged";
+- a VMI nobody owns carried `VM_CHANGE_NEEDS_RESTART`, "takes effect only when
+  the VM restarts", beside the skip saying it cannot be changed;
+- a swapping VM whose guest was raised was told that "raising the pod's CPU
+  request will not help" on the row that raised it, 100m to 536m;
+- `MEM_RAISED_BY_CEILING` said "raised to 1.6Gi" on the lowered VM, whose pod
+  went from 1.6Gi to 1.3Gi, and 1.3Gi on the raised one, whose pod went to
+  1548Mi;
+- the raised VM's new guest, 1280Mi in the patch, was "1.2Gi" in the text.
+
+**Was actually:**
+
+- `noteVMChange` gave one reason, the first that matched. On the lab cluster
+  KubeVirt v1.9 removed hotplugged memory from a running guest; what it cannot
+  remove live is the memory the guest booted with. And the CPU
+  request, changed in the same patch, forces the restart on its own.
+- `noteVMChange` ran for every finding with VM observations, a bare VMI's
+  included, before `Patchable` refused it.
+- `VM_GUEST_NEEDS_VCPUS` is about the guest's speed, the request about the
+  host's reservation; the sentence read as if they were one thing. The VM was
+  swapping, and a task waiting for a swap-in counts in a Linux load average.
+- `decide` wrote `MEM_RAISED_BY_CEILING` against the current guest's ceiling;
+  `placeVMMemory` then moved the request to the new guest and left the sentence.
+- `HumanBytes` prints one decimal of Gi, and 1.25 prints as 1.2.
+
+**Caught by:** reading the report of that run, 2026-11-25.
+
+**Fixed by:** `VM_CHANGE_NEEDS_RESTART` names every reason that applies (the
+CPU request; memory the guest booted with; a raise above `maxGuest`), and says
+when a raise LiveUpdate would add on its own waits for the CPU change; no
+rollout note for a VMI nobody owns; `VM_GUEST_NEEDS_VCPUS` says what the
+request reserves, and that a swapping guest's load is partly waiting for
+memory; `MEM_RAISED_BY_CEILING` is restated from the new guest, or dropped when
+usage alone sizes the pod as high; guest sizes are written as the patch writes
+them (`guestSize`). Whether a shrink to no less than the boot size, under
+LiveUpdate, goes in live (so `VM_LIVE_UPDATE` instead) is not tested: tare
+does not read `guestAtBoot`. `TestVMChangeNotesNameEveryCause`,
+`TestBareVMIHasNoRestartNote`, `TestCeilingRestatedForTheNewGuest`,
+`TestNeedsVCPUsSaysWhatTheRequestIsFor`.
 
 ## Open, and not yet solved
 
