@@ -30,6 +30,12 @@ a Prometheus you already have, through the API server proxy.
 - **Says when it cannot see.** A missing signal downgrades findings to
   `UNVERIFIED` instead of reading as zero. OOMKilled memory prints `?`, not a
   guess.
+- **GPUs measured, never patched.** With NVIDIA's dcgm-exporter, a GPU whose
+  busy-time never left zero is `GPU_IDLE`. Busy-time only bounds use from
+  above (one thread reads 100%), so a busy GPU stays `GPU_BUSY_UNVERIFIED`
+  unless the card exports SM activity, which GeForce cards never do. The
+  summary counts `GPUs idle N of M`; a GPU count is never written to a patch,
+  and a GPU container's CPU is not cut unless its GPU is proven idle.
 - **Knows what else manages the workload.** It keeps Guaranteed pods
   Guaranteed, warns on HPAs that scale on utilisation, and skips VPA Auto.
 
@@ -55,7 +61,7 @@ kubectl tare report                            # findings table
 kubectl tare report -n prod --window 14d       # one namespace, longer history
 kubectl tare report --verdict SATURATED        # only what is hurting now
 kubectl tare report --explain                  # the sentence behind every code
-kubectl tare report -o wide                    # every section: evidence, totals, nodes, commitment
+kubectl tare report -o wide                    # every section: evidence, gpus, totals, nodes, commitment
 kubectl tare report -o patch > fix.sh          # kubectl patch commands to review and run
 kubectl tare report -o html > report.html      # one self-contained file for whoever approves
 kubectl tare report -o tui                     # browse findings, with per-row CPU/memory plots
@@ -95,6 +101,8 @@ what it lost; `kubectl tare check` tells you which.
 - Metrics that stopped mid-window are not flagged as stale.
 - The 16Mi memory floor has no derivation: read it as "lower than now".
 - A cyclic leak and an undersized container look the same.
+- GPUs: no usage verdict for MIG slices or shared (time-sliced, MPS) devices,
+  and no GPU view in `-o html`.
 - No latency/SLO input, no Spark/Flink, init containers or pod-level resources.
   Nothing is applied automatically.
 

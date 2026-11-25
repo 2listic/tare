@@ -9,7 +9,9 @@ package discover
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 
@@ -46,9 +48,14 @@ type Container struct {
 	// the heterogeneity check need to know which.
 	Node string
 
-	// GPUs is the whole accelerator devices this container requests. A GPU is
-	// an integer extended resource, so this is a count and never a size.
-	GPUs int64
+	// GPUs is the accelerator allocations this container requests, and
+	// GPUResource the extended resource they are requested under. A GPU is an
+	// integer extended resource, so this is a count and never a size. Under
+	// MIG's mixed strategy the resource is a slice (nvidia.com/mig-1g.10gb), so
+	// one allocation is NOT one device: check GPUResource before comparing
+	// anything against a whole device's memory.
+	GPUs        int64
+	GPUResource string
 
 	CPURequest int64 // millicores, 0 when unset
 	MemRequest int64 // bytes, 0 when unset
@@ -287,8 +294,8 @@ func (c *Client) fromPod(ctx context.Context, idx *workloadIndex, pod *corev1.Po
 			CPULimit:     milli(spec.Resources.Limits, corev1.ResourceCPU),
 			MemRequest:   bytes(spec.Resources.Requests, corev1.ResourceMemory),
 			MemLimit:     bytes(spec.Resources.Limits, corev1.ResourceMemory),
-			GPUs:         gpuCount(spec.Resources.Limits, spec.Resources.Requests),
 		}
+		cc.GPUs, cc.GPUResource = gpuCount(spec.Resources.Limits, spec.Resources.Requests)
 		if kind, name, ok := SplitWorkload(workload); ok {
 			cc.Authored = idx.authoredFor(ctx, pod.Namespace, kind, name, spec.Name)
 		}
@@ -356,18 +363,21 @@ func kindOf(workload string) string {
 	return kind
 }
 
-// gpuCount reads the accelerator count. Limits are checked first because an
-// extended resource must have limit == request, and a manifest that sets only
-// the limit is the common spelling.
-func gpuCount(lists ...corev1.ResourceList) int64 {
+// gpuCount reads the accelerator count and the resource it is requested
+// under. Limits are checked first because an extended resource must have
+// limit == request, and a manifest that sets only the limit is the common
+// spelling.
+func gpuCount(lists ...corev1.ResourceList) (int64, string) {
 	for _, rl := range lists {
-		for _, name := range gpuResources {
-			if q, ok := rl[name]; ok && q.Value() > 0 {
-				return q.Value()
+		// Sorted, because a map's order would make a container listing two
+		// GPU resources report a different one on every run.
+		for _, name := range slices.Sorted(maps.Keys(rl)) {
+			if q := rl[name]; IsGPUResource(name) && q.Value() > 0 {
+				return q.Value(), string(name)
 			}
 		}
 	}
-	return 0
+	return 0, ""
 }
 
 func lastTermination(pod *corev1.Pod, container string) string {

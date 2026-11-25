@@ -2,6 +2,7 @@ package analyze
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/2listic/tare/internal/metrics"
 )
@@ -212,4 +213,54 @@ func SummariseHealth(h []metrics.SignalHealth) (missing []SignalGap) {
 		}
 	}
 	return missing
+}
+
+// holdStale flags a workload with a live replica that stopped reporting. The
+// window is wide on purpose, so a kubelet that went quiet five days ago still
+// leaves a fortnight of history, and every number reads as current. Confidence
+// fell only by accident, through the sample count. A reduction or IDLE from
+// that history is UNVERIFIED: the container may be doing work now that nobody
+// measured. Starvation and raises stand, as in holdTooYoung, because what was
+// measured was measured.
+//
+// Gone pods are not checked: their newest sample is old by definition.
+func holdStale(f *Finding, now time.Time, th Thresholds) {
+	if now.IsZero() || len(f.liveLastSeen) == 0 {
+		return
+	}
+	cutoff := float64(now.Add(-th.StaleAfter).Unix())
+	stale, oldest := 0, 0.0
+	for _, t := range f.liveLastSeen {
+		// Unknown is not stale: a replica with no timestamp counts in the
+		// denominator, so "2 of 3" never shrinks to "2 of 2".
+		if t > 0 && t < cutoff {
+			stale++
+			if oldest == 0 || t < oldest {
+				oldest = t
+			}
+		}
+	}
+	if stale == 0 {
+		return
+	}
+	age := now.Sub(time.Unix(int64(oldest), 0))
+	f.Reasons = append(f.Reasons, measured(MetricsStale, age.Seconds(), th.StaleAfter.Seconds(), Seconds, fmt.Sprintf(
+		"%d of its %d live replicas have reported no metrics for %s (newest sample %s): the window describes the container as it was then, "+
+			"not as it runs now. A container that is not running, a kubelet that stopped reporting or a scrape that broke all look like this; "+
+			"no reduction is proposed from history this old",
+		stale, len(f.liveLastSeen), humanAge(age), time.Unix(int64(oldest), 0).UTC().Format("2006-01-02 15:04 UTC"))))
+	if stale == len(f.liveLastSeen) {
+		f.Confidence = Low
+	}
+	if f.Verdict == Waste || f.Verdict == Healthy || f.Verdict == Idle {
+		f.Verdict = Unverified
+	}
+}
+
+// humanAge renders a staleness as hours under two days and days above.
+func humanAge(d time.Duration) string {
+	if d < 48*time.Hour {
+		return fmt.Sprintf("%.0fh", d.Hours())
+	}
+	return fmt.Sprintf("%.1fd", d.Hours()/24)
 }

@@ -111,8 +111,8 @@ func TestRestartChurnHoldsWhatStarvationDoesNot(t *testing.T) {
 	}
 }
 
-// "Raise the limit" on a container starved only of memory contradicts a
-// recommendation that raises nothing on CPU.
+// A container starved only of memory says nothing about CPU demand, so usage
+// at its CPU limit must not mark CPU censored.
 func TestPinnedAtLimitNeedsCPUStarvation(t *testing.T) {
 	f := runOne(t, container("Burstable", 500, 500, 256*mib, 256*mib), metrics.Observation{
 		CPUUsageP95: 0.49, CPUUsageMax: 0.5,
@@ -123,8 +123,8 @@ func TestPinnedAtLimitNeedsCPUStarvation(t *testing.T) {
 	if f.Verdict != analyze.Saturated || !hasCode(f, analyze.OOMKilled) {
 		t.Fatalf("fixture drifted: want SATURATED on memory, got %s %v", f.Verdict, f.Reasons)
 	}
-	if hasCode(f, analyze.CPUAtLimit) {
-		t.Errorf("%s on a container with no CPU stall", analyze.CPUAtLimit)
+	if f.CPUCensored || hasCode(f, analyze.CPUDemandCensored) {
+		t.Errorf("%s on a container with no CPU stall", analyze.CPUDemandCensored)
 	}
 }
 

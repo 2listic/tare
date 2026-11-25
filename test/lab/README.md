@@ -113,6 +113,75 @@ client outweighs the server, nothing downstream means anything.
 
     kubectl apply -f test/lab/workloads.yaml
 
+## GPU cluster (`tare-gpu`)
+
+A second, single-node k3d cluster on the same host, exposing its RTX 3060
+Laptop (6GB, driver 535). Separate because `k3d node create` has no `--gpus`
+and recreating `tare-test` would destroy its metric history. Needs
+`nvidia-container-toolkit` on the host, registered with docker
+(`nvidia-ctk runtime configure --runtime=docker`).
+
+The node image is k3s plus the NVIDIA container runtime:
+
+```dockerfile
+FROM rancher/k3s:v1.35.8-k3s1 AS k3s
+FROM ubuntu:22.04
+RUN apt-get update && apt-get install -y --no-install-recommends curl gnupg ca-certificates \
+ && curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+    | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
+ && curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+    | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+    > /etc/apt/sources.list.d/nvidia-container-toolkit.list \
+ && apt-get update && apt-get install -y --no-install-recommends nvidia-container-toolkit \
+ && rm -rf /var/lib/apt/lists/*
+# Only /bin: ubuntu's /lib is a symlink a whole-root copy fails on, and the
+# k3s image's /lib and /usr hold nothing k3s needs.
+COPY --from=k3s /bin /bin
+VOLUME /var/lib/kubelet
+VOLUME /var/lib/rancher/k3s
+VOLUME /var/lib/cni
+VOLUME /var/log
+ENV PATH="$PATH:/bin/aux"
+ENV CRI_CONFIG_FILE=/var/lib/rancher/k3s/agent/etc/crictl.yaml
+ENTRYPOINT ["/bin/k3s"]
+CMD ["agent"]
+```
+
+```sh
+docker build -t tare/k3s-cuda:v1.35.8-k3s1 .
+k3d cluster create tare-gpu --image tare/k3s-cuda:v1.35.8-k3s1 --gpus all --agents 0 \
+  --api-port 0.0.0.0:6444 --k3s-arg "--tls-san=$LAB@server:*" \
+  --k3s-arg "--default-runtime=nvidia@server:*" --k3s-arg "--disable=traefik@server:*" \
+  -p 31090:30090@loadbalancer
+helm install kps prometheus-community/kube-prometheus-stack -n monitoring --create-namespace \
+  --set alertmanager.enabled=false --set grafana.enabled=false \
+  --set prometheus.service.type=NodePort --set prometheus.service.nodePort=30090 \
+  --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false
+helm install nvdp nvdp/nvidia-device-plugin -n nvidia --create-namespace --set gfd.enabled=true
+helm install dcgm nvidia-dcgm/dcgm-exporter -n nvidia --set serviceMonitor.enabled=true
+kubectl apply -f test/lab/gpu.yaml
+```
+
+Prometheus is at `http://$LAB:31090`, context `k3d-tare-gpu`. If no
+`dcgm-dcgm-exporter` job appears in Prometheus a minute after install, the
+operator's first sync raced the ServiceMonitor: touch it (`kubectl -n nvidia
+label servicemonitor dcgm-dcgm-exporter resync=1 --overwrite`).
+
+Measured on this card (2026-10-29), and why the workloads are what they are:
+
+- **No profiling metrics.** dcgm-exporter: `Not collecting DCP metrics:
+  Profiling is not supported for this group of GPUs`. No `DCGM_FI_PROF_*`
+  series exist, so SM activity cannot be measured here at all.
+- **The owner is in `exported_pod`.** Under the default ServiceMonitor,
+  `pod`/`namespace` name the exporter; the pod holding the device is in
+  `exported_pod`/`exported_namespace`/`exported_container`.
+- **`gpu-spinner` reads 100% GPU-Util** in both nvidia-smi and
+  `DCGM_FI_DEV_GPU_UTIL`, from one thread in one block, 121MiB of 6GB, 41W of
+  115W. Busy-time is an upper bound on use and nothing more.
+
+There is one device: `gpu-sleeper` and `gpu-spinner` take turns
+(`kubectl -n gpu-lab scale deploy/<name> --replicas=0|1`).
+
 ## Verified first end-to-end run (2026-09-14)
 
     kubectl tare report --prometheus http://$LAB:30090 \

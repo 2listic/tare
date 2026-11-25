@@ -883,6 +883,10 @@ only on CPU p95 being near the limit, not on CPU starvation.
 **Fixed by:** the note now requires CPU starvation.
 `TestPinnedAtLimitNeedsCPUStarvation`.
 
+*(2026-11-19)* The note itself is gone: under 57 a CPU-starved container at its
+limit is censored, and the censored reason carries the advice. The test now
+guards against `CPU_DEMAND_CENSORED` on a container starved only of memory.
+
 ## 45. One refused namespace stopped the VPA scan
 
 **Looked like:** recommendations for workloads in namespaces `b` and `c`, with
@@ -1211,6 +1215,36 @@ metric, and the `NODE_CONTENTION` already on the row is withdrawn
 the node was full in the stretches the container waited, which the CPU wait
 rule already reads per stretch.
 
+## 57. A starved container told to stay starved
+
+**Looked like:** `starved-api` in the demo, SATURATED on CPU pressure, wanting
+about 350m against a 200m limit, recommended 229m request / 250m limit and
+printed as the fix.
+
+**Was actually:** the limit echoed back. CFS never lets usage exceed the quota,
+so a starved container's usage at its limit is a lower bound on demand, not a
+measurement of it, and every number derived from it is invented. 33 is the
+same shape on memory, and was fixed there; CPU kept the ratchet.
+`CPU_PINNED_AT_LIMIT` said "raise the limit" beside numbers that barely did.
+
+**Caught by:** adding a starved workload to the demo, which until then showed
+no pressure at all: every row was a shrink.
+
+**Fixed by:** a CPU-starved container whose peak reached 95% of its limit is
+censored, as memory is after an OOMKill: `CPU_DEMAND_CENSORED`, `100m→?`,
+current request and limit held, no CPU field in `-o patch` or the GitOps diff,
+and `CPU unknown on N` in the totals. `CPU_PINNED_AT_LIMIT` is gone; the
+censored reason carries its advice. Without a limit nothing capped usage, and
+the measured raise stands. `TestCPUStarvedAtLimitIsCensored`,
+`TestCPUStarvedWithoutLimitIsNotCensored`, `TestPatchLeavesCensoredCPUAlone`,
+`TestDemoShowsCPUPressure`.
+
+**Not fixed:** a starved container throttled below its limit (bursts inside a
+100ms period that a 1-minute rate averages away) still gets a usage-derived
+raise. That usage is also depressed by the throttling, so the raise is a floor
+too; it errs in the safe direction, since the starvation hold never lowers
+anything, but it can read as more of an answer than it is.
+
 ## Open, and not yet solved
 
 **A workload redeployed more than once a day never has usable CPU wait.**
@@ -1267,13 +1301,22 @@ query keyed by container id and has not been verified against a real
 Prometheus. Until then a cyclic leaker and a container that is simply too small
 are indistinguishable here, and the report says so rather than picking one.
 
-**A container whose metrics stopped mid-window is sized from stale data.** The
-window is wide on purpose, so a kubelet that stopped reporting five days ago
-still leaves a fortnight of history behind it, and nothing in the report says
-the data is old. Confidence falls, because the sample count falls, but that is
-an accident of the same arithmetic rather than a statement about staleness. The
-measurement that would settle it is the timestamp of the last sample per
-container, which is one more query and has not been added.
+~~**A container whose metrics stopped mid-window is sized from stale data.**~~
+*(Closed 2026-11-19.)* The window is wide on purpose, so a kubelet that stopped
+reporting five days ago still leaves a fortnight of history behind it, and
+nothing in the report said the data was old. Confidence fell, because the
+sample count fell, but that was an accident of the same arithmetic rather than a
+statement about staleness. The timestamp of the last sample per container was
+already queried (`LastSeen`, for coverage) and simply never compared with the
+clock. Now a live replica whose newest sample is over an hour old gets
+`METRICS_STALE`; a reduction or IDLE becomes UNVERIFIED, confidence drops to low
+when every live replica is silent, and starvation stands. `StaleAfter` (1h) is
+chosen, not derived. `internal/analyze/stale_test.go`. The query is the
+coverage query, in use since 2026-10-26, but nothing records it being checked
+against a real Prometheus on a series that stopped: by PromQL semantics the
+subquery's `timestamp()` returns nothing once the series goes stale, so the max
+is the last sample, and that is the unverified step. Check it on the lab
+cluster by stopping a pod's scrape and reading `LastSeen`.
 
 **A CPU limit below the current one is never measured.** It has been decided:
 tare holds CPU limits and only ever raises them (53). Lowering one safely would

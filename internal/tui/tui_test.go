@@ -88,6 +88,18 @@ func TestTUIDetailMarksUnmeasured(t *testing.T) {
 	}
 }
 
+// The GPU line is there for a GPU holder only, and an unmeasured GPU is "?"
+// like any other signal.
+func TestTUIDetailGPU(t *testing.T) {
+	d := strings.Join(tuiDetail(analyze.Finding{GPUs: 2, GPUResource: "nvidia.com/gpu"}), "\n")
+	if !strings.Contains(d, "2 nvidia.com/gpu   idle ?   busy ?   sm ?   vram ?") {
+		t.Errorf("unmeasured GPU not marked:\n%s", d)
+	}
+	if d := strings.Join(tuiDetail(analyze.Finding{CPURequest: 100}), "\n"); strings.Contains(d, "gpu") {
+		t.Errorf("a container with no GPU has a gpu line:\n%s", d)
+	}
+}
+
 // TestTUIWithheldLooksWithheld. Same rule as the HTML report: the refusal to
 // give a number is the product, and rendering it as a blank or a zero turns the
 // most honest thing in the report into a gap in the data.

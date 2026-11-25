@@ -15,8 +15,35 @@ type Finding struct {
 	QoS       string
 	Pods      int
 
-	// GPUs is the accelerator count this container requests, per pod.
-	GPUs int64
+	// GPUs is the accelerator count this container requests, per pod, and
+	// GPUResource what they are requested as. A MIG slice is not a device.
+	GPUs        int64
+	GPUResource string
+
+	// GPU use from dcgm-exporter, worst case across pods. Check Have for
+	// SigGPUBusy, SigGPUSMActive and SigGPUMem before reading any of them, and
+	// see metrics.GPUObservation for what each can and cannot prove: busy-time
+	// bounds use from above only, so a high GPUBusyMax is not evidence of use.
+	GPUBusyMax     float64
+	GPUBusyAvg     float64
+	GPUSMActiveAvg float64
+	GPUSMActiveP95 float64
+	GPUMemMax      float64 // bytes, device-wide
+	// GPUIdleDevices is the fewest devices any one pod held without running a
+	// kernel on: the count every replica could give up.
+	GPUIdleDevices int
+	GPUFirstSeen   float64
+	GPULastSeen    float64
+	// GPUShared records that a device this workload used was also used by
+	// another pod, either seen in the metrics or declared by the node
+	// (time-slicing, MPS). Per-device numbers then describe the device, not
+	// this container.
+	GPUShared     bool
+	GPUSharedWith []string
+	gpuPods       int
+	// cpuHeldForGPU records that the CPU request was held because lowering it
+	// could starve a GPU, so it must not also be reported as wasted.
+	cpuHeldForGPU bool
 
 	// WorkloadKind is the controller kind. DaemonSet is the one that changes
 	// the arithmetic: Pods is then the node count, so the total scales with
@@ -99,6 +126,10 @@ type Finding struct {
 	// vouch for the workload.
 	cpuWaitUnseen int
 
+	// liveLastSeen is each observed live replica's newest sample, unix
+	// seconds, zero where unknown. See holdStale.
+	liveLastSeen []float64
+
 	// RecCPU and RecMem are the recommended requests, zero when none is
 	// offered. RecCPULimit is the recommended CPU limit, which is deliberately
 	// higher: a request sized to a percentile must not become a limit that
@@ -124,6 +155,10 @@ type Finding struct {
 	// recommendation as unknown, never as those values: an unchanged "16Mi"
 	// beside OOMKILLED reads as "16Mi is right", which is the input echoed back.
 	MemCensored bool
+	// CPUCensored is the CPU counterpart: starved with usage at the CPU limit,
+	// which CFS never lets it exceed, so demand is unknown. RecCPU and
+	// RecCPULimit hold the current values, and renderers print "?".
+	CPUCensored bool
 
 	// Constraints are the workload facts that shaped the recommendation.
 	Constraints discover.Constraints

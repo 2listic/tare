@@ -68,14 +68,14 @@ func Plan(fs []analyze.Finding) ([]Change, []Skipped) {
 			Namespace: f.Namespace, Kind: kind, Name: name, Container: f.Container,
 			Reasons: analyze.ReasonTexts(f.Reasons),
 		}
-		if f.RecCPU > 0 {
+		// A censored value is unknown, not "keep this value": leave the
+		// manifest's own fields alone rather than rewrite them.
+		if f.RecCPU > 0 && !f.CPUCensored {
 			c.CPURequest = ptr(f.RecCPU)
 		}
-		if f.RecCPULimit > 0 {
+		if f.RecCPULimit > 0 && !f.CPUCensored {
 			c.CPULimit = ptr(f.RecCPULimit)
 		}
-		// A censored memory is unknown, not "keep this value": leave the
-		// manifest's own fields alone rather than rewrite them.
 		if f.RecMem > 0 && !f.MemCensored {
 			c.MemRequest = ptr(f.RecMem)
 		}

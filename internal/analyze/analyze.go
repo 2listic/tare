@@ -68,6 +68,11 @@ type Cluster struct {
 	// an IP. A nil map means node utilisation could not be read, which is a
 	// reportable outcome rather than an idle cluster.
 	NodeUtil map[string]metrics.NodeObservation
+
+	// Now is when the observations were taken. A live replica whose newest
+	// sample is much older stopped reporting, and is flagged METRICS_STALE.
+	// Zero skips the check: the simulator has no wall clock to be behind.
+	Now time.Time
 }
 
 // Run joins containers with observations and produces findings, most severe
@@ -94,16 +99,19 @@ func RunWithCluster(containers []discover.Container, obs map[metrics.Key]*metric
 		// above made stale; applySignalGaps reads the final numbers to say
 		// which of them stand on a missing signal.
 		c := cl.Constraints[discover.ConstraintKey(f.Namespace, f.Workload)]
+		markGPUSharing(f, cl.Nodes)
 		decide(f, window, th)
 		holdGuaranteed(f, c)
 		applyNodes(f, cl.Nodes, cl.NodeUtil, th)
 		applyInference(f, cl.Nodes)
+		applyGPUUsage(f, window, th)
 		applyAuthored(f, f.Authored)
 		authoredQoSNote(f, f.Authored)
 		applyConstraints(f, c)
 		f.reconcileFloors(th)
 		applySignalGaps(f)
 		holdTooYoung(f, th)
+		holdStale(f, cl.Now, th)
 		out = append(out, *f)
 	}
 	sortFindings(out)
@@ -136,6 +144,7 @@ func aggregate(containers []discover.Container, obs map[metrics.Key]*metrics.Obs
 				CPULimit: c.CPULimit, MemLimit: c.MemLimit,
 				WorkloadKind: c.WorkloadKind,
 				GPUs:         c.GPUs,
+				GPUResource:  c.GPUResource,
 				Authored:     c.Authored,
 				Ceilings:     ceilings.Detect(c.Spec),
 			}
@@ -157,6 +166,7 @@ func aggregate(containers []discover.Container, obs map[metrics.Key]*metrics.Obs
 		}
 		fold(f, o, true, th)
 		spans[gk] = append(spans[gk], o)
+		f.liveLastSeen = append(f.liveLastSeen, o.LastSeen)
 
 		// The memory trend is a per-pod pair, and the two halves must come from
 		// the same pod: comparing one replica's early average against another's
@@ -239,6 +249,43 @@ func fold(f *Finding, o *metrics.Observation, live bool, th Thresholds) {
 	}
 	if o.OOMEvents > 0 {
 		f.OOMKilled = true
+	}
+	if o.GPU != nil {
+		foldGPU(f, o.GPU)
+	}
+}
+
+// foldGPU is fold for device use: the worst case for every value, except the
+// idle device count, which is the fewest any pod had - a count every replica
+// can give up, not one that only the quietest replica could.
+func foldGPU(f *Finding, g *metrics.GPUObservation) {
+	f.GPUBusyMax = max(f.GPUBusyMax, g.BusyMax)
+	f.GPUBusyAvg = max(f.GPUBusyAvg, g.BusyAvg)
+	f.GPUSMActiveAvg = max(f.GPUSMActiveAvg, g.SMActiveAvg)
+	f.GPUSMActiveP95 = max(f.GPUSMActiveP95, g.SMActiveP95)
+	f.GPUMemMax = max(f.GPUMemMax, g.MemMax)
+	if f.gpuPods == 0 || len(g.IdleDevices) < f.GPUIdleDevices {
+		f.GPUIdleDevices = len(g.IdleDevices)
+	}
+	f.gpuPods++
+	if g.FirstSeen > 0 && (f.GPUFirstSeen == 0 || g.FirstSeen < f.GPUFirstSeen) {
+		f.GPUFirstSeen = g.FirstSeen
+	}
+	f.GPULastSeen = max(f.GPULastSeen, g.LastSeen)
+	for _, p := range g.SharedWith {
+		if !slices.Contains(f.GPUSharedWith, p) {
+			f.GPUSharedWith = append(f.GPUSharedWith, p)
+		}
+	}
+	if f.Have == nil {
+		f.Have = map[metrics.Signal]bool{}
+	}
+	for sig, ok := range map[metrics.Signal]bool{
+		metrics.SigGPUBusy: g.HasBusy, metrics.SigGPUSMActive: g.HasSM, metrics.SigGPUMem: g.HasMem,
+	} {
+		if ok {
+			f.Have[sig] = true
+		}
 	}
 }
 

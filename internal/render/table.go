@@ -79,11 +79,21 @@ func (p *printer) printSummary(r *report.Report, listed int) {
 		}
 		line += ";"
 	}
+	if s.GPUsHeld > 0 {
+		line += fmt.Sprintf(" GPUs idle %d of %d", s.GPUsIdle, s.GPUsHeld)
+		if s.GPUsUnmeasured > 0 {
+			line += fmt.Sprintf(" (%d unmeasured)", s.GPUsUnmeasured)
+		}
+		line += ";"
+	}
 	line += fmt.Sprintf(" requests lowered on %d (%s CPU, %s mem)",
 		s.Workloads, CPUDelta(-s.CPUMillicores), MemDelta(-s.MemBytes))
 	if s.AddWorkloads > 0 {
 		line += fmt.Sprintf(", raised on %d (%s CPU, %s mem)",
 			s.AddWorkloads, CPUDelta(s.AddCPUMillicores), MemDelta(s.AddMemBytes))
+	}
+	if s.CPUUnknown > 0 {
+		line += fmt.Sprintf("; CPU unknown on %d (starved at limit)", s.CPUUnknown)
 	}
 	if s.MemUnknown > 0 {
 		line += fmt.Sprintf("; memory unknown on %d (OOMKilled)", s.MemUnknown)
@@ -248,7 +258,7 @@ func (p *printer) printCompactFindings(fs []analyze.Finding, bySavings bool) {
 	for _, f := range fs {
 		row(w, string(f.Verdict), string(f.Confidence), f.Namespace,
 			WorkloadCell(f.Workload, nameWidth), f.Container, strconv.Itoa(f.Pods),
-			changeCell(f.CPURequest, f.RecCPU, Milli), memChangeCell(f),
+			cpuChangeCell(f), memChangeCell(f),
 			whyCell(f))
 	}
 	// No placeholder row when nothing matched: a "NONE" row is a data row to
@@ -264,6 +274,15 @@ func memChangeCell(f analyze.Finding) string {
 		return Human(f.MemRequest) + "→?"
 	}
 	return changeCell(f.MemRequest, f.RecMem, Human)
+}
+
+// cpuChangeCell is "200m→?" for a CPU starved at its limit, whose demand
+// tare does not know.
+func cpuChangeCell(f analyze.Finding) string {
+	if f.CPUCensored {
+		return Milli(f.CPURequest) + "→?"
+	}
+	return changeCell(f.CPURequest, f.RecCPU, Milli)
 }
 
 // changeCell shows the request and where it should go. No recommendation, or

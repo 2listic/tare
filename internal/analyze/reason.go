@@ -40,7 +40,6 @@ const (
 	MemUnderused         Code = "MEM_UNDERUSED"
 	CPULimitUnderused    Code = "CPU_LIMIT_UNDERUSED"
 	MemLimitUnderused    Code = "MEM_LIMIT_UNDERUSED"
-	CPUAtLimit           Code = "CPU_PINNED_AT_LIMIT"
 
 	// How the recommendation was arrived at.
 	CPUFloor   Code = "CPU_FLOOR"
@@ -60,6 +59,9 @@ const (
 	// MemDemandCensored: OOMKilled, and nothing measured says how much more it
 	// needs, so memory is left as it is rather than given a number.
 	MemDemandCensored Code = "MEM_DEMAND_CENSORED"
+	// CPUDemandCensored: starved with usage at the CPU limit, so the usage is
+	// the limit echoed back and CPU is left as it is rather than given a number.
+	CPUDemandCensored Code = "CPU_DEMAND_CENSORED"
 
 	// What the run could not see.
 	NoSaturationSignal Code = "NO_SATURATION_SIGNAL"
@@ -85,6 +87,9 @@ const (
 	// CPUWaitStalledRun: stalled for a long run of stretches, too short a
 	// part of the window for the share; a reduction is not shown safe.
 	CPUWaitStalledRun Code = "CPU_WAIT_STALLED_RUN"
+	// MetricsStale: a live replica stopped reporting metrics well before the
+	// report ran, so the window describes the container as it was then.
+	MetricsStale Code = "METRICS_STALE"
 
 	// Facts about the workload that bound what may be recommended.
 	VPAManaged      Code = "VPA_MANAGES_WORKLOAD"
@@ -113,6 +118,18 @@ const (
 	VRAMOverPool      Code = "VRAM_EXCEEDS_RESERVED_POOL"
 	VRAMFits          Code = "VRAM_FITS"
 	GPUOversubscribed Code = "GPU_OVERSUBSCRIBED"
+	VRAMMIGUnchecked  Code = "VRAM_MIG_UNCHECKED"
+
+	// Measured accelerator use.
+	GPUIdle           Code = "GPU_IDLE"
+	GPUDeviceUnused   Code = "GPU_DEVICE_UNUSED"
+	GPUUnderused      Code = "GPU_UNDERUSED"
+	GPUBusyUnverified Code = "GPU_BUSY_UNVERIFIED"
+	GPUCPUBound       Code = "GPU_CPU_BOUND"
+	GPUCPUHeld        Code = "GPU_CPU_HELD"
+	GPUNotMeasured    Code = "GPU_NOT_MEASURED"
+	GPUSharedDevice   Code = "GPU_SHARED_UNATTRIBUTED"
+	GPUMIGUnverified  Code = "GPU_MIG_UNVERIFIED"
 )
 
 // Unit says how to read Observed and Against. Without it a consumer comparing
@@ -128,6 +145,7 @@ const (
 	Ratio      Unit = "ratio"
 	Percent    Unit = "percent"
 	SecPerSec  Unit = "s/s"
+	Seconds    Unit = "seconds"
 )
 
 // Reason is one piece of evidence behind a verdict.

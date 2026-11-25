@@ -30,9 +30,9 @@ func tuiDetail(f analyze.Finding) []string {
 
 	rows := [][]string{
 		{"", "CURRENT", "RECOMMENDED", "P95", "PEAK"},
-		{"cpu request", render.Milli(f.CPURequest), render.MilliRec(f.RecCPU),
+		{"cpu request", render.Milli(f.CPURequest), render.CPURec(f),
 			cpuUse(f.CPUUsageP95, metrics.SigCPUUsage), cpuUse(f.CPUUsageMax, metrics.SigCPUPeak)},
-		{"cpu limit", render.Milli(f.CPULimit), render.MilliRec(f.RecCPULimit), "", ""},
+		{"cpu limit", render.Milli(f.CPULimit), render.CPULimitRec(f), "", ""},
 		{"mem request", render.Human(f.MemRequest), render.MemRec(f),
 			memUse(f.MemP95, metrics.SigMemP95), memUse(f.MemUsageMax, metrics.SigMemory)},
 		{"mem limit", render.Human(f.MemLimit), render.MemLimitRec(f), "", ""},
@@ -68,6 +68,11 @@ func tuiDetail(f analyze.Finding) []string {
 		// Kept beside the pressure line rather than in it: psi is "?" here by
 		// definition, and this is what decided instead.
 		out = append(out[:len(out)-1], fmt.Sprintf("%-15s%s", "cpu wait", w), out[len(out)-1])
+	}
+	if f.GPUs > 0 {
+		u := render.GPUCells(f)
+		out = append(out, fmt.Sprintf("%-15s%d %s   idle %s   busy %s   sm %s   vram %s",
+			"gpu", f.GPUs, f.GPUResource, u.IdleDevices, u.Busy, u.SMActive, u.VRAM))
 	}
 	if len(f.Nodes) > 0 {
 		out = append(out, fmt.Sprintf("%-15s%s", "nodes", strings.Join(f.Nodes, " ")))
