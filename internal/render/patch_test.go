@@ -111,6 +111,26 @@ func TestPatchLeavesCensoredMemoryAlone(t *testing.T) {
 	}
 }
 
+// The CPU counterpart: a container starved at its CPU limit has unknown CPU
+// demand, and the held values must not come back as a change to apply.
+func TestPatchLeavesCensoredCPUAlone(t *testing.T) {
+	fs := []analyze.Finding{{
+		Namespace: "prod", Workload: "Deployment/checkout", Container: "api", Verdict: analyze.Saturated,
+		Pods: 1, CPURequest: 100, CPULimit: 200, MemRequest: 256 << 20, MemLimit: 256 << 20,
+		RecCPU: 100, RecCPULimit: 200, RecMem: 180 << 20, RecMemLimit: 225 << 20, CPUCensored: true,
+	}}
+	out := capture(t, func(p *printer) { p.printPatches(fs, "", "") })
+	if strings.Contains(out, `"cpu"`) {
+		t.Errorf("the patch names cpu for a container whose CPU demand tare does not know:\n%s", out)
+	}
+	if !strings.Contains(out, `"memory":"180Mi"`) {
+		t.Errorf("the memory change was lost with the CPU:\n%s", out)
+	}
+	if s := report.Totals(fs); s.CPUUnknown != 1 {
+		t.Errorf("cpuUnknown = %d, want 1: the total must say a container's CPU is unknown", s.CPUUnknown)
+	}
+}
+
 // TestPatchIsPinnedToItsCluster: a script generated against prod and run after
 // kubectl was switched to staging patched staging, silently, because the
 // workload names matched. Every command must name the context it was measured

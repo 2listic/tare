@@ -115,8 +115,8 @@ func buildHTMLView(r *report.Report) htmlView {
 			Namespace:  f.Namespace,
 			Workload:   f.Workload,
 			Container:  f.Container,
-			CPU:        Arrow(Milli(f.CPURequest), MilliRec(f.RecCPU)),
-			CPULimit:   Arrow(Milli(f.CPULimit), MilliRec(f.RecCPULimit)),
+			CPU:        Arrow(Milli(f.CPURequest), CPURec(f)),
+			CPULimit:   Arrow(Milli(f.CPULimit), CPULimitRec(f)),
 			Mem:        Arrow(Human(f.MemRequest), MemRec(f)),
 			MemLimit:   Arrow(Human(f.MemLimit), MemLimitRec(f)),
 			Pressure:   PressureCell(f),
@@ -139,6 +139,22 @@ func buildHTMLView(r *report.Report) htmlView {
 }
 
 func Arrow(from, to string) string { return from + " → " + to }
+
+// CPURec and CPULimitRec are MemRec's CPU counterparts: "?" for a container
+// starved at its limit (CPUCensored).
+func CPURec(f analyze.Finding) string {
+	if f.CPUCensored {
+		return "?"
+	}
+	return MilliRec(f.RecCPU)
+}
+
+func CPULimitRec(f analyze.Finding) string {
+	if f.CPUCensored {
+		return "?"
+	}
+	return MilliRec(f.RecCPULimit)
+}
 
 func MilliRec(m int64) string {
 	if m == 0 {

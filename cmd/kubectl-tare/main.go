@@ -230,6 +230,9 @@ func runCluster(sub string, o *options, namespaces []string) error {
 	}
 
 	progressf("querying %s over %s", srcLabel, windowNote)
+	// The queries are instant queries at the server's now; this is the same
+	// moment to within the time the queries take.
+	observedAt := time.Now()
 	obs, err := src.Observe(namespaces, window)
 	if err != nil {
 		return fail(err)
@@ -238,7 +241,7 @@ func runCluster(sub string, o *options, namespaces []string) error {
 	coverage, covCounts := coverageNote(containers, obs)
 
 	constraints := kc.LoadConstraints(ctx, namespaces)
-	cluster := analyze.Cluster{Constraints: constraints, Nodes: inv, NodeUtil: observeNodes(src, inv, window)}
+	cluster := analyze.Cluster{Constraints: constraints, Nodes: inv, NodeUtil: observeNodes(src, inv, window), Now: observedAt}
 	findings := analyze.RunWithCluster(containers, obs, cluster, window, analyze.DefaultThresholds())
 
 	rep := &report.Report{

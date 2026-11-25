@@ -30,9 +30,9 @@ func tuiDetail(f analyze.Finding) []string {
 
 	rows := [][]string{
 		{"", "CURRENT", "RECOMMENDED", "P95", "PEAK"},
-		{"cpu request", render.Milli(f.CPURequest), render.MilliRec(f.RecCPU),
+		{"cpu request", render.Milli(f.CPURequest), render.CPURec(f),
 			cpuUse(f.CPUUsageP95, metrics.SigCPUUsage), cpuUse(f.CPUUsageMax, metrics.SigCPUPeak)},
-		{"cpu limit", render.Milli(f.CPULimit), render.MilliRec(f.RecCPULimit), "", ""},
+		{"cpu limit", render.Milli(f.CPULimit), render.CPULimitRec(f), "", ""},
 		{"mem request", render.Human(f.MemRequest), render.MemRec(f),
 			memUse(f.MemP95, metrics.SigMemP95), memUse(f.MemUsageMax, metrics.SigMemory)},
 		{"mem limit", render.Human(f.MemLimit), render.MemLimitRec(f), "", ""},

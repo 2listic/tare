@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/2listic/tare/internal/analyze"
 	"github.com/2listic/tare/internal/packing"
@@ -199,6 +200,8 @@ func evidenceValue(v float64, u analyze.Unit) string {
 		return fmt.Sprintf("%.1f%%", v)
 	case analyze.Count:
 		return fmt.Sprintf("%.0f", v)
+	case analyze.Seconds:
+		return time.Duration(v * float64(time.Second)).Round(time.Minute).String()
 	case analyze.Ratio, analyze.SecPerSec:
 		return fmt.Sprintf("%.4g", v)
 	}
@@ -237,6 +240,9 @@ func (p *printer) printTotals(fs []analyze.Finding) {
 	if s.UnverifiedWorkloads > 0 {
 		row(w, "unverified", strconv.Itoa(s.UnverifiedWorkloads), CPUDelta(-s.UnverifiedCPUMillicores), MemDelta(-s.UnverifiedMemBytes),
 			"not_in_lower:"+string(analyze.Unverified))
+	}
+	if s.CPUUnknown > 0 {
+		row(w, "unknown", strconv.Itoa(s.CPUUnknown), "?", "-", string(analyze.CPUDemandCensored))
 	}
 	if s.MemUnknown > 0 {
 		row(w, "unknown", strconv.Itoa(s.MemUnknown), "-", "?", string(analyze.MemDemandCensored))

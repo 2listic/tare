@@ -119,8 +119,15 @@ rather than a score:
 SATURATED  prod/Deployment/checkout [api]  confidence high (17098 samples)
     CPU_PRESSURE          CPU pressure 0.900 s/s exceeds 0.030 while using 100% of its allocation:
                           the container is waiting on CPU it was denied (window mean 0.8437)
-    CPU_PINNED_AT_LIMIT   usage is pinned at the 100m CPU limit; raise the limit, not just the request
+    CPU_DEMAND_CENSORED   usage reached the 100m CPU limit while the container was starved, and CFS never
+                          lets usage exceed the limit: the 100m peak is a lower bound on what it needs, not a
+                          measurement of it. tare does not know how much CPU this container needs, so it
+                          proposes no CPU change; raise the limit (not just the request) by a step you choose
+                          and re-run once the new size has a window of its own.
 ```
+
+The CPU column reads `100m→?`: usage at a limit is the limit echoed back, so
+tare gives no number rather than an invented one.
 
 Sustained pressure is shown beside peak pressure, because one unlucky minute
 over a two-week window is not a starved container, and a tool that reports only

@@ -68,6 +68,11 @@ type Cluster struct {
 	// an IP. A nil map means node utilisation could not be read, which is a
 	// reportable outcome rather than an idle cluster.
 	NodeUtil map[string]metrics.NodeObservation
+
+	// Now is when the observations were taken. A live replica whose newest
+	// sample is much older stopped reporting, and is flagged METRICS_STALE.
+	// Zero skips the check: the simulator has no wall clock to be behind.
+	Now time.Time
 }
 
 // Run joins containers with observations and produces findings, most severe
@@ -106,6 +111,7 @@ func RunWithCluster(containers []discover.Container, obs map[metrics.Key]*metric
 		f.reconcileFloors(th)
 		applySignalGaps(f)
 		holdTooYoung(f, th)
+		holdStale(f, cl.Now, th)
 		out = append(out, *f)
 	}
 	sortFindings(out)
@@ -160,6 +166,7 @@ func aggregate(containers []discover.Container, obs map[metrics.Key]*metrics.Obs
 		}
 		fold(f, o, true, th)
 		spans[gk] = append(spans[gk], o)
+		f.liveLastSeen = append(f.liveLastSeen, o.LastSeen)
 
 		// The memory trend is a per-pod pair, and the two halves must come from
 		// the same pod: comparing one replica's early average against another's

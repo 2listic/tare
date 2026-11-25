@@ -1,5 +1,7 @@
 package analyze
 
+import "time"
+
 // Thresholds are the decision boundaries. They are struct fields rather than
 // constants so the simulator can sweep them.
 type Thresholds struct {
@@ -50,6 +52,9 @@ type Thresholds struct {
 	// container minutes old has not met its own load yet; on the lab cluster a frontend
 	// 3.5 minutes old read p95 0m while drawing 50m, and was told 10m.
 	MinSamplesForSizing int
+	// StaleAfter: a live replica whose newest sample is older than this has
+	// stopped reporting, and its window is history rather than the present.
+	StaleAfter time.Duration
 	// MinSaturationUtil guards every pressure-based saturation verdict: the
 	// container's own usage must reach this fraction of its allocation before
 	// stalls are read as starvation. A container using 1.5% of its request is
@@ -205,6 +210,11 @@ func DefaultThresholds() Thresholds {
 		LimitMoveRatio:         0.20,
 		MinSamplesForInference: 2880, // twelve hours at a 15s scrape
 		MinSamplesForSizing:    240,  // an hour at a 15s scrape
+		// Chosen, not derived. The newest-sample query steps every 5m, so a
+		// healthy container reads at most ~10m old; an hour leaves room for
+		// clock skew between this machine and Prometheus and for a scrape
+		// outage short enough not to matter.
+		StaleAfter: time.Hour,
 		// 0.05, as agent/compare-pressure's --share, which is what the rule was
 		// evaluated with on the harness clusters. Unswept in this catalog.
 		CPUWaitStalledShare: 0.05,

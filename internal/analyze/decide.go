@@ -479,7 +479,11 @@ func ratchetMem(f *Finding, th Thresholds) {
 func holdStarved(f *Finding, th Thresholds, st starved) {
 	measuredMem := f.RecMem
 	if st.cpu {
-		ratchetCPU(f)
+		if cpuDemandCensored(f) {
+			censorCPU(f)
+		} else {
+			ratchetCPU(f)
+		}
 	}
 	if st.mem {
 		ratchetMem(f, th)
@@ -492,12 +496,32 @@ func holdStarved(f *Finding, th Thresholds, st starved) {
 			censorMemory(f)
 		}
 	}
-	// Only for a CPU-starved container: the advice is to raise the limit, and
-	// for one starved of memory alone the recommendation raises nothing on
-	// CPU, so the note contradicted the numbers printed beside it.
-	if st.cpu && f.CPULimit > 0 && f.CPUUsageP95*1000 >= float64(f.CPULimit)*pinnedAtLimit {
-		f.Reasons = append(f.Reasons, measured(CPUAtLimit, f.CPUUsageP95*1000, float64(f.CPULimit), Millicores, fmt.Sprintf("usage is pinned at the %dm CPU limit; raise the limit, not just the request", f.CPULimit)))
-	}
+}
+
+// cpuDemandCensored reports a CPU-starved container whose usage reached its
+// limit. CFS never lets usage exceed the quota, so usage there is the limit
+// echoed back and says nothing about how much more the container wants. The
+// peak, not p95, decides: the limit is sized from the peak, so a peak at the
+// limit censors it however low p95 sits. Without a limit nothing capped
+// usage, and the measured raise stands.
+func cpuDemandCensored(f *Finding) bool {
+	return f.CPULimit > 0 && max(f.CPUUsageMax, f.CPUSteadyMax)*1000 >= float64(f.CPULimit)*pinnedAtLimit
+}
+
+// censorCPU withholds a CPU number from a container starved at its limit.
+// starved-api in the demo wants ~350m against a 200m limit and was told 229m
+// request / 250m limit: still starving, printed as the fix. The memory side
+// has the same shape and the same answer (censorMemory).
+func censorCPU(f *Finding) {
+	f.CPUCensored = true
+	f.RecCPU, f.RecCPULimit = f.CPURequest, f.CPULimit
+	peak := max(f.CPUUsageMax, f.CPUSteadyMax) * 1000
+	f.Reasons = append(f.Reasons, measured(CPUDemandCensored, peak, float64(f.CPULimit), Millicores, fmt.Sprintf(
+		"usage reached the %dm CPU limit while the container was starved, and CFS never lets usage exceed the limit: "+
+			"the %.0fm peak is a lower bound on what it needs, not a measurement of it. tare does not know how much CPU "+
+			"this container needs, so it proposes no CPU change; raise the limit (not just the request) by a step you choose "+
+			"and re-run once the new size has a window of its own.",
+		f.CPULimit, peak)))
 }
 
 // censorMemory withholds a memory number from an OOMKilled container whose

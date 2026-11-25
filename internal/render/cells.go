@@ -73,6 +73,9 @@ func shortWorkload(ns, workload string, max int) string {
 }
 
 func cpuCell(f analyze.Finding) string {
+	if f.CPUCensored {
+		return fmt.Sprintf("%s>?", Milli(f.CPURequest))
+	}
 	if f.RecCPU == 0 {
 		return fmt.Sprintf("%s>-", Milli(f.CPURequest))
 	}
@@ -83,6 +86,9 @@ func cpuCell(f analyze.Finding) string {
 // than the request: a request sized to a percentile must not double as a limit
 // that throttles every burst.
 func limitCell(f analyze.Finding) string {
+	if f.CPUCensored {
+		return fmt.Sprintf("%s>?", Milli(f.CPULimit))
+	}
 	if f.RecCPULimit == 0 {
 		return fmt.Sprintf("%s>-", Milli(f.CPULimit))
 	}

@@ -138,6 +138,15 @@ var (
 	}
 )
 
+// StarvedAPI wants about 350m. It is not in Catalog: what makes it starved is
+// an allocation below its demand, and the sweeps size the catalog under
+// generous allocations, where it would be SteadyWeb again. The demo gives it a
+// 200m limit, so CPU pressure, and usage pinned at the limit, are on screen.
+var StarvedAPI = Demand{
+	Name: "starved-api", BaseCPU: 0.35, NoiseFraction: 0.10,
+	BaseMem: 160 * mib, MemNoiseFraction: 0.03,
+}
+
 // Catalog is every archetype, for sweeps that must hold across all of them.
 func Catalog() []Demand {
 	return []Demand{

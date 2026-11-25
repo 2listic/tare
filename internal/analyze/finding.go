@@ -126,6 +126,10 @@ type Finding struct {
 	// vouch for the workload.
 	cpuWaitUnseen int
 
+	// liveLastSeen is each observed live replica's newest sample, unix
+	// seconds, zero where unknown. See holdStale.
+	liveLastSeen []float64
+
 	// RecCPU and RecMem are the recommended requests, zero when none is
 	// offered. RecCPULimit is the recommended CPU limit, which is deliberately
 	// higher: a request sized to a percentile must not become a limit that
@@ -151,6 +155,10 @@ type Finding struct {
 	// recommendation as unknown, never as those values: an unchanged "16Mi"
 	// beside OOMKILLED reads as "16Mi is right", which is the input echoed back.
 	MemCensored bool
+	// CPUCensored is the CPU counterpart: starved with usage at the CPU limit,
+	// which CFS never lets it exceed, so demand is unknown. RecCPU and
+	// RecCPULimit hold the current values, and renderers print "?".
+	CPUCensored bool
 
 	// Constraints are the workload facts that shaped the recommendation.
 	Constraints discover.Constraints

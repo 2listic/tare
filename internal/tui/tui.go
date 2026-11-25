@@ -97,7 +97,7 @@ func newTUIModel(r *report.Report) *tuiModel {
 			confidence: string(f.Confidence),
 			name:       tuiName(f),
 			search:     strings.ToLower(fmt.Sprintf("%s/%s [%s]", f.Namespace, f.Workload, f.Container)),
-			cpu:        render.Arrow(render.Milli(f.CPURequest), render.MilliRec(f.RecCPU)),
+			cpu:        render.Arrow(render.Milli(f.CPURequest), render.CPURec(f)),
 			mem:        render.Arrow(render.Human(f.MemRequest), render.MemRec(f)),
 			pressure:   render.PressureCell(f),
 			withheld:   f.RecCPU == 0 && f.RecMem == 0,

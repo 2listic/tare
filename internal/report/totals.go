@@ -43,6 +43,8 @@ type Savings struct {
 	// (MemCensored). They contribute nothing to either direction, and a total
 	// that silently left them out would read as "nothing needs more memory".
 	MemUnknown int
+	// CPUUnknown is the same for CPU (CPUCensored): starved at the limit.
+	CPUUnknown int
 
 	// GPUs are whole devices, per pod times pods like every figure here, and
 	// counted apart from requests: a GPU is not resized, it is given back.
@@ -63,6 +65,9 @@ func Totals(fs []analyze.Finding) Savings {
 		c, m := Reclaimable(f)
 		if f.MemCensored {
 			s.MemUnknown++
+		}
+		if f.CPUCensored {
+			s.CPUUnknown++
 		}
 		addGPUs(&s, f)
 		if f.Verdict == analyze.Idle {

@@ -24,7 +24,7 @@ func Demo(window time.Duration, label string) *Report {
 	const seed = 21
 	origin := time.Date(2026, 3, 2, 0, 0, 0, 0, time.UTC) // a Monday
 
-	c := simulate.NewCluster("demo", origin, seed, simulate.Catalog()...)
+	c := simulate.NewCluster("demo", origin, seed, append(simulate.Catalog(), simulate.StarvedAPI)...)
 	// Deliberately generous, which is how a container arrives at this tool:
 	// over-provisioned, so its true demand is visible.
 	for _, d := range simulate.Catalog() {
@@ -33,6 +33,12 @@ func Demo(window time.Duration, label string) *Report {
 			MemRequest: 4 << 30, MemLimit: 8 << 30,
 		})
 	}
+	// Except one. A demo where every row is a shrink shows none of the
+	// pressure evidence the README leads with.
+	c.SetAllocation(simulate.StarvedAPI.Name, simulate.Allocation{
+		CPURequest: 0.1, CPULimit: 0.2,
+		MemRequest: 256 << 20, MemLimit: 256 << 20,
+	})
 	c.Run(window)
 
 	obs, err := c.Observe(nil, window)
