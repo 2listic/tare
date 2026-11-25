@@ -213,6 +213,7 @@ func pinReason(p *corev1.Pod, kind string) string {
 // tare understands better than the generic rules do.
 type pinRules struct {
 	ignoreSelector func(key string) bool
+	ignoreAffinity func(a *corev1.Affinity) bool
 	ignoreResource func(name corev1.ResourceName) bool
 	sharedVolumes  bool // its PVCs are known not to bind it to a node
 }
@@ -254,6 +255,7 @@ func vmPinReason(p *corev1.Pod, vm *VMSpec) string {
 	}
 	return placementPin(p, pinRules{
 		ignoreSelector: func(k string) bool { return kubevirtSelector(k) && !hasKey(vm.NodeSelector, k) },
+		ignoreAffinity: func(a *corev1.Affinity) bool { return !vm.Affinity && kubevirtAffinity(p, a) },
 		ignoreResource: func(n corev1.ResourceName) bool { return strings.HasPrefix(string(n), "devices.kubevirt.io/") },
 		// Live migration needs storage both nodes can reach, so a VM that
 		// is migratable has none that binds it.
@@ -273,6 +275,77 @@ func kubevirtSelector(k string) bool {
 	return strings.Contains(k, "kubevirt.io") || k == corev1.LabelArchStable
 }
 
+// kubevirtAffinity reports an affinity made only of the terms KubeVirt adds
+// to a virt-launcher pod itself. They are the same from v0.59 to v1.9
+// (pkg/virt-controller/services/template.go, watch/migration/migration.go):
+//   - node affinity on its node-labeller's keys: "node-labeller.kubevirt.io/
+//     obsolete-host-model DoesNotExist" for every VM whose CPU model is unset
+//     or host-model, "cpu-feature.node.kubevirt.io/<f> DoesNotExist" for each
+//     CPU feature it forbids, and a preferred kubernetes.io/arch term. Like
+//     its nodeSelector keys, they keep a VM off nodes that cannot run it.
+//   - on a live migration's target pod, which is the VM's pod once the
+//     migration is done: a pod anti-affinity against the VMI's own pods
+//     (kubevirt.io/created-by, per hostname), so the target lands away from
+//     the source; or, for a decentralized migration, "kubernetes.io/hostname
+//     NotIn <source node>". Neither binds the VM where it is.
+//
+// Any other pod affinity or anti-affinity (KubeVirt's own for persistent
+// reservations included), a matchFields term, or any other key is a real
+// constraint and pins (KNOWN-FAILURES 63).
+func kubevirtAffinity(p *corev1.Pod, a *corev1.Affinity) bool {
+	if a.PodAffinity != nil {
+		return false
+	}
+	if pa := a.PodAntiAffinity; pa != nil {
+		if len(pa.PreferredDuringSchedulingIgnoredDuringExecution) > 0 {
+			return false
+		}
+		for _, t := range pa.RequiredDuringSchedulingIgnoredDuringExecution {
+			if !ownMigrationTerm(p, t) {
+				return false
+			}
+		}
+	}
+	na := a.NodeAffinity
+	if na == nil {
+		return true
+	}
+	var terms []corev1.NodeSelectorTerm
+	if na.RequiredDuringSchedulingIgnoredDuringExecution != nil {
+		terms = append(terms, na.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms...)
+	}
+	for _, t := range na.PreferredDuringSchedulingIgnoredDuringExecution {
+		terms = append(terms, t.Preference)
+	}
+	for _, t := range terms {
+		if len(t.MatchFields) > 0 {
+			return false
+		}
+		for _, e := range t.MatchExpressions {
+			sourceNode := e.Key == corev1.LabelHostname && e.Operator == corev1.NodeSelectorOpNotIn
+			if !kubevirtSelector(e.Key) && !sourceNode {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// ownMigrationTerm reports the anti-affinity KubeVirt gives a migration's
+// target pod: no two of this VMI's pods on one node. The selector is the
+// pod's own kubevirt.io/created-by label (the VMI's UID), and nothing else.
+func ownMigrationTerm(p *corev1.Pod, t corev1.PodAffinityTerm) bool {
+	const createdBy = "kubevirt.io/created-by"
+	ls := t.LabelSelector
+	if ls == nil || len(ls.MatchExpressions) > 0 || len(ls.MatchLabels) != 1 ||
+		t.NamespaceSelector != nil || len(t.MatchLabelKeys) > 0 || len(t.MismatchLabelKeys) > 0 ||
+		t.TopologyKey != corev1.LabelHostname {
+		return false
+	}
+	uid, ok := p.Labels[createdBy]
+	return ok && uid != "" && ls.MatchLabels[createdBy] == uid
+}
+
 func hasKey(m map[string]string, k string) bool {
 	_, ok := m[k]
 	return ok
@@ -285,7 +358,7 @@ func placementPin(p *corev1.Pod, r pinRules) string {
 			return "has a nodeSelector"
 		}
 	}
-	if p.Spec.Affinity != nil {
+	if p.Spec.Affinity != nil && (r.ignoreAffinity == nil || !r.ignoreAffinity(p.Spec.Affinity)) {
 		return "has affinity or anti-affinity rules"
 	}
 	if len(p.Spec.TopologySpreadConstraints) > 0 {

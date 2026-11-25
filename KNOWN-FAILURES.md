@@ -1358,6 +1358,44 @@ say, still pins. `TestVMPinRules` (KubeVirt's own arch selector, arch set by
 the VM's author, a kubevirt.io key set by the VM's author),
 `TestVMINodeSelectorIsRead`.
 
+## 63. Every VM was still pinned, by KubeVirt's own node affinity
+
+**Looked like:** on the lab cluster (KubeVirt v1.9.0, 2026-11-24), with 62
+fixed, an ordinary live-migratable VM with no affinity of its own was pinned
+in the node replay, `has affinity or anti-affinity rules`.
+
+**Was actually:** KubeVirt's virt-controller gives a virt-launcher pod node
+affinity of its own (`pkg/virt-controller/services/template.go`): a required
+`node-labeller.kubevirt.io/obsolete-host-model DoesNotExist` for every VM whose
+CPU model is unset or `host-model`, which is most VMs; a `DoesNotExist` on
+`cpu-feature.node.kubevirt.io/<feature>` for each CPU feature the VM forbids;
+and, with cross-architecture virtualization on, a preferred
+`kubernetes.io/arch` term. 62 taught the nodeSelector check to ignore
+KubeVirt's keys, and the affinity check, the next in line, pinned the same VMs.
+Like the selectors, these terms only keep a VM off nodes that cannot run it.
+After a live migration the VM's pod is the migration's target pod, which also
+carries a required pod anti-affinity against the VMI's own pods
+(`kubevirt.io/created-by`, per hostname; `migration.go`), so a migrated VM
+would have stayed pinned with only the node terms ignored. Both are in KubeVirt
+from v0.59 to v1.9 unchanged, read from the source of each.
+
+**Caught by:** tare-vm-pinned's check that `control`, a migratable VM with no
+affinity, is movable, 2026-11-24.
+
+**Fixed by:** a migratable VM ignores an affinity made only of the terms
+KubeVirt adds itself, unless the VMI's own `spec.affinity` is set: then its
+author chose it, and it pins the VM like any pod's. Those terms are node
+affinity on KubeVirt's keys (the same `kubevirtSelector` as 62), the
+migration's anti-affinity whose selector is the pod's own
+`kubevirt.io/created-by`, and a decentralized migration's
+`kubernetes.io/hostname NotIn`. Any other pod affinity or anti-affinity
+(KubeVirt's own for persistent reservations included), a `matchFields` term,
+or any other key still pins. The match is on the shape of the terms, not on a
+KubeVirt version. `TestVMPinRules` (KubeVirt's own node affinity, after a live
+and a decentralized migration, affinity set by the VM's author, a key not
+KubeVirt's, matchFields, anti-affinity against another VMI or not KubeVirt's,
+hostname In), `TestVMINodeSelectorIsRead`.
+
 ## Open, and not yet solved
 
 **KubeVirt support has not met a cluster with VMs.** Everything in 57-60 and
@@ -1373,6 +1411,19 @@ and `kubevirt_vm_resource_requests` are not read: dedicated CPUs and requests co
 from the VMI spec, so a token that cannot read VMIs leaves a VM unsized in VM
 terms and pinned, rather than falling back to those series. Settling this needs
 the lab run in docs/plan.md (KubeVirt).
+
+**A VM guest's used-memory peak can fall between samples.** `GuestMemUsedMax`
+is `max_over_time` of available minus usable over a subquery on the 5-minute
+`step` (`internal/metrics/vm.go`), so it reads one 15-second sample in twenty,
+not the highest. On the lab cluster (KubeVirt v1.9.0, 2026-11-23) an idle
+1.5Gi guest whose page cache was filling peaked at 462Mi in a single sample,
+as the fill started; tare reported 411Mi.
+The vCPU and vCPU-delay peaks already use the 1-minute `peak` step, and the
+swap and major-fault rates average over the step rather than skip it. There it
+changed nothing: 462Mi x 1.15 is also under the 1Gi guest floor. On a guest
+sized near what it uses, a missed peak would size the guest below it. The fix
+is `max_over_time` of the raw difference inside each step (or the `peak` step),
+with a test whose spike falls between two grid points.
 
 **A workload redeployed more than once a day never has usable CPU wait.**
 CPU wait compares each pod with its own normal (55), which needs a day of

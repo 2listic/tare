@@ -75,6 +75,10 @@ type VMSpec struct {
 	// for. KubeVirt copies it into the virt-launcher pod beside the selectors
 	// it adds itself, and only these can pin a migratable VM.
 	NodeSelector map[string]string
+	// Affinity is set when the VMI's own spec.affinity is. KubeVirt copies it
+	// into the virt-launcher pod and adds node-affinity terms of its own; only
+	// the author's can pin a migratable VM.
+	Affinity bool
 
 	// EvictionStrategy is the VMI's own, or the cluster default when it sets
 	// none. LiveMigratable is the VMI's condition; LiveMigratableKnown is
@@ -296,6 +300,7 @@ func vmSpecFrom(spec map[string]any, conf kubevirtConfig) VMSpec {
 	if v.EvictionStrategy == "" {
 		v.EvictionStrategy = conf.evictionStrategy
 	}
+	v.Affinity = len(mapAt(spec, "affinity")) > 0
 	if sel := mapAt(spec, "nodeSelector"); len(sel) > 0 {
 		v.NodeSelector = map[string]string{}
 		for k, val := range sel {

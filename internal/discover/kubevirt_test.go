@@ -218,6 +218,61 @@ func TestVMPinRules(t *testing.T) {
 		{"a kubevirt.io key set by the VM's author", &VMSpec{LiveMigratable: true, LiveMigratableKnown: true,
 			EvictionStrategy: "LiveMigrate", NodeSelector: map[string]string{"cpu-model.node.kubevirt.io/Skylake": "true"}},
 			nil, "nodeSelector"},
+		// KubeVirt v1.9 adds these node-affinity terms itself: the first to
+		// every VM with no CPU model or host-model, the second for a
+		// forbidden CPU feature, the third with cross-architecture on.
+		{"KubeVirt's own node affinity", &migratable, func(p *corev1.Pod) { p.Spec.Affinity = kubevirtLauncherAffinity() }, ""},
+		{"affinity set by the VM's author", &VMSpec{LiveMigratable: true, LiveMigratableKnown: true,
+			EvictionStrategy: "LiveMigrate", Affinity: true},
+			func(p *corev1.Pod) { p.Spec.Affinity = kubevirtLauncherAffinity() }, "affinity"},
+		{"a node-affinity key not KubeVirt's", &migratable, func(p *corev1.Pod) {
+			a := kubevirtLauncherAffinity()
+			r := a.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+			r.NodeSelectorTerms[0].MatchExpressions = append(r.NodeSelectorTerms[0].MatchExpressions,
+				corev1.NodeSelectorRequirement{Key: "zone", Operator: corev1.NodeSelectorOpIn, Values: []string{"a"}})
+			p.Spec.Affinity = a
+		}, "affinity"},
+		{"a matchFields term", &migratable, func(p *corev1.Pod) {
+			a := kubevirtLauncherAffinity()
+			r := a.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+			r.NodeSelectorTerms[0].MatchFields = []corev1.NodeSelectorRequirement{
+				{Key: "metadata.name", Operator: corev1.NodeSelectorOpIn, Values: []string{"worker-1"}}}
+			p.Spec.Affinity = a
+		}, "affinity"},
+		// A migration's target pod, which is the VM's pod once it is done,
+		// as read on the lab cluster (tare-vm-migration mig-1).
+		{"after a live migration", &migratable, func(p *corev1.Pod) {
+			p.Labels["kubevirt.io/created-by"] = "3cb402c8"
+			a := kubevirtLauncherAffinity()
+			a.PodAntiAffinity = migrationAntiAffinity("3cb402c8")
+			p.Spec.Affinity = a
+		}, ""},
+		{"after a decentralized migration", &migratable, func(p *corev1.Pod) {
+			a := kubevirtLauncherAffinity()
+			r := a.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+			r.NodeSelectorTerms[0].MatchExpressions = append(r.NodeSelectorTerms[0].MatchExpressions,
+				corev1.NodeSelectorRequirement{Key: "kubernetes.io/hostname", Operator: corev1.NodeSelectorOpNotIn, Values: []string{"n0"}})
+			p.Spec.Affinity = a
+		}, ""},
+		{"anti-affinity against another VMI's pods", &migratable, func(p *corev1.Pod) {
+			p.Labels["kubevirt.io/created-by"] = "3cb402c8"
+			a := kubevirtLauncherAffinity()
+			a.PodAntiAffinity = migrationAntiAffinity("other-uid")
+			p.Spec.Affinity = a
+		}, "affinity"},
+		{"pod anti-affinity not KubeVirt's", &migratable, func(p *corev1.Pod) {
+			a := kubevirtLauncherAffinity()
+			a.PodAntiAffinity = &corev1.PodAntiAffinity{RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
+				{TopologyKey: "kubernetes.io/hostname"}}}
+			p.Spec.Affinity = a
+		}, "affinity"},
+		{"hostname In", &migratable, func(p *corev1.Pod) {
+			a := kubevirtLauncherAffinity()
+			r := a.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+			r.NodeSelectorTerms[0].MatchExpressions = append(r.NodeSelectorTerms[0].MatchExpressions,
+				corev1.NodeSelectorRequirement{Key: "kubernetes.io/hostname", Operator: corev1.NodeSelectorOpIn, Values: []string{"n1"}})
+			p.Spec.Affinity = a
+		}, "affinity"},
 		{"a GPU", &migratable, func(p *corev1.Pod) {
 			p.Spec.Containers[0].Resources.Limits["nvidia.com/gpu"] = resource.MustParse("1")
 		}, "extended resource"},
@@ -234,6 +289,30 @@ func TestVMPinRules(t *testing.T) {
 			t.Errorf("%s: pin reason %q, want one mentioning %q", tc.name, got.PinReason, tc.want)
 		}
 	}
+}
+
+// migrationAntiAffinity is what KubeVirt gives a migration's target pod: none
+// of the VMI's own pods on the same node.
+func migrationAntiAffinity(uid string) *corev1.PodAntiAffinity {
+	return &corev1.PodAntiAffinity{RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+		LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"kubevirt.io/created-by": uid}},
+		TopologyKey:   "kubernetes.io/hostname",
+	}}}
+}
+
+// kubevirtLauncherAffinity is the node affinity KubeVirt v1.9's virt-controller
+// gives a launcher pod on its own, as read on the lab cluster.
+func kubevirtLauncherAffinity() *corev1.Affinity {
+	return &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
+		RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+			MatchExpressions: []corev1.NodeSelectorRequirement{
+				{Key: "node-labeller.kubevirt.io/obsolete-host-model", Operator: corev1.NodeSelectorOpDoesNotExist},
+				{Key: "cpu-feature.node.kubevirt.io/svm", Operator: corev1.NodeSelectorOpDoesNotExist},
+			}}}},
+		PreferredDuringSchedulingIgnoredDuringExecution: []corev1.PreferredSchedulingTerm{{Weight: 100,
+			Preference: corev1.NodeSelectorTerm{MatchExpressions: []corev1.NodeSelectorRequirement{
+				{Key: "kubernetes.io/arch", Operator: corev1.NodeSelectorOpIn, Values: []string{"amd64"}}}}}},
+	}}
 }
 
 // A migrated VM's pods are found through the same index, so the replay pins
@@ -299,7 +378,11 @@ func TestVMINodeSelectorIsRead(t *testing.T) {
 	if v.NodeSelector["zone"] != "a" || len(v.NodeSelector) != 1 {
 		t.Errorf("got %v", v.NodeSelector)
 	}
-	if v := vmSpecFrom(map[string]any{}, kubevirtConfig{}); v.NodeSelector != nil {
-		t.Errorf("no selector read as %v", v.NodeSelector)
+	a := vmSpecFrom(map[string]any{"affinity": map[string]any{"nodeAffinity": map[string]any{}}}, kubevirtConfig{})
+	if !a.Affinity {
+		t.Error("the VMI's own affinity was not read")
+	}
+	if v := vmSpecFrom(map[string]any{}, kubevirtConfig{}); v.NodeSelector != nil || v.Affinity {
+		t.Errorf("no selector read as %v, affinity %v", v.NodeSelector, v.Affinity)
 	}
 }
