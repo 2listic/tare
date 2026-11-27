@@ -144,15 +144,28 @@ func (p *printer) printPatches(fs []analyze.Finding, kubeContext, kubeconfig str
 func vmPatch(changes []gitops.Change) map[string]any {
 	domain := map[string]any{}
 	for _, c := range changes {
-		req := map[string]string{}
+		req, lim := map[string]string{}, map[string]string{}
 		if c.CPURequest != nil {
 			req["cpu"] = gitops.CPUQuantity(*c.CPURequest)
 		}
 		if c.MemRequest != nil {
 			req["memory"] = gitops.MemQuantity(*c.MemRequest)
 		}
+		if c.CPULimit != nil {
+			lim["cpu"] = gitops.CPUQuantity(*c.CPULimit)
+		}
+		if c.MemLimit != nil {
+			lim["memory"] = gitops.MemQuantity(*c.MemLimit)
+		}
+		res := map[string]any{}
 		if len(req) > 0 {
-			domain["resources"] = map[string]any{"requests": req}
+			res["requests"] = req
+		}
+		if len(lim) > 0 {
+			res["limits"] = lim
+		}
+		if len(res) > 0 {
+			domain["resources"] = res
 		}
 		if c.GuestMemory != nil {
 			domain["memory"] = map[string]string{"guest": gitops.MemQuantity(*c.GuestMemory)}

@@ -79,13 +79,25 @@ func Kustomize(changes []Change) ([]KustomizePatch, string) {
 func writeVMPatch(b *bytes.Buffer, changes []Change) {
 	b.WriteString("spec:\n  template:\n    spec:\n      domain:\n")
 	for _, c := range changes {
+		if c.CPURequest != nil || c.MemRequest != nil || c.CPULimit != nil || c.MemLimit != nil {
+			b.WriteString("        resources:\n")
+		}
 		if c.CPURequest != nil || c.MemRequest != nil {
-			b.WriteString("        resources:\n          requests:\n")
+			b.WriteString("          requests:\n")
 			if c.CPURequest != nil {
 				fmt.Fprintf(b, "            cpu: %q\n", CPUQuantity(*c.CPURequest))
 			}
 			if c.MemRequest != nil {
 				fmt.Fprintf(b, "            memory: %q\n", MemQuantity(*c.MemRequest))
+			}
+		}
+		if c.CPULimit != nil || c.MemLimit != nil {
+			b.WriteString("          limits:\n")
+			if c.CPULimit != nil {
+				fmt.Fprintf(b, "            cpu: %q\n", CPUQuantity(*c.CPULimit))
+			}
+			if c.MemLimit != nil {
+				fmt.Fprintf(b, "            memory: %q\n", MemQuantity(*c.MemLimit))
 			}
 		}
 		if c.GuestMemory != nil {

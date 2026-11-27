@@ -50,13 +50,16 @@ type VMSpec struct {
 	MemRequest int64 // bytes
 	MemLimit   int64
 
-	// AuthoredGuest, AuthoredMemRequest and AuthoredCPURequest are what the
-	// VirtualMachine's own template set, which is what a patch must change.
-	// AuthoredKnown is false when the VirtualMachine could not be read.
+	// AuthoredGuest and the Authored requests and limits are what the
+	// VirtualMachine's own template set, which is what a patch must change
+	// and keep valid. AuthoredKnown is false when the VirtualMachine could
+	// not be read.
 	AuthoredKnown      bool
 	AuthoredGuest      bool
 	AuthoredMemRequest int64
 	AuthoredCPURequest int64
+	AuthoredMemLimit   int64
+	AuthoredCPULimit   int64
 
 	// Instancetype names a VirtualMachineInstancetype the VM takes its CPU
 	// and memory from. KubeVirt rejects a VM that sets either beside one, so
@@ -237,6 +240,8 @@ func (x *workloadIndex) listVMs(ctx context.Context, ns string) error {
 			guest:        qty(domain, "memory", "guest") != "",
 			memRequest:   quantityBytes(qty(domain, "resources", "requests", "memory")),
 			cpuRequest:   quantityMilli(qty(domain, "resources", "requests", "cpu")),
+			memLimit:     quantityBytes(qty(domain, "resources", "limits", "memory")),
+			cpuLimit:     quantityMilli(qty(domain, "resources", "limits", "cpu")),
 			instancetype: unstructuredString(spec, "instancetype", "name"),
 		}
 		x.vms[item.GetNamespace()+"/"+item.GetName()] = a
@@ -248,6 +253,8 @@ type vmAuthored struct {
 	guest        bool
 	memRequest   int64
 	cpuRequest   int64
+	memLimit     int64
+	cpuLimit     int64
 	instancetype string
 }
 
@@ -270,6 +277,8 @@ func (x *workloadIndex) vmFor(ctx context.Context, pod *corev1.Pod) *VMSpec {
 			spec.AuthoredGuest = a.guest
 			spec.AuthoredMemRequest = a.memRequest
 			spec.AuthoredCPURequest = a.cpuRequest
+			spec.AuthoredMemLimit = a.memLimit
+			spec.AuthoredCPULimit = a.cpuLimit
 			spec.Instancetype = a.instancetype
 		}
 	}

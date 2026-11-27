@@ -1481,6 +1481,30 @@ vCPU peaks do. `TestGuestMemCoverageAloneIsNotAReport`,
 `TestGuestMemZeroUsedIsNotEvidence`, `TestGuestMemPeakIsSampledFinely`. A peak
 shorter than a minute can still fall between steps.
 
+## 67. A VM patch could be rejected, or overcommit the guest it raised
+
+**Looked like:** found in review (2026-11-25). A VM authored with
+`limits.cpu: 1`, saturated and raised to 2, got a patch with requests above
+limits, which the API server rejects. A guest raised above `limits.memory`:
+rejected. A guest raised on a VM whose memory request equalled the old guest:
+accepted, with the request left behind, an overcommit nobody asked for. A
+Guaranteed VM (limits equal to requests) shrunk: accepted, and silently
+Burstable.
+
+**Was actually:** every VM writer (`vmChange`, `spliceVM`, `writeVMPatch`,
+`vmPatch`, the PR body) wrote `requests.cpu`, `requests.memory` and
+`memory.guest` only, and tare did not read the VM's own limits. `RecCPULimit`
+was computed and dropped. The memory request followed the guest down, never up.
+
+**Fixed by:** the VM's authored limits are read (`AuthoredCPULimit`,
+`AuthoredMemLimit`); a limit equal to its request moves with it, any other is
+raised only when the change would exceed it (`vmLimit`); the memory request
+follows a raised guest when it was the old guest, and a request authored below
+the guest is left as the deliberate overcommit it is. Every writer writes
+`domain.resources.limits`, and a VM with no `resources` gets requests and
+limits as one block, not two `resources:` keys. `TestPlanForAVMKeepsItsLimitsValid`,
+`TestVMWritersWriteLimits`, `TestVMPatchWritesLimits`, `TestVMAuthoredLimitsAreRead`.
+
 ## Open, and not yet solved
 
 **KubeVirt support has not met a cluster with VMs.** Everything in 57-60 and

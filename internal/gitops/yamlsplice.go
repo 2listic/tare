@@ -562,6 +562,11 @@ type kv struct{ key, value string }
 // spec.template.spec.domain.resources, and the guest memory under
 // spec.template.spec.domain.memory.guest. The pod's own resources are derived
 // by KubeVirt and are never written.
+//
+// Requests and limits are two setUnder calls on sibling paths. Each computes
+// its splice from the file as read, so where domain.resources is missing or
+// empty both would create it, and the file would carry the key twice: there
+// they are written as one block.
 func spliceVM(root *yaml.Node, c Change, lines []string) (out []splice, why string, found bool) {
 	tmpl := mapValue(mapValue(root, "spec"), "template")
 	domain := mapValue(mapValue(tmpl, "spec"), "domain")
@@ -581,8 +586,42 @@ func spliceVM(root *yaml.Node, c Change, lines []string) (out []splice, why stri
 	if c.MemRequest != nil {
 		requests = append(requests, kv{"memory", MemQuantity(*c.MemRequest)})
 	}
-	if len(requests) > 0 {
-		sp, why := setUnder(domain, lines, []string{"resources", "requests"}, requests)
+	var limits []kv
+	if c.CPULimit != nil {
+		limits = append(limits, kv{"cpu", CPUQuantity(*c.CPULimit)})
+	}
+	if c.MemLimit != nil {
+		limits = append(limits, kv{"memory", MemQuantity(*c.MemLimit)})
+	}
+	if k, res := entry(domain, "resources"); len(requests) > 0 && len(limits) > 0 && (res == nil || isEmpty(res)) {
+		var sp []splice
+		switch {
+		case res == nil && domain.Style&yaml.FlowStyle != 0:
+			return nil, whyFlow, true
+		case res == nil:
+			indent := domain.Content[0].Column - 1
+			body := append(nestedBlock(indent, []string{"resources", "requests"}, requests),
+				nestedBlock(indent+2, []string{"limits"}, limits)...)
+			sp = []splice{{line: lastLineOf(domain), insertAfter: true, lines: body}}
+		default:
+			body := append(nestedBlock(k.Column+1, []string{"requests"}, requests),
+				nestedBlock(k.Column+1, []string{"limits"}, limits)...)
+			var why string
+			if sp, why, _ = clearAndFill(k, lines, body); why != "" {
+				return nil, why, true
+			}
+		}
+		out = append(out, sp...)
+		requests, limits = nil, nil
+	}
+	for _, part := range []struct {
+		name string
+		keys []kv
+	}{{"requests", requests}, {"limits", limits}} {
+		if len(part.keys) == 0 {
+			continue
+		}
+		sp, why := setUnder(domain, lines, []string{"resources", part.name}, part.keys)
 		if why != "" {
 			return nil, why, true
 		}

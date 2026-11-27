@@ -81,3 +81,15 @@ func TestVMKindsAreAbbreviated(t *testing.T) {
 		t.Errorf("shortWorkload = %q", got)
 	}
 }
+
+// A VM that authors a CPU limit below the new request gets the limit in its
+// merge patch: requests above limits are rejected.
+func TestVMPatchWritesLimits(t *testing.T) {
+	f := vmFinding()
+	f.Verdict, f.CPURequest, f.RecCPU, f.RecGuestMem = analyze.Saturated, 500, 2000, 0
+	f.VM.AuthoredKnown, f.VM.AuthoredCPURequest, f.VM.AuthoredCPULimit = true, 500, 1000
+	out := capture(t, func(p *printer) { p.printPatches([]analyze.Finding{f}, "lab", "") })
+	if !strings.Contains(out, `"limits":{"cpu":"2"}`) || !strings.Contains(out, `"requests":{"cpu":"2"}`) {
+		t.Errorf("limit not written:\n%s", out)
+	}
+}

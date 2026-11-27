@@ -386,3 +386,23 @@ func TestVMINodeSelectorIsRead(t *testing.T) {
 		t.Errorf("no selector read as %v, affinity %v", v.NodeSelector, v.Affinity)
 	}
 }
+
+// The VM's own limits are what a patch must keep above its requests.
+func TestVMAuthoredLimitsAreRead(t *testing.T) {
+	dyn := kvClient(
+		vmi("vms", "db", "db", map[string]any{"domain": standardDomain}, "True"),
+		vmObj("vms", "db", map[string]any{"resources": map[string]any{
+			"requests": map[string]any{"cpu": "500m", "memory": "4Gi"},
+			"limits":   map[string]any{"cpu": int64(1), "memory": "5Gi"},
+		}}),
+	)
+	c := &Client{cs: fake.NewSimpleClientset(launcher("vms", "virt-launcher-db-abcde", "db", "compute")), dyn: dyn}
+	cs, err := c.Containers(context.Background(), []string{"vms"})
+	if err != nil || len(cs) != 1 || cs[0].VM == nil {
+		t.Fatalf("err %v, containers %v", err, cs)
+	}
+	vm := cs[0].VM
+	if vm.AuthoredCPULimit != 1000 || vm.AuthoredMemLimit != 5<<30 || vm.AuthoredCPURequest != 500 || vm.AuthoredMemRequest != 4<<30 {
+		t.Errorf("authored resources misread: %+v", vm)
+	}
+}
