@@ -160,6 +160,10 @@ type vmQuery struct {
 	signal Signal
 	expr   string
 	assign func(o *VMObservation, v float64)
+	// refines is set on a query that adds detail to a signal another query
+	// establishes. Its answer alone does not mark the signal: a guest memory
+	// coverage with no used value is not a guest that reported its memory.
+	refines bool
 }
 
 // vmRunning matches the running state of kubevirt_vmi_vcpu_seconds_total. The
@@ -186,63 +190,64 @@ func vmQueries(namespaces []string, window time.Duration) []vmQuery {
 		return fmt.Sprintf(`%s (rate(kubevirt_vmi_vcpu_seconds_total{%s}[%s]))`, by, sel(vmRunning), r)
 	}
 	q := []vmQuery{
-		{SigVMVCPU, fmt.Sprintf(`quantile_over_time(0.95, (%s)[%s:%s])`, vcpu(step), w, step),
-			func(o *VMObservation, v float64) { o.VCPUUsageP95 = v }},
-		{SigVMVCPU, fmt.Sprintf(`max_over_time((%s)[%s:%s])`, vcpu(peak), w, peak),
-			func(o *VMObservation, v float64) { o.VCPUUsageMax = v }},
-		{SigVMOverheadCPU, fmt.Sprintf(`quantile_over_time(0.95, clamp_min(%s (rate(kubevirt_vmi_cpu_usage_seconds_total{%s}[%s])) - %s, 0)[%s:%s])`,
+		{signal: SigVMVCPU, expr: fmt.Sprintf(`quantile_over_time(0.95, (%s)[%s:%s])`, vcpu(step), w, step),
+			assign: func(o *VMObservation, v float64) { o.VCPUUsageP95 = v }},
+		{signal: SigVMVCPU, expr: fmt.Sprintf(`max_over_time((%s)[%s:%s])`, vcpu(peak), w, peak),
+			assign: func(o *VMObservation, v float64) { o.VCPUUsageMax = v }},
+		{signal: SigVMOverheadCPU, expr: fmt.Sprintf(`quantile_over_time(0.95, clamp_min(%s (rate(kubevirt_vmi_cpu_usage_seconds_total{%s}[%s])) - %s, 0)[%s:%s])`,
 			by, sel(), step, vcpu(step), w, step),
-			func(o *VMObservation, v float64) { o.OverheadCPUP95 = v }},
+			assign: func(o *VMObservation, v float64) { o.OverheadCPUP95 = v }},
 		// Averaged, not summed: the series are per vCPU, and the threshold
 		// they meet is a fraction of one CPU. Summed, a 16-vCPU VM read 16
 		// times the wait of a 1-vCPU VM with the same per-vCPU stall.
-		{SigVMVCPUDelay, fmt.Sprintf(`avg_over_time((%s (rate(kubevirt_vmi_vcpu_delay_seconds_total{%s}[%s])))[%s:%s])`, perVCPU, sel(), step, w, step),
-			func(o *VMObservation, v float64) { o.VCPUDelayAvg = v }},
-		{SigVMVCPUDelay, fmt.Sprintf(`max_over_time((%s (rate(kubevirt_vmi_vcpu_delay_seconds_total{%s}[%s])))[%s:%s])`, perVCPU, sel(), peak, w, peak),
-			func(o *VMObservation, v float64) { o.VCPUDelayMax = v }},
-		{SigVMMemResident, fmt.Sprintf(`max by (namespace,name) (max_over_time(kubevirt_vmi_memory_resident_bytes{%s}[%s]))`, sel(), w),
-			func(o *VMObservation, v float64) { o.MemResident = v }},
-		{SigVMMemDomain, fmt.Sprintf(`max by (namespace,name) (max_over_time(kubevirt_vmi_memory_domain_bytes{%s}[%s]))`, sel(), w),
-			func(o *VMObservation, v float64) { o.MemDomain = v }},
+		{signal: SigVMVCPUDelay, expr: fmt.Sprintf(`avg_over_time((%s (rate(kubevirt_vmi_vcpu_delay_seconds_total{%s}[%s])))[%s:%s])`, perVCPU, sel(), step, w, step),
+			assign: func(o *VMObservation, v float64) { o.VCPUDelayAvg = v }},
+		{signal: SigVMVCPUDelay, expr: fmt.Sprintf(`max_over_time((%s (rate(kubevirt_vmi_vcpu_delay_seconds_total{%s}[%s])))[%s:%s])`, perVCPU, sel(), peak, w, peak),
+			assign: func(o *VMObservation, v float64) { o.VCPUDelayMax = v }},
+		{signal: SigVMMemResident, expr: fmt.Sprintf(`max by (namespace,name) (max_over_time(kubevirt_vmi_memory_resident_bytes{%s}[%s]))`, sel(), w),
+			assign: func(o *VMObservation, v float64) { o.MemResident = v }},
+		{signal: SigVMMemDomain, expr: fmt.Sprintf(`max by (namespace,name) (max_over_time(kubevirt_vmi_memory_domain_bytes{%s}[%s]))`, sel(), w),
+			assign: func(o *VMObservation, v float64) { o.MemDomain = v }},
 		// Summed: virt-handler reports a VMI from the node it runs on, so a
 		// migration continues it as another series, and the series partition
 		// the window between them (KNOWN-FAILURES 61). The max was one node's
 		// share. Only the seconds of a copy are counted twice.
-		{SigVMMemDomain, fmt.Sprintf(`sum by (namespace,name) (count_over_time(kubevirt_vmi_memory_domain_bytes{%s}[%s]))`, sel(), w),
-			func(o *VMObservation, v float64) { o.Samples = int(v) }},
-		{SigVMMemOverhead, fmt.Sprintf(`max by (namespace,name) (max_over_time(kubevirt_vmi_launcher_memory_overhead_bytes{%s}[%s]))`, sel(), w),
-			func(o *VMObservation, v float64) { o.MemOverhead = v }},
-		{SigVMNonEvict, fmt.Sprintf(`max by (namespace,name) (max_over_time(kubevirt_vmi_non_evictable{%s}[%s]))`, sel(), w),
-			func(o *VMObservation, v float64) { o.NonEvictable = v > 0 }},
+		{signal: SigVMMemDomain, expr: fmt.Sprintf(`sum by (namespace,name) (count_over_time(kubevirt_vmi_memory_domain_bytes{%s}[%s]))`, sel(), w),
+			assign: func(o *VMObservation, v float64) { o.Samples = int(v) }},
+		{signal: SigVMMemOverhead, expr: fmt.Sprintf(`max by (namespace,name) (max_over_time(kubevirt_vmi_launcher_memory_overhead_bytes{%s}[%s]))`, sel(), w),
+			assign: func(o *VMObservation, v float64) { o.MemOverhead = v }},
+		{signal: SigVMNonEvict, expr: fmt.Sprintf(`max by (namespace,name) (max_over_time(kubevirt_vmi_non_evictable{%s}[%s]))`, sel(), w),
+			assign: func(o *VMObservation, v float64) { o.NonEvictable = v > 0 }},
 		// Guest-reported. available - usable is what the guest itself counts
 		// as used, page cache excluded; domain - usable would also count
 		// whatever an inflated balloon took away from it.
-		{SigVMGuestMem, fmt.Sprintf(`max_over_time((max by (namespace,name) (kubevirt_vmi_memory_available_bytes{%s}) - max by (namespace,name) (kubevirt_vmi_memory_usable_bytes{%s}))[%s:%s])`,
-			sel(), sel(), w, step),
-			func(o *VMObservation, v float64) { o.GuestMemUsedMax = v }},
-		{SigVMGuestMem, fmt.Sprintf(`sum by (namespace,name) (count_over_time(kubevirt_vmi_memory_usable_bytes{%s}[%s])) / sum by (namespace,name) (count_over_time(kubevirt_vmi_memory_domain_bytes{%s}[%s]))`,
+		{signal: SigVMGuestMem, expr: fmt.Sprintf(`max_over_time((max by (namespace,name) (kubevirt_vmi_memory_available_bytes{%s}) - max by (namespace,name) (kubevirt_vmi_memory_usable_bytes{%s}))[%s:%s])`,
+			sel(), sel(), w, peak),
+			assign: func(o *VMObservation, v float64) { o.GuestMemUsedMax = v }},
+		{signal: SigVMGuestMem, expr: fmt.Sprintf(`sum by (namespace,name) (count_over_time(kubevirt_vmi_memory_usable_bytes{%s}[%s])) / sum by (namespace,name) (count_over_time(kubevirt_vmi_memory_domain_bytes{%s}[%s]))`,
 			sel(), w, sel(), w),
-			func(o *VMObservation, v float64) { o.GuestMemCoverage = min(v, 1) }},
-		{SigVMBalloon, fmt.Sprintf(`min by (namespace,name) (min_over_time(kubevirt_vmi_memory_actual_balloon_bytes{%s}[%s]))`, sel(), w),
-			func(o *VMObservation, v float64) { o.BalloonMin = v }},
-		{SigVMGuestPressure, fmt.Sprintf(`max_over_time((%s (rate(kubevirt_vmi_memory_swap_in_traffic_bytes{%s}[%s]) + rate(kubevirt_vmi_memory_swap_out_traffic_bytes{%s}[%s])))[%s:%s])`,
+			assign:  func(o *VMObservation, v float64) { o.GuestMemCoverage = min(v, 1) },
+			refines: true},
+		{signal: SigVMBalloon, expr: fmt.Sprintf(`min by (namespace,name) (min_over_time(kubevirt_vmi_memory_actual_balloon_bytes{%s}[%s]))`, sel(), w),
+			assign: func(o *VMObservation, v float64) { o.BalloonMin = v }},
+		{signal: SigVMGuestPressure, expr: fmt.Sprintf(`max_over_time((%s (rate(kubevirt_vmi_memory_swap_in_traffic_bytes{%s}[%s]) + rate(kubevirt_vmi_memory_swap_out_traffic_bytes{%s}[%s])))[%s:%s])`,
 			by, sel(), step, sel(), step, w, step),
-			func(o *VMObservation, v float64) { o.GuestSwapMax = v }},
-		{SigVMGuestPressure, fmt.Sprintf(`avg_over_time((%s (rate(kubevirt_vmi_memory_swap_in_traffic_bytes{%s}[%s]) + rate(kubevirt_vmi_memory_swap_out_traffic_bytes{%s}[%s])))[%s:%s])`,
+			assign: func(o *VMObservation, v float64) { o.GuestSwapMax = v }},
+		{signal: SigVMGuestPressure, expr: fmt.Sprintf(`avg_over_time((%s (rate(kubevirt_vmi_memory_swap_in_traffic_bytes{%s}[%s]) + rate(kubevirt_vmi_memory_swap_out_traffic_bytes{%s}[%s])))[%s:%s])`,
 			by, sel(), step, sel(), step, w, step),
-			func(o *VMObservation, v float64) { o.GuestSwapAvg = v }},
-		{SigVMGuestPressure, fmt.Sprintf(`max_over_time((%s (rate(kubevirt_vmi_memory_pgmajfault_total{%s}[%s])))[%s:%s])`, by, sel(), step, w, step),
-			func(o *VMObservation, v float64) { o.GuestMajFaultMax = v }},
-		{SigVMGuestPressure, fmt.Sprintf(`avg_over_time((%s (rate(kubevirt_vmi_memory_pgmajfault_total{%s}[%s])))[%s:%s])`, by, sel(), step, w, step),
-			func(o *VMObservation, v float64) { o.GuestMajFaultAvg = v }},
-		{SigVMGuestLoad, fmt.Sprintf(`quantile_over_time(0.95, (max by (namespace,name) (kubevirt_vmi_guest_load_5m{%s}))[%s:%s])`, sel(), w, step),
-			func(o *VMObservation, v float64) { o.GuestLoadP95 = v }},
+			assign: func(o *VMObservation, v float64) { o.GuestSwapAvg = v }},
+		{signal: SigVMGuestPressure, expr: fmt.Sprintf(`max_over_time((%s (rate(kubevirt_vmi_memory_pgmajfault_total{%s}[%s])))[%s:%s])`, by, sel(), step, w, step),
+			assign: func(o *VMObservation, v float64) { o.GuestMajFaultMax = v }},
+		{signal: SigVMGuestPressure, expr: fmt.Sprintf(`avg_over_time((%s (rate(kubevirt_vmi_memory_pgmajfault_total{%s}[%s])))[%s:%s])`, by, sel(), step, w, step),
+			assign: func(o *VMObservation, v float64) { o.GuestMajFaultAvg = v }},
+		{signal: SigVMGuestLoad, expr: fmt.Sprintf(`quantile_over_time(0.95, (max by (namespace,name) (kubevirt_vmi_guest_load_5m{%s}))[%s:%s])`, sel(), w, step),
+			assign: func(o *VMObservation, v float64) { o.GuestLoadP95 = v }},
 		// Migration series name the VMI as `name` on some releases and `vmi`
 		// on others; grouping by both and reading either keeps the join.
-		{SigVMMigrations, fmt.Sprintf(`max by (namespace,name,vmi) (max_over_time(kubevirt_vmi_migration_start_time_seconds{%s}[%s]))`, sel(), w),
-			func(o *VMObservation, v float64) { o.LastMigrationStart = v }},
-		{SigVMMigrations, fmt.Sprintf(`max by (namespace,name,vmi) (max_over_time(kubevirt_vmi_migration_end_time_seconds{%s}[%s]))`, sel(), w),
-			func(o *VMObservation, v float64) { o.LastMigrationEnd = v }},
+		{signal: SigVMMigrations, expr: fmt.Sprintf(`max by (namespace,name,vmi) (max_over_time(kubevirt_vmi_migration_start_time_seconds{%s}[%s]))`, sel(), w),
+			assign: func(o *VMObservation, v float64) { o.LastMigrationStart = v }},
+		{signal: SigVMMigrations, expr: fmt.Sprintf(`max by (namespace,name,vmi) (max_over_time(kubevirt_vmi_migration_end_time_seconds{%s}[%s]))`, sel(), w),
+			assign: func(o *VMObservation, v float64) { o.LastMigrationEnd = v }},
 	}
 	return q
 }
@@ -273,7 +278,9 @@ func (p *Prom) ObserveVMs(namespaces []string, window time.Duration) (map[VMKey]
 				out[k] = o
 			}
 			q.assign(o, s.value)
-			o.Mark(q.signal)
+			if !q.refines {
+				o.Mark(q.signal)
+			}
 		}
 	}
 	return out, nil

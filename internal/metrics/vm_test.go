@@ -190,3 +190,46 @@ func TestVCPUDelayIsPerVCPU(t *testing.T) {
 		t.Errorf("%d vCPU delay queries, want the mean and the peak", n)
 	}
 }
+
+// The guest's used memory is a peak: sampled every 5m, a guest spike between
+// two instants was invisible and the shrink could land below it. It is
+// evaluated at the 1m step every other peak uses.
+func TestGuestMemPeakIsSampledFinely(t *testing.T) {
+	var n int
+	for _, q := range vmQueries([]string{"vms"}, 7*24*time.Hour) {
+		if q.signal != SigVMGuestMem || !strings.Contains(q.expr, "available_bytes") {
+			continue
+		}
+		n++
+		if !strings.HasSuffix(q.expr, "[7d:1m])") {
+			t.Errorf("guest memory peak not sampled at 1m: %s", q.expr)
+		}
+	}
+	if n != 1 {
+		t.Errorf("%d guest used-memory queries, want 1", n)
+	}
+}
+
+// With usable_bytes reported and available_bytes not, the subtraction returns
+// nothing. The coverage query alone must not mark the guest memory reported:
+// that read as a guest using zero bytes and shrank it to the floor.
+func TestGuestMemCoverageAloneIsNotAReport(t *testing.T) {
+	f := newFakeProm(func(expr string) (string, int) {
+		if strings.Contains(expr, "available_bytes") {
+			return emptyVector, 200
+		}
+		return vmVector(dbVMI, 1), 200
+	})
+	defer f.Close()
+	obs, err := NewProm(f.URL).ObserveVMs(nil, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := obs[VMKey{Namespace: "vms", Name: "db"}]
+	if o == nil {
+		t.Fatal("no observation")
+	}
+	if o.Has(SigVMGuestMem) {
+		t.Errorf("guest memory marked reported with no used value (used=%v, coverage=%v)", o.GuestMemUsedMax, o.GuestMemCoverage)
+	}
+}

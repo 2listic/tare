@@ -224,6 +224,14 @@ func decideGuestMemory(f *Finding, th Thresholds) {
 		return
 	}
 	used := o.GuestMemUsedMax
+	if used <= 0 {
+		// A guest is never using nothing: a zero here is a reading that did
+		// not happen, and shrinking on it would take the guest to the floor.
+		f.Reasons = append(f.Reasons, measured(VMGuestMemUnreported, 0, float64(guest), Bytes, fmt.Sprintf(
+			"the guest's reported used memory is zero, which no running guest uses: the reading is missing, not "+
+				"small, and the %s guest memory is not changed", guestSize(guest))))
+		return
+	}
 	if o.Has(metrics.SigVMGuestPressure) && (o.GuestSwapMax > th.VMGuestSwapRate || o.GuestMajFaultMax > th.VMGuestMajFaults) {
 		sustained := o.GuestSwapAvg > th.VMGuestSwapRate || o.GuestMajFaultAvg > th.VMGuestMajFaults
 		text := fmt.Sprintf("the guest swapped up to %s/s and took up to %.0f major faults/s (thresholds %s/s, %.0f/s) "+

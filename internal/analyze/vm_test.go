@@ -429,3 +429,17 @@ func TestNeedsVCPUsSaysWhatTheRequestIsFor(t *testing.T) {
 		t.Errorf("%q", txt)
 	}
 }
+
+// A guest memory marked reported with no used value is not a guest using
+// nothing: it is shrunk to the floor only on a number, never on a zero.
+func TestGuestMemZeroUsedIsNotEvidence(t *testing.T) {
+	c := vmContainer("virt-launcher-db-aaaaa")
+	f := judgeVM(t, []discover.Container{c}, []*metrics.Observation{vmObs(c, metrics.SigPSI)},
+		guestObs(func(o *metrics.VMObservation) { o.GuestMemUsedMax = 0 }))
+	if f.RecGuestMem != 0 || hasCode(f, analyze.VMGuestMemOversized) {
+		t.Errorf("guest shrunk to %s on a zero used: %v", analyze.HumanBytes(f.RecGuestMem), analyze.ReasonTexts(f.Reasons))
+	}
+	if !hasCode(f, analyze.VMGuestMemUnreported) {
+		t.Errorf("missing %s: %v", analyze.VMGuestMemUnreported, analyze.ReasonTexts(f.Reasons))
+	}
+}

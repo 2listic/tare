@@ -1459,6 +1459,28 @@ per-vCPU wait that tripped it.
 **Fixed by:** the mean over vCPUs (`avg by (namespace,name)`), so the delay
 reads on PSI's scale whatever the VM's size. `TestVCPUDelayIsPerVCPU`.
 
+## 66. A guest could be shrunk on a used memory it never reported
+
+**Looked like:** found in review (2026-11-25), and half of it on the lab
+cluster (KubeVirt v1.9.0, 2026-11-23). A guest reporting `usable_bytes` but
+not `available_bytes` would read "at most 0B in use" and be shrunk to the 1Gi
+floor. Separately, an idle 1.5Gi guest whose page cache was filling peaked at
+462Mi in one sample; tare reported 411Mi.
+
+**Was actually:** two queries mark `SigVMGuestMem`, the used peak and the
+coverage. The used peak is a subtraction and returns nothing when either gauge
+is missing; the coverage counts `usable_bytes` alone, so it marked the signal,
+and the unset peak read as zero. And the peak was a `max_over_time` over a
+5-minute subquery, one 15-second sample in twenty: a spike between two grid
+points was not seen, and a guest sized near its use could be shrunk below it.
+
+**Fixed by:** a query that only refines a signal (`vmQuery.refines`) no longer
+marks it; a zero used memory is refused as a missing reading
+(`VM_GUEST_MEMORY_UNREPORTED`); the peak uses the 1-minute `peak` step, as the
+vCPU peaks do. `TestGuestMemCoverageAloneIsNotAReport`,
+`TestGuestMemZeroUsedIsNotEvidence`, `TestGuestMemPeakIsSampledFinely`. A peak
+shorter than a minute can still fall between steps.
+
 ## Open, and not yet solved
 
 **KubeVirt support has not met a cluster with VMs.** Everything in 57-60 and
@@ -1474,19 +1496,6 @@ and `kubevirt_vm_resource_requests` are not read: dedicated CPUs and requests co
 from the VMI spec, so a token that cannot read VMIs leaves a VM unsized in VM
 terms and pinned, rather than falling back to those series. Settling this needs
 the lab run in docs/plan.md (KubeVirt).
-
-**A VM guest's used-memory peak can fall between samples.** `GuestMemUsedMax`
-is `max_over_time` of available minus usable over a subquery on the 5-minute
-`step` (`internal/metrics/vm.go`), so it reads one 15-second sample in twenty,
-not the highest. On the lab cluster (KubeVirt v1.9.0, 2026-11-23) an idle
-1.5Gi guest whose page cache was filling peaked at 462Mi in a single sample,
-as the fill started; tare reported 411Mi.
-The vCPU and vCPU-delay peaks already use the 1-minute `peak` step, and the
-swap and major-fault rates average over the step rather than skip it. There it
-changed nothing: 462Mi x 1.15 is also under the 1Gi guest floor. On a guest
-sized near what it uses, a missed peak would size the guest below it. The fix
-is `max_over_time` of the raw difference inside each step (or the `peak` step),
-with a test whose spike falls between two grid points.
 
 **A workload redeployed more than once a day never has usable CPU wait.**
 CPU wait compares each pod with its own normal (55), which needs a day of
