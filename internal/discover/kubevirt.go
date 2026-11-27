@@ -61,6 +61,12 @@ type VMSpec struct {
 	AuthoredMemLimit   int64
 	AuthoredCPULimit   int64
 
+	// ManagedBy names the controller above the VM, Kind/name, when it is a
+	// VirtualMachinePool or a VirtualMachineInstanceReplicaSet. That
+	// controller rewrites what it manages from its own template, so a change
+	// to the VM is reverted.
+	ManagedBy string
+
 	// Instancetype names a VirtualMachineInstancetype the VM takes its CPU
 	// and memory from. KubeVirt rejects a VM that sets either beside one, so
 	// such a VM is resized by changing the instancetype, never the domain.
@@ -192,12 +198,20 @@ func (x *workloadIndex) listVMIs(ctx context.Context, ns string) error {
 	conf := x.loadKubeVirtConfig(ctx)
 	for _, item := range l.Items {
 		key := item.GetNamespace() + "/" + item.GetName()
+		managedBy := ""
 		for _, ref := range item.GetOwnerReferences() {
-			if ref.Controller != nil && *ref.Controller && ref.Kind == "VirtualMachine" {
+			if ref.Controller == nil || !*ref.Controller {
+				continue
+			}
+			switch ref.Kind {
+			case "VirtualMachine":
 				x.vmiOwner[key] = "VirtualMachine/" + ref.Name
+			case "VirtualMachineInstanceReplicaSet":
+				managedBy = ref.Kind + "/" + ref.Name
 			}
 		}
 		spec := vmSpecFrom(mapAt(item.Object, "spec"), conf)
+		spec.ManagedBy = managedBy
 		spec.VMI = item.GetName()
 		if owner, ok := x.vmiOwner[key]; ok {
 			spec.VM = strings.TrimPrefix(owner, "VirtualMachine/")
@@ -244,6 +258,11 @@ func (x *workloadIndex) listVMs(ctx context.Context, ns string) error {
 			cpuLimit:     quantityMilli(qty(domain, "resources", "limits", "cpu")),
 			instancetype: unstructuredString(spec, "instancetype", "name"),
 		}
+		for _, ref := range item.GetOwnerReferences() {
+			if ref.Controller != nil && *ref.Controller && ref.Kind == "VirtualMachinePool" {
+				a.managedBy = ref.Kind + "/" + ref.Name
+			}
+		}
 		x.vms[item.GetNamespace()+"/"+item.GetName()] = a
 	}
 	return nil
@@ -256,6 +275,7 @@ type vmAuthored struct {
 	memLimit     int64
 	cpuLimit     int64
 	instancetype string
+	managedBy    string
 }
 
 // vmFor returns the VM behind a virt-launcher pod, or nil when the pod is not
@@ -280,6 +300,9 @@ func (x *workloadIndex) vmFor(ctx context.Context, pod *corev1.Pod) *VMSpec {
 			spec.AuthoredMemLimit = a.memLimit
 			spec.AuthoredCPULimit = a.cpuLimit
 			spec.Instancetype = a.instancetype
+			if a.managedBy != "" {
+				spec.ManagedBy = a.managedBy
+			}
 		}
 	}
 	return &spec

@@ -459,3 +459,34 @@ func TestVMSidecarSkipSaysWhatItIs(t *testing.T) {
 		}
 	}
 }
+
+// A pool or a VMI ReplicaSet rewrites what it manages from its own template:
+// a change to the VM is reverted, and the refusal says so.
+func TestVMUnderAControllerIsNotPatched(t *testing.T) {
+	c := vmContainer("virt-launcher-db-aaaaa")
+	f := judgeVM(t, []discover.Container{c}, []*metrics.Observation{vmObs(c, metrics.SigPSI)}, guestObs(nil))
+	for _, tc := range []struct{ workload, managedBy string }{
+		{"VirtualMachine/db", "VirtualMachinePool/db-pool"},
+		{"VirtualMachineInstance/db", "VirtualMachineInstanceReplicaSet/db-rs"},
+	} {
+		g := f
+		vm := *f.VM
+		vm.ManagedBy = tc.managedBy
+		g.VM, g.Workload = &vm, tc.workload
+		ok, why := analyze.Patchable(g)
+		if ok || !strings.Contains(why, tc.managedBy) || !strings.Contains(why, "revert") {
+			t.Errorf("%s under %s: ok=%v, why %q", tc.workload, tc.managedBy, ok, why)
+		}
+	}
+	// The restart note would tell the reader the change lands on restart.
+	cc := c
+	vm := *c.VM
+	vm.ManagedBy = "VirtualMachinePool/db-pool"
+	cc.VM = &vm
+	g := judgeVM(t, []discover.Container{cc}, []*metrics.Observation{vmObs(cc, metrics.SigPSI)}, guestObs(nil))
+	for _, r := range g.Reasons {
+		if strings.Contains(r.Text, "restart") {
+			t.Errorf("a pool-managed VM got a restart note: %s", r.Text)
+		}
+	}
+}

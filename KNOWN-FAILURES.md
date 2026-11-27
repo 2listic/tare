@@ -1505,6 +1505,28 @@ the guest is left as the deliberate overcommit it is. Every writer writes
 limits as one block, not two `resources:` keys. `TestPlanForAVMKeepsItsLimitsValid`,
 `TestVMWritersWriteLimits`, `TestVMPatchWritesLimits`, `TestVMAuthoredLimitsAreRead`.
 
+## 68. A VM in a pool was patched, and its pool would revert it
+
+**Looked like:** found in review (2026-11-25). A VirtualMachine owned by a
+VirtualMachinePool was patchable like any other; the pool rewrites its VMs
+from its own template, so the change would not last. A VMI owned by a
+VirtualMachineInstanceReplicaSet was refused as "a VirtualMachineInstance
+nobody owns". And KubeVirt's own containers in a virt-launcher pod
+(`guest-console-log`, container disks, sidecar hooks) were skipped as "the
+VirtualMachine behind this pod could not be read".
+
+**Was actually:** discovery followed a VMI's owner only when it was a
+VirtualMachine, and never read the VM's own owner. The skip for a container
+with no VM spec assumed the read had failed, when for every container but
+`compute` there is no VM spec to read.
+
+**Fixed by:** `VMSpec.ManagedBy` names a VirtualMachinePool above the VM or a
+VirtualMachineInstanceReplicaSet above the VMI; such a VM is refused with the
+controller named, and carries no restart note. A non-`compute` container in a
+virt-launcher pod is skipped as a container KubeVirt sizes itself.
+`TestVMControllerAboveIsRead`, `TestVMUnderAControllerIsNotPatched`,
+`TestVMSidecarSkipSaysWhatItIs`.
+
 ## Open, and not yet solved
 
 **KubeVirt support has not met a cluster with VMs.** Everything in 57-60 and

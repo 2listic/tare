@@ -33,6 +33,10 @@ func Patchable(f Finding) (ok bool, why string) {
 		return false, fmt.Sprintf("%s is a container KubeVirt adds to the VM's virt-launcher pod and sizes itself; "+
 			"the VM spec has no field for it", f.Container)
 	}
+	if f.VM != nil && f.VM.ManagedBy != "" {
+		return false, fmt.Sprintf("managed by %s, which rewrites it from its own template and would revert a change "+
+			"made here: change the %s's template instead", f.VM.ManagedBy, strings.SplitN(f.VM.ManagedBy, "/", 2)[0])
+	}
 	// A Job's spec.template is immutable: the patch is rejected with "field is
 	// immutable", and writing it into a repo produces a diff that cannot be
 	// applied to the running object either.

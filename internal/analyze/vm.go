@@ -393,8 +393,9 @@ func VMGuestChange(f Finding) (int64, bool) {
 // a change that looks applied is not, until a restart or a live update.
 func noteVMChange(f *Finding) {
 	// A VMI nobody owns has no spec a restart would apply: deleted, it is
-	// gone. Patchable says so; a restart note beside it would contradict it.
-	if f.VM == nil || strings.HasPrefix(f.Workload, "VirtualMachineInstance/") {
+	// gone. A pool or VMI ReplicaSet reverts the change. Patchable says so;
+	// a restart note beside it would contradict it.
+	if f.VM == nil || strings.HasPrefix(f.Workload, "VirtualMachineInstance/") || f.VM.ManagedBy != "" {
 		return
 	}
 	switch f.Verdict {

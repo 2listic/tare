@@ -406,3 +406,38 @@ func TestVMAuthoredLimitsAreRead(t *testing.T) {
 		t.Errorf("authored resources misread: %+v", vm)
 	}
 }
+
+func withController(o *unstructured.Unstructured, kind, name string) *unstructured.Unstructured {
+	o.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: "pool.kubevirt.io/v1alpha1", Kind: kind, Name: name, UID: "u2", Controller: ptrBool(true)}})
+	return o
+}
+
+func ptrBool(b bool) *bool { return &b }
+
+// A VM a pool manages, or a VMI a VirtualMachineInstanceReplicaSet does, is
+// rewritten from its controller's template: the spec says which.
+func TestVMControllerAboveIsRead(t *testing.T) {
+	dyn := kvClient(
+		vmi("vms", "db-0", "db-0", map[string]any{"domain": standardDomain}, "True"),
+		withController(vmObj("vms", "db-0", map[string]any{}), "VirtualMachinePool", "db"),
+		withController(vmi("vms", "web-x1", "", map[string]any{"domain": standardDomain}, "True"), "VirtualMachineInstanceReplicaSet", "web"),
+	)
+	c := &Client{cs: fake.NewSimpleClientset(
+		launcher("vms", "virt-launcher-db-0-abcde", "db-0", "compute"),
+		launcher("vms", "virt-launcher-web-x1-abcde", "web-x1", "compute"),
+	), dyn: dyn}
+	cs, err := c.Containers(context.Background(), []string{"vms"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, ct := range cs {
+		if ct.VM == nil {
+			t.Fatalf("%s: no VM spec", ct.Pod)
+		}
+		got[ct.VM.VMI] = ct.VM.ManagedBy
+	}
+	if got["db-0"] != "VirtualMachinePool/db" || got["web-x1"] != "VirtualMachineInstanceReplicaSet/web" {
+		t.Errorf("controllers misread: %v", got)
+	}
+}
