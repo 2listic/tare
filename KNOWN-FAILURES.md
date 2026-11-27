@@ -1527,6 +1527,21 @@ virt-launcher pod is skipped as a container KubeVirt sizes itself.
 `TestVMControllerAboveIsRead`, `TestVMUnderAControllerIsNotPatched`,
 `TestVMSidecarSkipSaysWhatItIs`.
 
+## 69. `--redact` left a VM's node selector and guest OS in the JSON
+
+**Looked like:** found in review (2026-11-25). A redacted report's JSON still
+carried `NodeSelector` (a `kubernetes.io/hostname` value is a node name, hashed
+everywhere else in the report) and the guest agent's OS id, which can be an
+internal image name.
+
+**Was actually:** `Redact` rewrote the VM's names, VMI and instancetype, and
+nothing else in `VMSpec`.
+
+**Fixed by:** selector values, label keys outside `kubernetes.io`, `k8s.io` and
+`kubevirt.io`, `GuestOS` and `ManagedBy` are hashed, on a copy so the run's
+input is untouched, and a node hashes the same in the selector as in the node
+list. `TestRedactHidesVMSelectorAndGuestOS`.
+
 ## Open, and not yet solved
 
 **KubeVirt support has not met a cluster with VMs.** Everything in 57-60 and
