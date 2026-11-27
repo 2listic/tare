@@ -3,6 +3,7 @@ package discover
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -53,6 +54,13 @@ type Pod struct {
 	// belongs to. A DaemonSet selecting three of thirty nodes costs the other
 	// twenty-seven nothing.
 	NodeSelector map[string]string
+
+	// Needs is the extended resources the pod requests (devices.kubevirt.io/kvm
+	// for a VM), sorted. A pod that requests one is pinned unless tare knows
+	// better - a live-migratable VM is not - and a pod the replay moves can only
+	// be placed on a node that offers each of them, as it can only be placed on
+	// a node its nodeSelector selects.
+	Needs []string
 
 	// Pinned marks a pod tare cannot model moving, and PinReason says why.
 	// A pinned pod holds its current node for the whole replay. This is the
@@ -110,6 +118,7 @@ func podFromVM(p *corev1.Pod, workload string, pdbs []PDB, vm *VMSpec) Pod {
 		CPULimit: cpuLim, MemLimit: memLim,
 		UnlimitedCPU: noCPULim, UnlimitedMem: noMemLim,
 		NodeSelector: p.Spec.NodeSelector,
+		Needs:        extendedRequests(p),
 	}
 	if o := p.Spec.Overhead; o != nil {
 		pod.OverheadCPU, pod.OverheadMem = milli(o, corev1.ResourceCPU), bytes(o, corev1.ResourceMemory)
@@ -397,6 +406,37 @@ func hasNonDefaultToleration(ts []corev1.Toleration) bool {
 		return true
 	}
 	return false
+}
+
+// extendedRequests is the extended resources any of the pod's containers
+// requests or is limited to, by name, sorted; nil if none. The scheduler sets
+// an extended resource's request to its limit when only the limit is given.
+func extendedRequests(p *corev1.Pod) []string {
+	seen := map[string]bool{}
+	add := func(rl corev1.ResourceList) {
+		for name, q := range rl {
+			if !standardResource(name) && !q.IsZero() {
+				seen[string(name)] = true
+			}
+		}
+	}
+	for i := range p.Spec.Containers {
+		add(p.Spec.Containers[i].Resources.Requests)
+		add(p.Spec.Containers[i].Resources.Limits)
+	}
+	for i := range p.Spec.InitContainers {
+		add(p.Spec.InitContainers[i].Resources.Requests)
+		add(p.Spec.InitContainers[i].Resources.Limits)
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for n := range seen {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func usesExtendedResources(p *corev1.Pod, ignore func(corev1.ResourceName) bool) bool {

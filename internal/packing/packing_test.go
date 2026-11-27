@@ -431,3 +431,78 @@ func TestTaintedNodeIsNotFreeSpace(t *testing.T) {
 		t.Errorf("Unusable = %v, want the taint named", r.Unusable)
 	}
 }
+
+// A live-migratable VM is not pinned by what KubeVirt puts on its
+// virt-launcher pod (the kubevirt.io/schedulable selector, the
+// devices.kubevirt.io/kvm request): it can move. But only to a node that
+// offers both, as the scheduler places it. A replay that put it wherever there
+// was room "moved" it onto the untainted k3s server, which runs no
+// virt-handler, and reported its worker empty today although it did not fit
+// beside the other VM (tare-vm-day-night smoke run, KNOWN-FAILURES 70).
+func TestVMMovesOnlyWhereKubeVirtRuns(t *testing.T) {
+	kvm := func(n discover.Node) discover.Node {
+		n = labelled(n, "kubevirt.io/schedulable", "true")
+		n.Extended = map[string]int64{"devices.kubevirt.io/kvm": 1000}
+		return n
+	}
+	server := labelled(node("server", 2), "node-role.kubernetes.io/control-plane", "true")
+	server.AllocMem = 4 * gib
+	w1, w2 := kvm(node("worker-1", 2)), kvm(node("worker-2", 2))
+	w1.AllocMem, w2.AllocMem = 3*gib, 3*gib
+	inv := discover.Inventory{Nodes: []discover.Node{server, w1, w2}}
+
+	vm := func(name, on string, mem int64) discover.Pod {
+		p := pod("virt-launcher-"+name, on, 100, mem)
+		p.Workload, p.WorkloadKind = "VirtualMachine/"+name, "VirtualMachine"
+		p.NodeSelector = map[string]string{"kubevirt.io/schedulable": "true"}
+		p.Needs = []string{"devices.kubevirt.io/kvm"}
+		return p
+	}
+	a := vm("a", "worker-1", 1300<<20)
+	a.Pinned, a.PinReason = true, "has affinity or anti-affinity rules"
+	pods := []discover.Pod{a, vm("b", "worker-2", 1800<<20)}
+	shrinkB := func(p discover.Pod) (int64, int64, bool) {
+		if p.Name == "virt-launcher-b" {
+			return p.CPU, 1300 << 20, true
+		}
+		return p.CPU, p.Mem, true
+	}
+
+	r := Replay(inv, pods, shrinkB)
+	if !r.Trustworthy {
+		t.Fatalf("self-check failed: %s", r.SelfCheck)
+	}
+	for _, n := range r.EmptyToday {
+		if n == "worker-2" {
+			t.Errorf("EmptyToday = %v: b (1800Mi) does not fit beside a (1300Mi) on worker-1's 3Gi, and the "+
+				"server, with room, runs no VM", r.EmptyToday)
+		}
+	}
+	removable := map[string]bool{}
+	for _, n := range r.Removable {
+		removable[n] = true
+	}
+	if !removable["worker-2"] {
+		t.Errorf("Removable = %v, want worker-2: shrunk to 1300Mi, b fits beside a", r.Removable)
+	}
+	if r.FromResizing() != 1 {
+		t.Errorf("FromResizing = %d, want 1: worker-2 is freed by b's resize, not by today's slack", r.FromResizing())
+	}
+}
+
+// The same VM without KubeVirt's constraints is what the replay did before:
+// the server takes it, and worker-2 is reported empty without any resize.
+// Kept so the test above cannot pass by accident of the sizes.
+func TestUnconstrainedPodTakesAnyRoom(t *testing.T) {
+	server := node("server", 2)
+	server.AllocMem = 4 * gib
+	w1, w2 := node("worker-1", 2), node("worker-2", 2)
+	w1.AllocMem, w2.AllocMem = 3*gib, 3*gib
+	inv := discover.Inventory{Nodes: []discover.Node{server, w1, w2}}
+	a := pod("a", "worker-1", 100, 1300<<20)
+	a.Pinned, a.PinReason = true, "has affinity or anti-affinity rules"
+	r := Replay(inv, []discover.Pod{a, pod("b", "worker-2", 100, 1800<<20)}, nil)
+	if len(r.EmptyToday) == 0 {
+		t.Errorf("EmptyToday = %v, want a node: with no constraint b fits on the server", r.EmptyToday)
+	}
+}

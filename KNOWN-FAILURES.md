@@ -1542,6 +1542,33 @@ nothing else in `VMSpec`.
 input is untouched, and a node hashes the same in the selector as in the node
 list. `TestRedactHidesVMSelectorAndGuestOS`.
 
+## 70. A VM was "moved" onto a node that cannot run VMs
+
+**Looked like:** found on a cluster (k8s-experiments tare-vm-day-night, smoke run,
+2026-11-27). On a two-worker KubeVirt cluster whose k3s server is untainted and
+runs no virt-handler, every report's node replay listed the worker holding one
+web VM under `EmptyToday`, before any resize, while the scheduler's own figures
+said that VM (1804 MiB requested) did not fit beside the other on the remaining
+worker (1786 MiB free). A controller that waited for tare to say a resize frees
+a node never heard it: the worker was already "free".
+
+**Was actually:** to keep a live-migratable VM movable (59, 62, 63), the pin rules
+ignore KubeVirt's `kubevirt.io/schedulable` nodeSelector and the
+`devices.kubevirt.io/*` resources the virt-launcher pod requests. Nothing put
+them back where the replay places the pod: `pack` placed a movable pod on the
+first node with room, and the server, with 4 GiB and no virt-handler, took the
+VM.
+
+**Fixed by:** a pod records the extended resources it requests (`Pod.Needs`) and
+a node the ones it allocates (`Node.Extended`); the replay places a movable pod
+only on a node its nodeSelector selects and that offers each of them, as the
+scheduler would. Presence only, not the count: KubeVirt's device plugins
+advertise hundreds, and a counted device (a GPU) pins its pod anyway. Every
+other pod with a selector or an extended resource was already pinned, so this
+changes where VMs can go and nothing else. `TestVMMovesOnlyWhereKubeVirtRuns`
+(fails without the fix with the smoke run's `EmptyToday`),
+`TestUnconstrainedPodTakesAnyRoom`, `TestExtendedResourcesAreReadForPlacement`.
+
 ## Open, and not yet solved
 
 **KubeVirt support has not met a cluster with VMs.** Everything in 57-60 and

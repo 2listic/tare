@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -76,6 +77,25 @@ type Node struct {
 	// rest understates their capacity.
 	Labels map[string]string
 	Taints []corev1.Taint
+
+	// Extended is the node's allocatable extended resources with a count above
+	// zero (devices.kubevirt.io/kvm, a GPU), by name. A pod that requests one
+	// can only be scheduled where it is offered: a pod the replay moves must be
+	// placed on such a node, as the scheduler would place it.
+	Extended map[string]int64
+}
+
+// Offers reports whether the node allocates every extended resource named.
+// Only presence is checked, not the count: the device plugins a movable pod
+// may still request (KubeVirt's kvm, tun, vhost-net) advertise hundreds or
+// thousands each, and a resource that is counted (a GPU) pins its pod anyway.
+func (n Node) Offers(names []string) bool {
+	for _, name := range names {
+		if n.Extended[name] <= 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // Matches reports whether the node satisfies a nodeSelector, which selects a
@@ -132,6 +152,7 @@ func (c *Client) Nodes(ctx context.Context) Inventory {
 		}
 		readGPU(n, &node)
 		node.Labels = n.Labels
+		node.Extended = extendedOf(n.Status.Allocatable)
 		inv.Nodes = append(inv.Nodes, node)
 	}
 	sort.Slice(inv.Nodes, func(a, b int) bool { return inv.Nodes[a].Name < inv.Nodes[b].Name })
@@ -206,6 +227,33 @@ func (inv Inventory) ByIP(ip string) (Node, bool) {
 		}
 	}
 	return Node{}, false
+}
+
+// standardResource reports a resource every node has, as opposed to an
+// extended one a device plugin advertises.
+func standardResource(name corev1.ResourceName) bool {
+	switch name {
+	case corev1.ResourceCPU, corev1.ResourceMemory, corev1.ResourceEphemeralStorage, corev1.ResourcePods:
+		return true
+	}
+	return strings.HasPrefix(string(name), corev1.ResourceHugePagesPrefix) ||
+		strings.HasPrefix(string(name), corev1.ResourceAttachableVolumesPrefix)
+}
+
+// extendedOf is the extended resources of a resource list with a count above
+// zero, by name; nil if there are none.
+func extendedOf(rl corev1.ResourceList) map[string]int64 {
+	var out map[string]int64
+	for name, q := range rl {
+		if standardResource(name) || q.Value() <= 0 {
+			continue
+		}
+		if out == nil {
+			out = map[string]int64{}
+		}
+		out[string(name)] = q.Value()
+	}
+	return out
 }
 
 // gpuResources are the extended resources that mean "a whole accelerator".
