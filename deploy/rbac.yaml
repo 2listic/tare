@@ -71,6 +71,12 @@ rules:
   - apiGroups: [autoscaling.k8s.io]
     resources: [verticalpodautoscalers]
     verbs: [get, list]
+
+  # KubeVirt, where it is installed: a VM's pod resources are derived from the
+  # VirtualMachine spec, so sizing a VM means reading it. Harmless elsewhere.
+  - apiGroups: [kubevirt.io]
+    resources: [virtualmachines, virtualmachineinstances, kubevirts]
+    verbs: [get, list]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

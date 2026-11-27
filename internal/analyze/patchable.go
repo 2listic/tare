@@ -26,16 +26,49 @@ func Patchable(f Finding) (ok bool, why string) {
 	default:
 		return false, fmt.Sprintf("verdict %s, so tare does not stand behind a number for it", f.Verdict)
 	}
+	// A virt-launcher pod carries KubeVirt's own containers beside compute:
+	// the console logger, container disks, sidecar hooks. KubeVirt sizes
+	// them; the VM spec has no field for any of them.
+	if (kind == "VirtualMachine" || kind == "VirtualMachineInstance") && f.Container != discover.VMComputeContainer {
+		return false, fmt.Sprintf("%s is a container KubeVirt adds to the VM's virt-launcher pod and sizes itself; "+
+			"the VM spec has no field for it", f.Container)
+	}
+	if f.VM != nil && f.VM.ManagedBy != "" {
+		return false, fmt.Sprintf("managed by %s, which rewrites it from its own template and would revert a change "+
+			"made here: change the %s's template instead", f.VM.ManagedBy, strings.SplitN(f.VM.ManagedBy, "/", 2)[0])
+	}
 	// A Job's spec.template is immutable: the patch is rejected with "field is
 	// immutable", and writing it into a repo produces a diff that cannot be
 	// applied to the running object either.
 	switch kind {
 	case "Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "ReplicationController":
+	case "VirtualMachine":
+		return vmPatchable(f)
+	case "VirtualMachineInstance":
+		return false, "a VirtualMachineInstance nobody owns cannot be resized in place; only a VirtualMachine's spec can be changed"
 	default:
 		return false, fmt.Sprintf("a %s pod template is immutable; the change cannot be applied", kind)
 	}
 	if f.RecCPU == 0 && f.RecMem == 0 {
 		return false, "no recommendation was produced, and a partial change is worse than none"
+	}
+	return true, ""
+}
+
+// vmPatchable is Patchable for a VirtualMachine, whose knobs are
+// domain.resources.requests.cpu and domain.memory.guest: the pod's own
+// resources are derived from them and are nobody's to write.
+func vmPatchable(f Finding) (bool, string) {
+	if f.VM == nil {
+		return false, "the VirtualMachine behind this pod could not be read, so there is no VM spec to change"
+	}
+	if f.VM.Instancetype != "" {
+		return false, fmt.Sprintf("its CPU and memory come from instancetype %s, and KubeVirt rejects a VM that sets them beside one: change the instancetype", f.VM.Instancetype)
+	}
+	_, cpu := VMCPUChange(f)
+	_, guest := VMGuestChange(f)
+	if !cpu && !guest {
+		return false, "no change to the VirtualMachine's CPU request or guest memory; its pod resources are derived from them"
 	}
 	return true, ""
 }

@@ -55,6 +55,19 @@ func Redact(r *Report) {
 		}
 		add(f.Constraints.HPAName)
 		add(f.Constraints.VPAName)
+		if f.VM != nil {
+			add(f.VM.VM)
+			add(f.VM.VMI)
+			add(f.VM.Instancetype)
+			add(f.VM.GuestOS)
+			add(f.VM.ManagedBy)
+			for k, v := range f.VM.NodeSelector {
+				if !publicLabelKey(k) {
+					add(k)
+				}
+				add(v)
+			}
+		}
 	}
 	// A budget is named only inside the sentences that report it, so its
 	// name has to be read back out of them.
@@ -106,6 +119,28 @@ func Redact(r *Report) {
 		}
 		for j := range f.Ceilings {
 			f.Ceilings[j].Note = rep(f.Ceilings[j].Note)
+		}
+		// Copies, not edits in place: both are shared with the run's inputs.
+		if f.VM != nil {
+			vm := *f.VM
+			vm.VM, vm.VMI, vm.Instancetype = rep(vm.VM), rep(vm.VMI), rep(vm.Instancetype)
+			vm.GuestOS, vm.ManagedBy = rep(vm.GuestOS), rep(vm.ManagedBy)
+			if vm.NodeSelector != nil {
+				sel := make(map[string]string, len(vm.NodeSelector))
+				for k, v := range vm.NodeSelector {
+					if !publicLabelKey(k) {
+						k = rep(k)
+					}
+					sel[k] = rep(v)
+				}
+				vm.NodeSelector = sel
+			}
+			f.VM = &vm
+		}
+		if f.VMObs != nil {
+			o := *f.VMObs
+			o.Namespace, o.Name = rep(o.Namespace), rep(o.Name)
+			f.VMObs = &o
 		}
 	}
 	for i := range r.Commitment {
@@ -200,7 +235,24 @@ func splitName(s string) []string {
 var publicWord = map[string]bool{
 	"Deployment": true, "StatefulSet": true, "DaemonSet": true, "ReplicaSet": true,
 	"ReplicationController": true, "CronJob": true, "Job": true, "Pod": true,
+	"VirtualMachine": true, "VirtualMachineInstance": true, "compute": true,
 	"latest": true,
+}
+
+// publicLabelKey is a label key Kubernetes or KubeVirt defines. Its value
+// can name a node; the key itself describes nobody's cluster, and hashing it
+// would hide what the selector selects on.
+func publicLabelKey(k string) bool {
+	prefix, _, ok := strings.Cut(k, "/")
+	if !ok {
+		return false
+	}
+	for _, d := range []string{"kubernetes.io", "k8s.io", "kubevirt.io"} {
+		if prefix == d || strings.HasSuffix(prefix, "."+d) {
+			return true
+		}
+	}
+	return false
 }
 
 func repEach(rep func(string) string, in []string) []string {

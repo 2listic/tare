@@ -216,6 +216,10 @@ func (c *Cluster) Containers() []discover.Container {
 		if e.Demand.PodOf != "" {
 			continue
 		}
+		if e.Demand.VM != nil {
+			out = append(out, c.renderVM(name, e))
+			continue
+		}
 		dc := c.render(name+"-0", name, "Deployment/"+name, e.Alloc, "Burstable", e.Demand.Shape)
 		if strings.Contains(name, "jvm") {
 			dc.Spec.Image = "eclipse-temurin:21-jre"

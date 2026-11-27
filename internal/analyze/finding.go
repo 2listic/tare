@@ -135,4 +135,24 @@ type Finding struct {
 	// Reasons explains the verdict and any refusal: a stable code and the
 	// numbers behind it for a script, the sentence for a person.
 	Reasons []Reason
+
+	// VM is the KubeVirt VirtualMachine behind a compute container, nil for
+	// every other container. Its pod's resources are derived from the VM
+	// spec, so the knobs are VM fields, not container fields.
+	VM *discover.VMSpec
+	// VMObs is virt-handler's view of the VM, nil when it was not read.
+	VMObs *metrics.VMObservation
+	// VMOverhead is the memory the compute container needs beside the
+	// guest: KubeVirt's estimate when exported, otherwise what the pod
+	// request holds above the guest's share.
+	VMOverhead int64
+	// RecGuestMem is the recommended domain.memory.guest, zero for no
+	// change. RecMem is then the pod request KubeVirt will derive from it.
+	RecGuestMem int64
+	// RecVCPUs is advisory and never patched: changing the vCPU count
+	// changes what the guest sees. Zero for no advice.
+	RecVCPUs int64
 }
+
+// IsVM reports a KubeVirt VM's compute container.
+func (f Finding) IsVM() bool { return f.VM != nil }

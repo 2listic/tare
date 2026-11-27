@@ -1,0 +1,443 @@
+package discover
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	dynfake "k8s.io/client-go/dynamic/fake"
+	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
+)
+
+func vmi(ns, name, owner string, spec map[string]any, migratable string) *unstructured.Unstructured {
+	meta := map[string]any{"namespace": ns, "name": name}
+	if owner != "" {
+		meta["ownerReferences"] = []any{map[string]any{
+			"apiVersion": "kubevirt.io/v1", "kind": "VirtualMachine", "name": owner, "uid": "u1", "controller": true,
+		}}
+	}
+	obj := map[string]any{
+		"apiVersion": "kubevirt.io/v1", "kind": "VirtualMachineInstance",
+		"metadata": meta, "spec": spec,
+		"status": map[string]any{"guestOSInfo": map[string]any{"id": "mswindows"}},
+	}
+	if migratable != "" {
+		obj["status"].(map[string]any)["conditions"] = []any{
+			map[string]any{"type": "LiveMigratable", "status": migratable},
+		}
+	}
+	return &unstructured.Unstructured{Object: obj}
+}
+
+func vmObj(ns, name string, domain map[string]any) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "kubevirt.io/v1", "kind": "VirtualMachine",
+		"metadata": map[string]any{"namespace": ns, "name": name},
+		"spec":     map[string]any{"template": map[string]any{"spec": map[string]any{"domain": domain}}},
+	}}
+}
+
+func kubevirtCR(conf map[string]any) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "kubevirt.io/v1", "kind": "KubeVirt",
+		"metadata": map[string]any{"namespace": "kubevirt", "name": "kubevirt"},
+		"spec":     map[string]any{"configuration": conf},
+	}}
+}
+
+func kvClient(objs ...runtime.Object) *dynfake.FakeDynamicClient {
+	return dynfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{
+			vmiGVR: "VirtualMachineInstanceList", vmGVR: "VirtualMachineList",
+			kubevirtGVR: "KubeVirtList", vpaGVR: "VerticalPodAutoscalerList",
+		}, objs...)
+}
+
+func launcher(ns, name, vmiName string, containers ...string) *corev1.Pod {
+	yes := true
+	p := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ns, Name: name, Labels: map[string]string{"kubevirt.io": "virt-launcher"},
+			OwnerReferences: []metav1.OwnerReference{{Kind: "VirtualMachineInstance", Name: vmiName, Controller: &yes}},
+		},
+		Spec: corev1.PodSpec{NodeName: "n1"},
+	}
+	for _, c := range containers {
+		p.Spec.Containers = append(p.Spec.Containers, corev1.Container{Name: c, Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("400m"), corev1.ResourceMemory: resource.MustParse("8442Mi")},
+		}})
+	}
+	return p
+}
+
+var standardDomain = map[string]any{
+	"cpu":       map[string]any{"sockets": int64(2), "cores": int64(2), "threads": int64(1), "maxSockets": int64(8)},
+	"memory":    map[string]any{"guest": "8Gi", "maxGuest": "32Gi"},
+	"resources": map[string]any{"requests": map[string]any{"memory": "8Gi", "cpu": int64(1)}},
+}
+
+// A virt-launcher pod belongs to a VMI, which belongs to the VirtualMachine
+// people edit. Stopping at the VMI attributes the pod to an object that a
+// restart replaces and that has no spec anyone writes.
+func TestVirtLauncherPodsResolveToTheirVirtualMachine(t *testing.T) {
+	dyn := kvClient(
+		vmi("vms", "db", "db", map[string]any{"domain": standardDomain, "evictionStrategy": "LiveMigrate"}, "True"),
+		vmObj("vms", "db", map[string]any{"memory": map[string]any{"guest": "8Gi"}}),
+		kubevirtCR(map[string]any{
+			"developerConfiguration": map[string]any{"cpuAllocationRatio": int64(5), "memoryOvercommit": int64(150)},
+			"vmRolloutStrategy":      "LiveUpdate",
+		}),
+	)
+	c := &Client{cs: fake.NewSimpleClientset(launcher("vms", "virt-launcher-db-abcde", "db", "compute", "guest-console-log")), dyn: dyn}
+
+	cs, err := c.Containers(context.Background(), []string{"vms"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cs) != 2 {
+		t.Fatalf("want 2 containers, got %d", len(cs))
+	}
+	for _, ct := range cs {
+		if ct.Workload != "VirtualMachine/db" || ct.WorkloadKind != "VirtualMachine" {
+			t.Errorf("%s attributed to %q (%q)", ct.Name, ct.Workload, ct.WorkloadKind)
+		}
+		if (ct.Name == VMComputeContainer) != (ct.VM != nil) {
+			t.Errorf("VM spec on %s = %v: only compute carries it", ct.Name, ct.VM)
+		}
+	}
+	var vm *VMSpec
+	for _, ct := range cs {
+		if ct.VM != nil {
+			vm = ct.VM
+		}
+	}
+	if vm == nil {
+		t.Fatal("no VM spec")
+	}
+	if vm.VCPUs != 4 || vm.GuestMemory != 8<<30 || vm.CPURequest != 1000 || vm.MaxGuest != 32<<30 || vm.MaxSockets != 8 {
+		t.Errorf("spec misread: %+v", vm)
+	}
+	if !vm.AuthoredKnown || !vm.AuthoredGuest || vm.AuthoredMemRequest != 0 {
+		t.Errorf("authored fields misread: %+v", vm)
+	}
+	if vm.CPUAllocationRatio != 5 || vm.MemoryOvercommit != 150 || vm.RolloutStrategy != "LiveUpdate" {
+		t.Errorf("KubeVirt CR misread: %+v", vm)
+	}
+	if !vm.Migratable() || !vm.Windows() {
+		t.Errorf("migratable=%v windows=%v, want both", vm.Migratable(), vm.Windows())
+	}
+	if len(c.Warnings()) != 0 {
+		t.Errorf("unexpected warnings: %q", c.Warnings())
+	}
+}
+
+// Most clusters have no KubeVirt. Its absence is not worth a word.
+func TestNoKubeVirtIsSilent(t *testing.T) {
+	dyn := kvClient()
+	for _, r := range []string{"virtualmachineinstances", "virtualmachines", "kubevirts"} {
+		gr := schema.GroupResource{Group: "kubevirt.io", Resource: r}
+		dyn.PrependReactor("list", r, func(a k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, errors.NewNotFound(gr, "")
+		})
+	}
+	c := &Client{cs: fake.NewSimpleClientset(launcher("vms", "virt-launcher-db-abcde", "db", "compute")), dyn: dyn}
+	cs, err := c.Containers(context.Background(), []string{"vms"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Warnings()) != 0 {
+		t.Errorf("missing CRDs produced warnings: %q", c.Warnings())
+	}
+	if cs[0].VM != nil || cs[0].Workload != "VirtualMachineInstance/db" {
+		t.Errorf("without KubeVirt the pod stays with its VMI and no spec: %+v", cs[0])
+	}
+}
+
+// A refused read is a finding lost, and must say which.
+func TestForbiddenVMIsWarn(t *testing.T) {
+	dyn := kvClient()
+	dyn.PrependReactor("list", "virtualmachineinstances", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.NewForbidden(vmiGVR.GroupResource(), "", nil)
+	})
+	c := &Client{cs: fake.NewSimpleClientset(launcher("vms", "virt-launcher-db-abcde", "db", "compute")), dyn: dyn}
+	if _, err := c.Containers(context.Background(), []string{"vms"}); err != nil {
+		t.Fatal(err)
+	}
+	ws := c.Warnings()
+	if len(ws) != 1 || !strings.Contains(ws[0], "QEMU's resident memory") || !c.Denied(ws[0]) {
+		t.Errorf("want one denied warning about VM sizing, got %q", ws)
+	}
+}
+
+// KubeVirt gives every virt-launcher pod a nodeSelector, the kvm device and
+// usually a PVC. None of them stops a live-migratable VM from moving; the VM
+// itself is what decides.
+func TestVMPinRules(t *testing.T) {
+	base := func() *corev1.Pod {
+		p := launcher("vms", "virt-launcher-db-abcde", "db", "compute")
+		p.Spec.NodeSelector = map[string]string{"kubevirt.io/schedulable": "true", "cpu-model.node.kubevirt.io/Skylake": "true"}
+		p.Spec.Containers[0].Resources.Limits = corev1.ResourceList{"devices.kubevirt.io/kvm": resource.MustParse("1")}
+		p.Spec.Volumes = []corev1.Volume{{Name: "disk", VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "db-disk"}}}}
+		return p
+	}
+	migratable := VMSpec{LiveMigratable: true, LiveMigratableKnown: true, EvictionStrategy: "LiveMigrate"}
+	for _, tc := range []struct {
+		name string
+		vm   *VMSpec
+		edit func(*corev1.Pod)
+		want string // substring of the pin reason, "" for movable
+	}{
+		{"migratable", &migratable, nil, ""},
+		{"unreadable", nil, nil, "could not be read"},
+		{"not migratable", &VMSpec{LiveMigratableKnown: true, EvictionStrategy: "LiveMigrate"}, nil, "VM is not live-migratable"},
+		{"no eviction strategy", &VMSpec{LiveMigratable: true, LiveMigratableKnown: true}, nil, "eviction strategy"},
+		{"dedicated", &VMSpec{LiveMigratable: true, LiveMigratableKnown: true, EvictionStrategy: "LiveMigrate", DedicatedCPU: true}, nil, "dedicated CPUs"},
+		{"hugepages", &VMSpec{LiveMigratable: true, LiveMigratableKnown: true, EvictionStrategy: "LiveMigrate", HugepageSize: "1Gi"}, nil, "hugepages"},
+		{"host devices", &VMSpec{LiveMigratable: true, LiveMigratableKnown: true, EvictionStrategy: "LiveMigrate", HostDevices: true}, nil, "host devices"},
+		{"user nodeSelector", &migratable, func(p *corev1.Pod) { p.Spec.NodeSelector["zone"] = "a" }, "nodeSelector"},
+		// KubeVirt v1.9 adds kubernetes.io/arch to every launcher pod, and a
+		// migrated VM's pods carry the CPU features and model it needs.
+		{"KubeVirt's own arch selector", &migratable, func(p *corev1.Pod) {
+			p.Spec.NodeSelector["kubernetes.io/arch"] = "amd64"
+			p.Spec.NodeSelector["machine-type.node.kubevirt.io/q35"] = "true"
+			p.Spec.NodeSelector["cpu-feature.node.kubevirt.io/x2apic"] = "true"
+			p.Spec.NodeSelector["cpu-model-migration.node.kubevirt.io/EPYC-Rome"] = "true"
+		}, ""},
+		{"arch set by the VM's author", &VMSpec{LiveMigratable: true, LiveMigratableKnown: true,
+			EvictionStrategy: "LiveMigrate", NodeSelector: map[string]string{"kubernetes.io/arch": "amd64"}},
+			func(p *corev1.Pod) { p.Spec.NodeSelector["kubernetes.io/arch"] = "amd64" }, "nodeSelector"},
+		{"a kubevirt.io key set by the VM's author", &VMSpec{LiveMigratable: true, LiveMigratableKnown: true,
+			EvictionStrategy: "LiveMigrate", NodeSelector: map[string]string{"cpu-model.node.kubevirt.io/Skylake": "true"}},
+			nil, "nodeSelector"},
+		// KubeVirt v1.9 adds these node-affinity terms itself: the first to
+		// every VM with no CPU model or host-model, the second for a
+		// forbidden CPU feature, the third with cross-architecture on.
+		{"KubeVirt's own node affinity", &migratable, func(p *corev1.Pod) { p.Spec.Affinity = kubevirtLauncherAffinity() }, ""},
+		{"affinity set by the VM's author", &VMSpec{LiveMigratable: true, LiveMigratableKnown: true,
+			EvictionStrategy: "LiveMigrate", Affinity: true},
+			func(p *corev1.Pod) { p.Spec.Affinity = kubevirtLauncherAffinity() }, "affinity"},
+		{"a node-affinity key not KubeVirt's", &migratable, func(p *corev1.Pod) {
+			a := kubevirtLauncherAffinity()
+			r := a.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+			r.NodeSelectorTerms[0].MatchExpressions = append(r.NodeSelectorTerms[0].MatchExpressions,
+				corev1.NodeSelectorRequirement{Key: "zone", Operator: corev1.NodeSelectorOpIn, Values: []string{"a"}})
+			p.Spec.Affinity = a
+		}, "affinity"},
+		{"a matchFields term", &migratable, func(p *corev1.Pod) {
+			a := kubevirtLauncherAffinity()
+			r := a.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+			r.NodeSelectorTerms[0].MatchFields = []corev1.NodeSelectorRequirement{
+				{Key: "metadata.name", Operator: corev1.NodeSelectorOpIn, Values: []string{"worker-1"}}}
+			p.Spec.Affinity = a
+		}, "affinity"},
+		// A migration's target pod, which is the VM's pod once it is done,
+		// as read on the lab cluster after a live migration.
+		{"after a live migration", &migratable, func(p *corev1.Pod) {
+			p.Labels["kubevirt.io/created-by"] = "3cb402c8"
+			a := kubevirtLauncherAffinity()
+			a.PodAntiAffinity = migrationAntiAffinity("3cb402c8")
+			p.Spec.Affinity = a
+		}, ""},
+		{"after a decentralized migration", &migratable, func(p *corev1.Pod) {
+			a := kubevirtLauncherAffinity()
+			r := a.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+			r.NodeSelectorTerms[0].MatchExpressions = append(r.NodeSelectorTerms[0].MatchExpressions,
+				corev1.NodeSelectorRequirement{Key: "kubernetes.io/hostname", Operator: corev1.NodeSelectorOpNotIn, Values: []string{"n0"}})
+			p.Spec.Affinity = a
+		}, ""},
+		{"anti-affinity against another VMI's pods", &migratable, func(p *corev1.Pod) {
+			p.Labels["kubevirt.io/created-by"] = "3cb402c8"
+			a := kubevirtLauncherAffinity()
+			a.PodAntiAffinity = migrationAntiAffinity("other-uid")
+			p.Spec.Affinity = a
+		}, "affinity"},
+		{"pod anti-affinity not KubeVirt's", &migratable, func(p *corev1.Pod) {
+			a := kubevirtLauncherAffinity()
+			a.PodAntiAffinity = &corev1.PodAntiAffinity{RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
+				{TopologyKey: "kubernetes.io/hostname"}}}
+			p.Spec.Affinity = a
+		}, "affinity"},
+		{"hostname In", &migratable, func(p *corev1.Pod) {
+			a := kubevirtLauncherAffinity()
+			r := a.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+			r.NodeSelectorTerms[0].MatchExpressions = append(r.NodeSelectorTerms[0].MatchExpressions,
+				corev1.NodeSelectorRequirement{Key: "kubernetes.io/hostname", Operator: corev1.NodeSelectorOpIn, Values: []string{"n1"}})
+			p.Spec.Affinity = a
+		}, "affinity"},
+		{"a GPU", &migratable, func(p *corev1.Pod) {
+			p.Spec.Containers[0].Resources.Limits["nvidia.com/gpu"] = resource.MustParse("1")
+		}, "extended resource"},
+	} {
+		p := base()
+		if tc.edit != nil {
+			tc.edit(p)
+		}
+		got := podFromVM(p, "VirtualMachine/db", nil, tc.vm)
+		if tc.want == "" && got.Pinned {
+			t.Errorf("%s: pinned (%s), want movable", tc.name, got.PinReason)
+		}
+		if tc.want != "" && !strings.Contains(got.PinReason, tc.want) {
+			t.Errorf("%s: pin reason %q, want one mentioning %q", tc.name, got.PinReason, tc.want)
+		}
+	}
+}
+
+// migrationAntiAffinity is what KubeVirt gives a migration's target pod: none
+// of the VMI's own pods on the same node.
+func migrationAntiAffinity(uid string) *corev1.PodAntiAffinity {
+	return &corev1.PodAntiAffinity{RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+		LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"kubevirt.io/created-by": uid}},
+		TopologyKey:   "kubernetes.io/hostname",
+	}}}
+}
+
+// kubevirtLauncherAffinity is the node affinity KubeVirt v1.9's virt-controller
+// gives a launcher pod on its own, as read on the lab cluster.
+func kubevirtLauncherAffinity() *corev1.Affinity {
+	return &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
+		RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+			MatchExpressions: []corev1.NodeSelectorRequirement{
+				{Key: "node-labeller.kubevirt.io/obsolete-host-model", Operator: corev1.NodeSelectorOpDoesNotExist},
+				{Key: "cpu-feature.node.kubevirt.io/svm", Operator: corev1.NodeSelectorOpDoesNotExist},
+			}}}},
+		PreferredDuringSchedulingIgnoredDuringExecution: []corev1.PreferredSchedulingTerm{{Weight: 100,
+			Preference: corev1.NodeSelectorTerm{MatchExpressions: []corev1.NodeSelectorRequirement{
+				{Key: "kubernetes.io/arch", Operator: corev1.NodeSelectorOpIn, Values: []string{"amd64"}}}}}},
+	}}
+}
+
+// A migrated VM's pods are found through the same index, so the replay pins
+// or moves them from the VM's own facts.
+func TestPodsCarryTheVMIntoTheReplay(t *testing.T) {
+	dyn := kvClient(vmi("vms", "db", "db", map[string]any{"domain": standardDomain}, "False"))
+	c := &Client{cs: fake.NewSimpleClientset(launcher("vms", "virt-launcher-db-abcde", "db", "compute")), dyn: dyn}
+	pods, err := c.Pods(context.Background(), []string{"vms"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pods) != 1 || pods[0].PinReason != "VM is not live-migratable" || pods[0].Workload != "VirtualMachine/db" {
+		t.Errorf("got %+v", pods)
+	}
+}
+
+// RuntimeClass overhead belongs to no container, and a sizer that replaces
+// the containers' requests must be able to add it back.
+func TestPodOverheadIsKept(t *testing.T) {
+	p := launcher("vms", "virt-launcher-db-abcde", "db", "compute")
+	p.Spec.Overhead = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m"), corev1.ResourceMemory: resource.MustParse("64Mi")}
+	got := podFromVM(p, "VirtualMachine/db", nil, nil)
+	if got.OverheadCPU != 100 || got.OverheadMem != 64<<20 || got.CPU != 500 {
+		t.Errorf("overhead not carried: %+v", got)
+	}
+}
+
+func TestNumericQuantitiesAreRead(t *testing.T) {
+	v := vmSpecFrom(map[string]any{"domain": map[string]any{
+		"resources": map[string]any{"requests": map[string]any{"cpu": float64(2), "memory": "2Gi"}},
+	}}, kubevirtConfig{})
+	if v.CPURequest != 2000 || v.GuestMemory != 2<<30 || v.VCPUs != 1 {
+		t.Errorf("got %+v", v)
+	}
+}
+
+// On a cluster without KubeVirt, a refused read of virtualmachines is noise
+// that sends the reader to grant something useless.
+func TestKubeVirtPermissionsOnlyWhereInstalled(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	c := &Client{cs: cs}
+	for _, p := range c.CheckPermissions(context.Background(), "") {
+		if p.KubeVirt {
+			t.Errorf("asked %s on a cluster without KubeVirt", p)
+		}
+	}
+	cs.Resources = []*metav1.APIResourceList{{GroupVersion: "kubevirt.io/v1"}}
+	var n int
+	for _, p := range c.CheckPermissions(context.Background(), "") {
+		if p.KubeVirt {
+			n++
+		}
+	}
+	if n != 3 {
+		t.Errorf("want the three KubeVirt reads where it is installed, got %d", n)
+	}
+}
+
+// The VMI's own nodeSelector is read, so the pin rules can tell the author's
+// selectors from the ones KubeVirt adds to the pod.
+func TestVMINodeSelectorIsRead(t *testing.T) {
+	v := vmSpecFrom(map[string]any{"nodeSelector": map[string]any{"zone": "a"}}, kubevirtConfig{})
+	if v.NodeSelector["zone"] != "a" || len(v.NodeSelector) != 1 {
+		t.Errorf("got %v", v.NodeSelector)
+	}
+	a := vmSpecFrom(map[string]any{"affinity": map[string]any{"nodeAffinity": map[string]any{}}}, kubevirtConfig{})
+	if !a.Affinity {
+		t.Error("the VMI's own affinity was not read")
+	}
+	if v := vmSpecFrom(map[string]any{}, kubevirtConfig{}); v.NodeSelector != nil || v.Affinity {
+		t.Errorf("no selector read as %v, affinity %v", v.NodeSelector, v.Affinity)
+	}
+}
+
+// The VM's own limits are what a patch must keep above its requests.
+func TestVMAuthoredLimitsAreRead(t *testing.T) {
+	dyn := kvClient(
+		vmi("vms", "db", "db", map[string]any{"domain": standardDomain}, "True"),
+		vmObj("vms", "db", map[string]any{"resources": map[string]any{
+			"requests": map[string]any{"cpu": "500m", "memory": "4Gi"},
+			"limits":   map[string]any{"cpu": int64(1), "memory": "5Gi"},
+		}}),
+	)
+	c := &Client{cs: fake.NewSimpleClientset(launcher("vms", "virt-launcher-db-abcde", "db", "compute")), dyn: dyn}
+	cs, err := c.Containers(context.Background(), []string{"vms"})
+	if err != nil || len(cs) != 1 || cs[0].VM == nil {
+		t.Fatalf("err %v, containers %v", err, cs)
+	}
+	vm := cs[0].VM
+	if vm.AuthoredCPULimit != 1000 || vm.AuthoredMemLimit != 5<<30 || vm.AuthoredCPURequest != 500 || vm.AuthoredMemRequest != 4<<30 {
+		t.Errorf("authored resources misread: %+v", vm)
+	}
+}
+
+func withController(o *unstructured.Unstructured, kind, name string) *unstructured.Unstructured {
+	o.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: "pool.kubevirt.io/v1alpha1", Kind: kind, Name: name, UID: "u2", Controller: ptrBool(true)}})
+	return o
+}
+
+func ptrBool(b bool) *bool { return &b }
+
+// A VM a pool manages, or a VMI a VirtualMachineInstanceReplicaSet does, is
+// rewritten from its controller's template: the spec says which.
+func TestVMControllerAboveIsRead(t *testing.T) {
+	dyn := kvClient(
+		vmi("vms", "db-0", "db-0", map[string]any{"domain": standardDomain}, "True"),
+		withController(vmObj("vms", "db-0", map[string]any{}), "VirtualMachinePool", "db"),
+		withController(vmi("vms", "web-x1", "", map[string]any{"domain": standardDomain}, "True"), "VirtualMachineInstanceReplicaSet", "web"),
+	)
+	c := &Client{cs: fake.NewSimpleClientset(
+		launcher("vms", "virt-launcher-db-0-abcde", "db-0", "compute"),
+		launcher("vms", "virt-launcher-web-x1-abcde", "web-x1", "compute"),
+	), dyn: dyn}
+	cs, err := c.Containers(context.Background(), []string{"vms"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, ct := range cs {
+		if ct.VM == nil {
+			t.Fatalf("%s: no VM spec", ct.Pod)
+		}
+		got[ct.VM.VMI] = ct.VM.ManagedBy
+	}
+	if got["db-0"] != "VirtualMachinePool/db" || got["web-x1"] != "VirtualMachineInstanceReplicaSet/web" {
+		t.Errorf("controllers misread: %v", got)
+	}
+}

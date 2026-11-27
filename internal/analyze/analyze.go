@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/2listic/tare/internal/ceilings"
@@ -68,6 +69,10 @@ type Cluster struct {
 	// an IP. A nil map means node utilisation could not be read, which is a
 	// reportable outcome rather than an idle cluster.
 	NodeUtil map[string]metrics.NodeObservation
+
+	// VMs is virt-handler's per-VMI view, joined to each VM's compute
+	// container by namespace and VMI name. Nil when it was not read.
+	VMs map[metrics.VMKey]*metrics.VMObservation
 }
 
 // Run joins containers with observations and produces findings, most severe
@@ -81,7 +86,7 @@ func Run(containers []discover.Container, obs map[metrics.Key]*metrics.Observati
 // does not.
 func RunWithCluster(containers []discover.Container, obs map[metrics.Key]*metrics.Observation,
 	cl Cluster, window time.Duration, th Thresholds) []Finding {
-	groups := aggregate(containers, obs, th)
+	groups := aggregate(containers, obs, cl.VMs, th)
 	out := make([]Finding, 0, len(groups))
 	for _, f := range groups {
 		sort.Strings(f.Nodes)
@@ -95,6 +100,7 @@ func RunWithCluster(containers []discover.Container, obs map[metrics.Key]*metric
 		// which of them stand on a missing signal.
 		c := cl.Constraints[discover.ConstraintKey(f.Namespace, f.Workload)]
 		decide(f, window, th)
+		decideVM(f, th)
 		holdGuaranteed(f, c)
 		applyNodes(f, cl.Nodes, cl.NodeUtil, th)
 		applyInference(f, cl.Nodes)
@@ -104,6 +110,7 @@ func RunWithCluster(containers []discover.Container, obs map[metrics.Key]*metric
 		f.reconcileFloors(th)
 		applySignalGaps(f)
 		holdTooYoung(f, th)
+		noteVMChange(f)
 		out = append(out, *f)
 	}
 	sortFindings(out)
@@ -116,8 +123,20 @@ func RunWithCluster(containers []discover.Container, obs map[metrics.Key]*metric
 // that no longer exist: a rollout or a reschedule replaces every pod, and a
 // workload measured from its live pods alone is measured from whenever it was
 // last deployed, however wide the window.
-func aggregate(containers []discover.Container, obs map[metrics.Key]*metrics.Observation, th Thresholds) map[groupKey]*Finding {
+//
+// A KubeVirt VM is one VM however many pods it has. During a live migration
+// its VMI runs two virt-launcher pods at once, source and target; they are the
+// same guest, folded by the per-field worst case like any two pods, and never
+// counted as two replicas. Pods replaced by earlier migrations are credited to
+// the VM through their VMI, and its history is the VMI's, not its newest pod's.
+func aggregate(containers []discover.Container, obs map[metrics.Key]*metrics.Observation,
+	vms map[metrics.VMKey]*metrics.VMObservation, th Thresholds) map[groupKey]*Finding {
 	groups := map[groupKey]*Finding{}
+	// vmis is each VM group's distinct instances; vmiWorkload maps a VMI back
+	// to the VirtualMachine group, for pods kube-state-metrics attributes to
+	// the instance that owned them.
+	vmis := map[groupKey]map[string]bool{}
+	vmiWorkload := map[string]string{}
 	// worstGrowth tracks, per group, the largest late/early memory ratio seen
 	// on any single pod, so the trend pair kept below comes from one pod.
 	worstGrowth := map[groupKey]float64{}
@@ -139,9 +158,20 @@ func aggregate(containers []discover.Container, obs map[metrics.Key]*metrics.Obs
 				Authored:     c.Authored,
 				Ceilings:     ceilings.Detect(c.Spec),
 			}
+			if c.VM != nil {
+				vm := *c.VM
+				f.VM = &vm
+			}
 			groups[gk] = f
 		}
 		f.Pods++
+		if c.VM != nil {
+			if vmis[gk] == nil {
+				vmis[gk] = map[string]bool{}
+			}
+			vmis[gk][c.VM.VMI] = true
+			vmiWorkload[c.Namespace+"/"+c.VM.VMI] = c.Workload
+		}
 		if c.Node != "" && !slices.Contains(f.Nodes, c.Node) {
 			f.Nodes = append(f.Nodes, c.Node)
 		}
@@ -184,7 +214,13 @@ func aggregate(containers []discover.Container, obs map[metrics.Key]*metrics.Obs
 		if live[k] || o.Owner == "" {
 			continue
 		}
-		gk := groupKey{k.Namespace, o.Owner, k.Container}
+		owner := o.Owner
+		if vmi, ok := strings.CutPrefix(owner, "VirtualMachineInstance/"); ok {
+			if w, ok := vmiWorkload[k.Namespace+"/"+vmi]; ok {
+				owner = w
+			}
+		}
+		gk := groupKey{k.Namespace, owner, k.Container}
 		f, ok := groups[gk]
 		if !ok {
 			continue
@@ -195,6 +231,11 @@ func aggregate(containers []discover.Container, obs map[metrics.Key]*metrics.Obs
 
 	for gk, f := range groups {
 		f.Samples = coverage(spans[gk])
+		if f.VM == nil {
+			continue
+		}
+		f.Pods = len(vmis[gk])
+		attachVM(f, vms[metrics.VMKey{Namespace: f.Namespace, Name: f.VM.VMI}])
 	}
 	return groups
 }
@@ -249,22 +290,30 @@ func fold(f *Finding, o *metrics.Observation, live bool, th Thresholds) {
 // alone are not enough, because a span is first-to-last and a pod that lived
 // through a week of outages spans the week; the samples are what was actually
 // taken. Never below the best single pod, which is what tare reported before
-// spans existed. Without spans for every pod - the simulator, or a failed
+// spans existed. Without a span for any pod - the simulator, or a failed
 // query - only the best single pod can be trusted.
+//
+// A pod without a span beside pods with one is not a failed query: spans are
+// sampled on a 5-minute grid, and a pod that started after the last grid
+// point (a rollout's or a migration's newest pod), or lived between two, has
+// none yet (KNOWN-FAILURES 61). Its samples are added as they are. They are
+// at most one step's worth, so a replica running beside the others is
+// overcounted by that much at most, where falling back to the best pod
+// dropped every pod but one.
 func coverage(obs []*metrics.Observation) int {
-	var best, sum int
+	var best, sum, young int
 	type span struct{ from, to float64 }
 	var ss []span
-	known := true
 	for _, o := range obs {
 		best = max(best, o.Samples)
-		sum += o.Samples
 		if o.LastSeen == 0 {
-			known = false
+			young += o.Samples
+			continue
 		}
+		sum += o.Samples
 		ss = append(ss, span{o.FirstSeen, o.LastSeen})
 	}
-	if !known {
+	if len(ss) == 0 {
 		return best
 	}
 	slices.SortFunc(ss, func(a, b span) int { return cmp.Compare(a.from, b.from) })
@@ -277,10 +326,11 @@ func coverage(obs []*metrics.Observation) int {
 		}
 		end = max(end, s.to)
 	}
-	if total <= 0 {
-		return best
+	spanned := 0
+	if total > 0 {
+		spanned = int(float64(sum) * union / total)
 	}
-	return max(best, int(float64(sum)*union/total))
+	return max(best, spanned+young)
 }
 
 // usableAlone reports whether a gone pod's CPU wait says anything about its

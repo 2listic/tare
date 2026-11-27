@@ -237,7 +237,8 @@ func runCluster(sub string, o *options, namespaces []string) error {
 	coverage, covCounts := coverageNote(containers, obs)
 
 	constraints := kc.LoadConstraints(ctx, namespaces)
-	cluster := analyze.Cluster{Constraints: constraints, Nodes: inv, NodeUtil: observeNodes(src, inv, window)}
+	cluster := analyze.Cluster{Constraints: constraints, Nodes: inv, NodeUtil: observeNodes(src, inv, window),
+		VMs: observeVMs(src, containers, namespaces, window)}
 	findings := analyze.RunWithCluster(containers, obs, cluster, window, analyze.DefaultThresholds())
 
 	rep := &report.Report{
@@ -328,6 +329,22 @@ func observeNodes(src metrics.Source, inv discover.Inventory, window time.Durati
 		if n, ok := inv.ByIP(ip); ok {
 			out[n.Name] = o
 		}
+	}
+	return out
+}
+
+// observeVMs reads virt-handler's per-VMI series, only when the inventory
+// holds a KubeVirt VM: on any other cluster every one of them would be an
+// absent signal in the report header, about a component nobody runs.
+func observeVMs(src metrics.Source, containers []discover.Container, namespaces []string,
+	window time.Duration) map[metrics.VMKey]*metrics.VMObservation {
+	vo, ok := src.(metrics.VMObserver)
+	if !ok || !slices.ContainsFunc(containers, func(c discover.Container) bool { return c.VM != nil }) {
+		return nil
+	}
+	out, err := vo.ObserveVMs(namespaces, window)
+	if err != nil {
+		return nil
 	}
 	return out
 }

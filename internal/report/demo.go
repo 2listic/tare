@@ -2,6 +2,7 @@ package report
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/2listic/tare/internal/analyze"
@@ -24,7 +25,7 @@ func Demo(window time.Duration, label string) *Report {
 	const seed = 21
 	origin := time.Date(2026, 3, 2, 0, 0, 0, 0, time.UTC) // a Monday
 
-	c := simulate.NewCluster("demo", origin, seed, simulate.Catalog()...)
+	c := simulate.NewCluster("demo", origin, seed, append(simulate.Catalog(), simulate.VMCatalog()...)...)
 	// Deliberately generous, which is how a container arrives at this tool:
 	// over-provisioned, so its true demand is visible.
 	for _, d := range simulate.Catalog() {
@@ -32,6 +33,12 @@ func Demo(window time.Duration, label string) *Report {
 			CPURequest: 2, CPULimit: 4,
 			MemRequest: 4 << 30, MemLimit: 8 << 30,
 		})
+	}
+	// A VM's pod is sized by KubeVirt from its spec, not by its author, so
+	// the VMs get what KubeVirt would derive rather than the generous
+	// allocation above.
+	for _, d := range simulate.VMCatalog() {
+		c.SetAllocation(d.Name, simulate.VMAllocation(d))
 	}
 	c.Run(window)
 
@@ -41,16 +48,23 @@ func Demo(window time.Duration, label string) *Report {
 		// here is a programming fault, not an environment one.
 		panic(fmt.Sprintf("demo: simulator failed to observe: %v", err))
 	}
+	vms, _ := c.ObserveVMs(nil, window)
 
 	return &Report{
 		Usage: func(f analyze.Finding) (metrics.Series, metrics.Series, error) {
-			cpu, mem, ok := c.Usage(f.Container, window, PlotBuckets)
+			name := f.Container
+			if f.IsVM() {
+				// Every VM's container is called compute; its environment is
+				// named after the VM.
+				_, name, _ = strings.Cut(f.Workload, "/")
+			}
+			cpu, mem, ok := c.Usage(name, window, PlotBuckets)
 			if !ok {
 				return cpu, mem, fmt.Errorf("the simulator has no container %q", f.Container)
 			}
 			return cpu, mem, nil
 		},
-		Findings: analyze.Run(c.Containers(), obs, window, analyze.DefaultThresholds()),
+		Findings: analyze.RunWithCluster(c.Containers(), obs, analyze.Cluster{VMs: vms}, window, analyze.DefaultThresholds()),
 		Source:   "simulator (demo data, no cluster was read)",
 		Window:   label,
 		// Always the window asked for: the simulator has all of its history.

@@ -44,6 +44,10 @@ func shortWorkload(ns, workload string, max int) string {
 			kind = "rc"
 		case "CronJob":
 			kind = "cronjob"
+		case "VirtualMachine":
+			kind = "vm"
+		case "VirtualMachineInstance":
+			kind = "vmi"
 		default:
 			kind = strings.ToLower(kind)
 		}

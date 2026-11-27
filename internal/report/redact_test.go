@@ -1,12 +1,15 @@
 package report
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/2listic/tare/internal/analyze"
 	"github.com/2listic/tare/internal/ceilings"
+	"github.com/2listic/tare/internal/discover"
+	"github.com/2listic/tare/internal/metrics"
 	"github.com/2listic/tare/internal/packing"
 )
 
@@ -155,5 +158,52 @@ func TestRedactionLeavesNoNameAnywhereInTheReport(t *testing.T) {
 	// independently; if they disagree the reader sees two Prometheuses.
 	if want := HashName("monitoring") + "/" + HashName("prometheus-operated"); !strings.Contains(r.Source, want) {
 		t.Errorf("source %q does not carry %q, the hash the using line prints", r.Source, want)
+	}
+}
+
+// A VM's name rides in its spec and its observation as well as the workload;
+// redacting the column and not those printed it in the JSON.
+func TestRedactHidesVMNames(t *testing.T) {
+	r := &Report{Findings: []analyze.Finding{{
+		Namespace: "finance", Workload: "VirtualMachine/ledger-db", Container: "compute",
+		VM:    &discover.VMSpec{VM: "ledger-db", VMI: "ledger-db", Instancetype: "finance-large"},
+		VMObs: &metrics.VMObservation{VMKey: metrics.VMKey{Namespace: "finance", Name: "ledger-db"}},
+	}}}
+	Redact(r)
+	f := r.Findings[0]
+	for _, s := range []string{f.Workload, f.VM.VM, f.VM.VMI, f.VM.Instancetype, f.VMObs.Name, f.VMObs.Namespace} {
+		if strings.Contains(s, "ledger") || strings.Contains(s, "finance") {
+			t.Errorf("name survived redaction: %q", s)
+		}
+	}
+	if !strings.HasPrefix(f.Workload, "VirtualMachine/") || f.Container != "compute" {
+		t.Errorf("the kind and KubeVirt's container name are not secrets: %q %q", f.Workload, f.Container)
+	}
+}
+
+// A VM's node selector names the nodes its author pinned it to, and the guest
+// agent's OS id can be an internal image name: both are in the JSON.
+func TestRedactHidesVMSelectorAndGuestOS(t *testing.T) {
+	r := &Report{Findings: []analyze.Finding{{
+		Namespace: "finance", Workload: "VirtualMachine/ledger-db", Container: "compute",
+		Nodes: []string{"worker-17.acme.internal"},
+		VM: &discover.VMSpec{VM: "ledger-db", VMI: "ledger-db", GuestOS: "acme-hardened-rhel",
+			NodeSelector: map[string]string{"kubernetes.io/hostname": "worker-17.acme.internal", "acme.example/pool": "ledger"},
+			ManagedBy:    "VirtualMachinePool/acme-ledgers"},
+	}}}
+	shared := r.Findings[0].VM
+	Redact(r)
+	b, _ := json.Marshal(r.Findings[0].VM)
+	for _, s := range []string{"acme", "worker-17", "ledger"} {
+		if strings.Contains(string(b), s) {
+			t.Errorf("%q survived redaction: %s", s, b)
+		}
+	}
+	vm := r.Findings[0].VM
+	if vm.NodeSelector["kubernetes.io/hostname"] != r.Findings[0].Nodes[0] {
+		t.Errorf("a node hashes differently in the selector and the node list: %v vs %v", vm.NodeSelector, r.Findings[0].Nodes)
+	}
+	if shared.NodeSelector["kubernetes.io/hostname"] != "worker-17.acme.internal" || shared.GuestOS != "acme-hardened-rhel" {
+		t.Errorf("redaction edited the run's shared input: %+v", shared)
 	}
 }

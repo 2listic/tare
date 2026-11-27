@@ -1,10 +1,12 @@
 package discover
 
 import (
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func res(cpu, mem string) corev1.ResourceList {
@@ -257,5 +259,48 @@ func TestUnlimitedContainersAreCountedPerContainer(t *testing.T) {
 	p := podFrom(&corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{app, sidecar}}}, "Deployment/web", nil)
 	if p.UnlimitedCPU != 1 || p.UnlimitedMem != 0 {
 		t.Errorf("UnlimitedCPU=%d UnlimitedMem=%d, want 1 and 0", p.UnlimitedCPU, p.UnlimitedMem)
+	}
+}
+
+// What a virt-launcher pod requests beyond CPU and memory is read, so the
+// replay can keep the VM on nodes that offer it, and a node's allocatable
+// extended resources are read so it can tell which do (KNOWN-FAILURES 70).
+func TestExtendedResourcesAreReadForPlacement(t *testing.T) {
+	q := resource.MustParse
+	p := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "vms", Name: "virt-launcher-b-x"},
+		Spec: corev1.PodSpec{NodeName: "worker-2", Containers: []corev1.Container{{
+			Name: "compute",
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{"cpu": q("100m"), "memory": q("1800Mi"),
+					"devices.kubevirt.io/kvm": q("1"), "devices.kubevirt.io/tun": q("1")},
+				Limits: corev1.ResourceList{"devices.kubevirt.io/kvm": q("1"), "devices.kubevirt.io/vhost-net": q("1")},
+			},
+		}}},
+	}
+	got := podFrom(p, "VirtualMachine/b", nil).Needs
+	want := []string{"devices.kubevirt.io/kvm", "devices.kubevirt.io/tun", "devices.kubevirt.io/vhost-net"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("Needs = %v, want %v", got, want)
+	}
+	if n := podFrom(&corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c"}}}}, "Deployment/x",
+		nil).Needs; n != nil {
+		t.Errorf("a pod requesting nothing extended needs %v, want nil", n)
+	}
+
+	alloc := corev1.ResourceList{"cpu": q("4"), "memory": q("3Gi"), "pods": q("110"),
+		"ephemeral-storage": q("20Gi"), "hugepages-2Mi": q("0"), "devices.kubevirt.io/kvm": q("1k"),
+		"devices.kubevirt.io/tun": q("0")}
+	ext := extendedOf(alloc)
+	if len(ext) != 1 || ext["devices.kubevirt.io/kvm"] != 1000 {
+		t.Errorf("extendedOf = %v, want only devices.kubevirt.io/kvm: 1000", ext)
+	}
+	n := Node{Extended: ext}
+	if !n.Offers([]string{"devices.kubevirt.io/kvm"}) || n.Offers([]string{"devices.kubevirt.io/tun"}) ||
+		!n.Offers(nil) {
+		t.Error("Offers: kvm offered, tun advertised at 0 is not, and nothing needed is always offered")
+	}
+	if (Node{}).Offers([]string{"devices.kubevirt.io/kvm"}) {
+		t.Error("a node whose resources were not read offers nothing")
 	}
 }

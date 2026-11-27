@@ -350,11 +350,19 @@ func pack(inv discover.Inventory, pods []discover.Pod, size Sizer) packResult {
 		}
 		return movable[i].Name < movable[j].Name
 	})
+	// A pod goes only where the scheduler would put it: a node its
+	// nodeSelector selects, offering every extended resource it requests. For
+	// most pods this changes nothing - a selector or an extended resource pins
+	// them - but a live-migratable VM is movable despite both (KubeVirt's
+	// kubevirt.io/schedulable selector, its devices.kubevirt.io/kvm request),
+	// and placing it by room alone moved VMs onto nodes that run no
+	// virt-handler: an untainted control plane with free memory made a worker
+	// look empty today (KNOWN-FAILURES 70).
 	for _, p := range movable {
 		cpu, mem := requests(p)
 		placed := false
 		for _, b := range dest {
-			if b.freeCPU >= cpu && b.freeMem >= mem {
+			if b.freeCPU >= cpu && b.freeMem >= mem && b.node.Matches(p.NodeSelector) && b.node.Offers(p.Needs) {
 				b.freeCPU -= cpu
 				b.freeMem -= mem
 				b.occupied = true

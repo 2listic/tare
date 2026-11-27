@@ -291,6 +291,10 @@ func WorkloadCell(workload string, width int) string {
 			workload = "ds/" + name
 		case "ReplicaSet":
 			workload = "rs/" + name
+		case "VirtualMachine":
+			workload = "vm/" + name
+		case "VirtualMachineInstance":
+			workload = "vmi/" + name
 		default:
 			workload = strings.ToLower(kind) + "/" + name
 		}

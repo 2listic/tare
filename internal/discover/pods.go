@@ -3,6 +3,8 @@ package discover
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,6 +28,12 @@ type Pod struct {
 	CPU int64 // millicores
 	Mem int64 // bytes
 
+	// OverheadCPU and OverheadMem are the pod's spec.overhead (RuntimeClass),
+	// already inside CPU and Mem. They belong to no container, so a sizer
+	// replacing the containers' requests has to add them back.
+	OverheadCPU int64
+	OverheadMem int64
+
 	// CPULimit and MemLimit are what the pod may consume, summed the same way.
 	// A node's limits can exceed its allocatable many times over: that is
 	// legal, invisible to the scheduler, and the reason a node with plenty of
@@ -46,6 +54,13 @@ type Pod struct {
 	// belongs to. A DaemonSet selecting three of thirty nodes costs the other
 	// twenty-seven nothing.
 	NodeSelector map[string]string
+
+	// Needs is the extended resources the pod requests (devices.kubevirt.io/kvm
+	// for a VM), sorted. A pod that requests one is pinned unless tare knows
+	// better - a live-migratable VM is not - and a pod the replay moves can only
+	// be placed on a node that offers each of them, as it can only be placed on
+	// a node its nodeSelector selects.
+	Needs []string
 
 	// Pinned marks a pod tare cannot model moving, and PinReason says why.
 	// A pinned pod holds its current node for the whole replay. This is the
@@ -76,7 +91,7 @@ func (c *Client) Pods(ctx context.Context, namespaces []string, pdbs []PDB) ([]P
 			if p.Spec.NodeName == "" || p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
 				continue // not occupying a node
 			}
-			out = append(out, podFrom(p, idx.ownerOf(ctx, p), pdbs))
+			out = append(out, podFromVM(p, idx.ownerOf(ctx, p), pdbs, idx.vmFor(ctx, p)))
 		}
 	}
 	return out, nil
@@ -88,6 +103,12 @@ func (c *Client) Pods(ctx context.Context, namespaces []string, pdbs []PDB) ([]P
 // computed from, and a field that is declared and never assigned is a defect
 // this project has shipped before.
 func podFrom(p *corev1.Pod, workload string, pdbs []PDB) Pod {
+	return podFromVM(p, workload, pdbs, nil)
+}
+
+// podFromVM is podFrom for a pod that may be a KubeVirt virt-launcher, whose
+// VM decides whether it can move.
+func podFromVM(p *corev1.Pod, workload string, pdbs []PDB, vm *VMSpec) Pod {
 	cpu, mem := effectiveRequests(p)
 	cpuLim, memLim, noCPULim, noMemLim := effectiveLimits(p)
 	pod := Pod{
@@ -97,8 +118,16 @@ func podFrom(p *corev1.Pod, workload string, pdbs []PDB) Pod {
 		CPULimit: cpuLim, MemLimit: memLim,
 		UnlimitedCPU: noCPULim, UnlimitedMem: noMemLim,
 		NodeSelector: p.Spec.NodeSelector,
+		Needs:        extendedRequests(p),
 	}
-	pod.PinReason = pinReason(p, pod.WorkloadKind)
+	if o := p.Spec.Overhead; o != nil {
+		pod.OverheadCPU, pod.OverheadMem = milli(o, corev1.ResourceCPU), bytes(o, corev1.ResourceMemory)
+	}
+	if isVirtLauncher(p) {
+		pod.PinReason = vmPinReason(p, vm)
+	} else {
+		pod.PinReason = pinReason(p, pod.WorkloadKind)
+	}
 	if pod.PinReason == "" {
 		pod.PinReason = blockedByPDB(pdbs, p.Namespace, p.Labels)
 	}
@@ -186,10 +215,159 @@ func pinReason(p *corev1.Pod, kind string) string {
 	case "":
 		return "not owned by a controller, so nothing would recreate it elsewhere"
 	}
-	if len(p.Spec.NodeSelector) > 0 {
-		return "has a nodeSelector"
+	return placementPin(p, pinRules{})
+}
+
+// pinRules relaxes the generic placement checks for a pod whose constraints
+// tare understands better than the generic rules do.
+type pinRules struct {
+	ignoreSelector func(key string) bool
+	ignoreAffinity func(a *corev1.Affinity) bool
+	ignoreResource func(name corev1.ResourceName) bool
+	sharedVolumes  bool // its PVCs are known not to bind it to a node
+}
+
+// isVirtLauncher reports a KubeVirt VM's pod.
+func isVirtLauncher(p *corev1.Pod) bool {
+	if ref := metav1.GetControllerOf(p); ref != nil && ref.Kind == "VirtualMachineInstance" {
+		return true
 	}
-	if p.Spec.Affinity != nil {
+	return p.Labels["kubevirt.io"] == "virt-launcher"
+}
+
+// vmPinReason is pinReason for a virt-launcher pod. The generic rules pin
+// every VM: KubeVirt gives each pod a nodeSelector from its node-labeller,
+// requests devices.kubevirt.io/kvm, and backs disks with PVCs. None of those
+// stops a live-migratable VM from moving, and a drain migrates it. What does
+// stop it is the VM itself: not migratable, not asked to migrate, or tied to
+// hardware or memory reserved on one node.
+func vmPinReason(p *corev1.Pod, vm *VMSpec) string {
+	switch {
+	case vm == nil:
+		return "is a KubeVirt VM whose VirtualMachineInstance could not be read, so whether it can live-migrate is unknown"
+	case vm.HostDevices:
+		return "is a VM using host devices, GPUs or SR-IOV, which do not move with it"
+	case vm.DedicatedCPU:
+		return "is a VM with dedicated CPUs, which need whole free cores on the target node"
+	case vm.HugepageSize != "":
+		return "is a VM backed by hugepages, which are reserved per node"
+	case !vm.LiveMigratableKnown:
+		return "is a VM that does not report whether it is live-migratable"
+	case !vm.LiveMigratable:
+		return "VM is not live-migratable"
+	case !vm.Migratable():
+		strategy := vm.EvictionStrategy
+		if strategy == "" {
+			strategy = "unset"
+		}
+		return "is a VM whose eviction strategy (" + strategy + ") shuts it down on a drain rather than migrating it"
+	}
+	return placementPin(p, pinRules{
+		ignoreSelector: func(k string) bool { return kubevirtSelector(k) && !hasKey(vm.NodeSelector, k) },
+		ignoreAffinity: func(a *corev1.Affinity) bool { return !vm.Affinity && kubevirtAffinity(p, a) },
+		ignoreResource: func(n corev1.ResourceName) bool { return strings.HasPrefix(string(n), "devices.kubevirt.io/") },
+		// Live migration needs storage both nodes can reach, so a VM that
+		// is migratable has none that binds it.
+		sharedVolumes: true,
+	})
+}
+
+// kubevirtSelector reports a nodeSelector key KubeVirt puts on every
+// virt-launcher pod itself: its node-labeller's (schedulable, machine type,
+// CPU model and features, all under kubevirt.io) and kubernetes.io/arch, from
+// the VMI's architecture. They choose which nodes can run a VM at all, and a
+// live migration goes only to such a node, so none of them holds the VM where
+// it is. Matching "kubevirt.io" alone pinned every VM on KubeVirt v1.9, which
+// adds kubernetes.io/arch (KNOWN-FAILURES 62). A key the VMI's own spec sets
+// is the author's, and pins it like any other pod's.
+func kubevirtSelector(k string) bool {
+	return strings.Contains(k, "kubevirt.io") || k == corev1.LabelArchStable
+}
+
+// kubevirtAffinity reports an affinity made only of the terms KubeVirt adds
+// to a virt-launcher pod itself. They are the same from v0.59 to v1.9
+// (pkg/virt-controller/services/template.go, watch/migration/migration.go):
+//   - node affinity on its node-labeller's keys: "node-labeller.kubevirt.io/
+//     obsolete-host-model DoesNotExist" for every VM whose CPU model is unset
+//     or host-model, "cpu-feature.node.kubevirt.io/<f> DoesNotExist" for each
+//     CPU feature it forbids, and a preferred kubernetes.io/arch term. Like
+//     its nodeSelector keys, they keep a VM off nodes that cannot run it.
+//   - on a live migration's target pod, which is the VM's pod once the
+//     migration is done: a pod anti-affinity against the VMI's own pods
+//     (kubevirt.io/created-by, per hostname), so the target lands away from
+//     the source; or, for a decentralized migration, "kubernetes.io/hostname
+//     NotIn <source node>". Neither binds the VM where it is.
+//
+// Any other pod affinity or anti-affinity (KubeVirt's own for persistent
+// reservations included), a matchFields term, or any other key is a real
+// constraint and pins (KNOWN-FAILURES 63).
+func kubevirtAffinity(p *corev1.Pod, a *corev1.Affinity) bool {
+	if a.PodAffinity != nil {
+		return false
+	}
+	if pa := a.PodAntiAffinity; pa != nil {
+		if len(pa.PreferredDuringSchedulingIgnoredDuringExecution) > 0 {
+			return false
+		}
+		for _, t := range pa.RequiredDuringSchedulingIgnoredDuringExecution {
+			if !ownMigrationTerm(p, t) {
+				return false
+			}
+		}
+	}
+	na := a.NodeAffinity
+	if na == nil {
+		return true
+	}
+	var terms []corev1.NodeSelectorTerm
+	if na.RequiredDuringSchedulingIgnoredDuringExecution != nil {
+		terms = append(terms, na.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms...)
+	}
+	for _, t := range na.PreferredDuringSchedulingIgnoredDuringExecution {
+		terms = append(terms, t.Preference)
+	}
+	for _, t := range terms {
+		if len(t.MatchFields) > 0 {
+			return false
+		}
+		for _, e := range t.MatchExpressions {
+			sourceNode := e.Key == corev1.LabelHostname && e.Operator == corev1.NodeSelectorOpNotIn
+			if !kubevirtSelector(e.Key) && !sourceNode {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// ownMigrationTerm reports the anti-affinity KubeVirt gives a migration's
+// target pod: no two of this VMI's pods on one node. The selector is the
+// pod's own kubevirt.io/created-by label (the VMI's UID), and nothing else.
+func ownMigrationTerm(p *corev1.Pod, t corev1.PodAffinityTerm) bool {
+	const createdBy = "kubevirt.io/created-by"
+	ls := t.LabelSelector
+	if ls == nil || len(ls.MatchExpressions) > 0 || len(ls.MatchLabels) != 1 ||
+		t.NamespaceSelector != nil || len(t.MatchLabelKeys) > 0 || len(t.MismatchLabelKeys) > 0 ||
+		t.TopologyKey != corev1.LabelHostname {
+		return false
+	}
+	uid, ok := p.Labels[createdBy]
+	return ok && uid != "" && ls.MatchLabels[createdBy] == uid
+}
+
+func hasKey(m map[string]string, k string) bool {
+	_, ok := m[k]
+	return ok
+}
+
+// placementPin is the generic placement checks.
+func placementPin(p *corev1.Pod, r pinRules) string {
+	for k := range p.Spec.NodeSelector {
+		if r.ignoreSelector == nil || !r.ignoreSelector(k) {
+			return "has a nodeSelector"
+		}
+	}
+	if p.Spec.Affinity != nil && (r.ignoreAffinity == nil || !r.ignoreAffinity(p.Spec.Affinity)) {
 		return "has affinity or anti-affinity rules"
 	}
 	if len(p.Spec.TopologySpreadConstraints) > 0 {
@@ -198,16 +376,16 @@ func pinReason(p *corev1.Pod, kind string) string {
 	if hasNonDefaultToleration(p.Spec.Tolerations) {
 		return "tolerates a taint, so it may be placed where other pods cannot follow"
 	}
-	if usesExtendedResources(p) {
+	if usesExtendedResources(p, r.ignoreResource) {
 		return "requests an extended resource such as a GPU"
 	}
 	for _, v := range p.Spec.Volumes {
 		switch {
-		case v.PersistentVolumeClaim != nil:
+		case v.PersistentVolumeClaim != nil && !r.sharedVolumes:
 			return "has a PersistentVolumeClaim, which may bind it to a zone or a node"
 		case v.HostPath != nil:
 			return "mounts a hostPath"
-		case v.Ephemeral != nil:
+		case v.Ephemeral != nil && !r.sharedVolumes:
 			return "has an ephemeral volume claim"
 		}
 	}
@@ -230,14 +408,45 @@ func hasNonDefaultToleration(ts []corev1.Toleration) bool {
 	return false
 }
 
-func usesExtendedResources(p *corev1.Pod) bool {
+// extendedRequests is the extended resources any of the pod's containers
+// requests or is limited to, by name, sorted; nil if none. The scheduler sets
+// an extended resource's request to its limit when only the limit is given.
+func extendedRequests(p *corev1.Pod) []string {
+	seen := map[string]bool{}
+	add := func(rl corev1.ResourceList) {
+		for name, q := range rl {
+			if !standardResource(name) && !q.IsZero() {
+				seen[string(name)] = true
+			}
+		}
+	}
+	for i := range p.Spec.Containers {
+		add(p.Spec.Containers[i].Resources.Requests)
+		add(p.Spec.Containers[i].Resources.Limits)
+	}
+	for i := range p.Spec.InitContainers {
+		add(p.Spec.InitContainers[i].Resources.Requests)
+		add(p.Spec.InitContainers[i].Resources.Limits)
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for n := range seen {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func usesExtendedResources(p *corev1.Pod, ignore func(corev1.ResourceName) bool) bool {
 	std := map[corev1.ResourceName]bool{
 		corev1.ResourceCPU: true, corev1.ResourceMemory: true,
 		corev1.ResourceEphemeralStorage: true,
 	}
 	check := func(rl corev1.ResourceList) bool {
 		for name, q := range rl {
-			if !std[name] && !q.IsZero() {
+			if !std[name] && !q.IsZero() && (ignore == nil || !ignore(name)) {
 				return true
 			}
 		}

@@ -51,11 +51,20 @@ func applySignalGaps(f *Finding) {
 			f.Missing = append(f.Missing, w.sig)
 		}
 	}
+	// A VM's own signals are wanted only on a VM. Migrations are absent
+	// whenever the VM did not migrate, which is not a gap.
+	if f.VM != nil {
+		for _, s := range metrics.VMSignals {
+			if s != metrics.SigVMMigrations && !f.hasSignal(s) {
+				f.Missing = append(f.Missing, s)
+			}
+		}
+	}
 
 	blind := !f.hasAny(metrics.SaturationSignals...)
 	if blind {
 		f.Reasons = append(f.Reasons, note(NoSaturationSignal, "no saturation signal is usable for this container "+
-			"(no PSI, no CPU wait from tare-agent, no CFS throttle metrics), so it cannot be shown to have headroom. "+
+			"(no PSI, no CPU wait from tare-agent, no CFS throttle metrics, no KubeVirt vCPU delay), so it cannot be shown to have headroom. "+
 			"Treat any reduction as unverified. Where PSI is missing, tare-agent provides CPU wait: see kubectl tare check."))
 		// Confidence is about how much the recommendation can be trusted, and
 		// without a saturation signal it cannot be trusted much whatever the

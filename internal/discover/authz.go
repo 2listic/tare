@@ -23,6 +23,10 @@ type Permission struct {
 	Subresource string
 	Buys        string
 	Required    bool
+	// KubeVirt marks a read that only exists where KubeVirt is installed.
+	// Elsewhere it is not asked: a denial of a resource the cluster does not
+	// have is noise that sends the reader to grant something useless.
+	KubeVirt bool
 
 	Allowed bool
 	Err     error
@@ -68,7 +72,20 @@ func Needs() []Permission {
 			Buys: "the warning that resizing a workload moves its HPA's scaling setpoint"},
 		{Verb: "list", Group: "autoscaling.k8s.io", Resource: "verticalpodautoscalers",
 			Buys: "the check that a VPA is not already writing the fields tare is about to recommend"},
+		{Verb: "list", Group: "kubevirt.io", Resource: "virtualmachineinstances", KubeVirt: true,
+			Buys: "reading a VM's vCPUs, guest memory and migratability. Without it VMs are sized from QEMU's " +
+				"resident memory, which is every page the guest ever touched, and pinned in the node replay"},
+		{Verb: "list", Group: "kubevirt.io", Resource: "virtualmachines", KubeVirt: true,
+			Buys: "attributing a VM's pods to the VirtualMachine you edit, and what its template authored"},
+		{Verb: "list", Group: "kubevirt.io", Resource: "kubevirts", KubeVirt: true,
+			Buys: "the cluster's cpuAllocationRatio, memory overcommit and rollout strategy; without it the defaults are assumed"},
 	}
+}
+
+// KubeVirtInstalled reports whether the API server serves kubevirt.io/v1.
+func (c *Client) KubeVirtInstalled() bool {
+	_, err := c.cs.Discovery().ServerResourcesForGroupVersion("kubevirt.io/v1")
+	return err == nil
 }
 
 // CheckPermissions asks the API server what this token may do, using the same
@@ -80,6 +97,15 @@ func Needs() []Permission {
 // a default run does.
 func (c *Client) CheckPermissions(ctx context.Context, namespace string) []Permission {
 	perms := Needs()
+	if !c.KubeVirtInstalled() {
+		kept := perms[:0]
+		for _, p := range perms {
+			if !p.KubeVirt {
+				kept = append(kept, p)
+			}
+		}
+		perms = kept
+	}
 	for i := range perms {
 		p := &perms[i]
 		ssar := &authv1.SelfSubjectAccessReview{

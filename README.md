@@ -97,6 +97,17 @@ what it lost; `kubectl tare check` tells you which.
 - A cyclic leak and an undersized container look the same.
 - No latency/SLO input, no Spark/Flink, init containers or pod-level resources.
   Nothing is applied automatically.
+- **KubeVirt VM verdicts are experimental.** VMs are sized in VM terms (vCPUs,
+  guest memory, `vm/` rows, `-o patch` on the VirtualMachine), but so far only
+  against the simulator and one small lab cluster, never a production one. The
+  VM thresholds (vCPU delay, guest swap and major faults, the guest shrink
+  ratio) are chosen with margin, not swept like the container ones, and the
+  `kubevirt_vmi_*` queries, the vCPU `state` label value and the migration
+  labels are written from KubeVirt's metric reference. Guest memory is only
+  lowered on the guest's own report (balloon driver), vCPU counts are advice
+  only, and a VM sized by an instancetype or managed by a VirtualMachinePool or
+  VirtualMachineInstanceReplicaSet is not patched. Review every VM change by
+  hand. See `DICTIONARY.md` (KubeVirt VMs).
 
 ## Development
 

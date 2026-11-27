@@ -125,6 +125,21 @@ func runCheck(ctx context.Context, out io.Writer, kc *discover.Client, namespace
 		}
 	}
 
+	if kc.KubeVirtInstalled() {
+		fmt.Fprintln(out, "\nkubevirt (virt-handler series)")
+		for _, c := range src.PreflightVMs(namespaces) {
+			switch {
+			case c.Err != nil:
+				mark(out, false, c.Metric, c.Err.Error())
+			case c.Series == 0:
+				mark(out, false, c.Metric, "absent: "+c.Buys)
+				degraded = append(degraded, c.Metric)
+			default:
+				mark(out, true, c.Metric, fmt.Sprintf("%d series", c.Series))
+			}
+		}
+	}
+
 	fmt.Fprintln(out, "\ntare-agent")
 	if !checkAgent(out, src.Agent(namespaces, window), psiOK) {
 		degraded = append(degraded, "tare-agent")
