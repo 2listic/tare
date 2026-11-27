@@ -443,3 +443,19 @@ func TestGuestMemZeroUsedIsNotEvidence(t *testing.T) {
 		t.Errorf("missing %s: %v", analyze.VMGuestMemUnreported, analyze.ReasonTexts(f.Reasons))
 	}
 }
+
+// A virt-launcher pod carries KubeVirt's own containers beside compute
+// (guest-console-log, container disks, sidecar hooks). They belong to the VM
+// but are not in its spec: the skip says what they are, not that the VM
+// could not be read.
+func TestVMSidecarSkipSaysWhatItIs(t *testing.T) {
+	for _, wl := range []string{"VirtualMachine/db", "VirtualMachineInstance/db"} {
+		f := analyze.Finding{Namespace: "vms", Workload: wl, Container: "guest-console-log",
+			Verdict: analyze.Waste, CPURequest: 100, RecCPU: 10}
+		ok, why := analyze.Patchable(f)
+		if ok || strings.Contains(why, "could not be read") || strings.Contains(why, "nobody owns") ||
+			!strings.Contains(why, "guest-console-log") || !strings.Contains(why, "KubeVirt") {
+			t.Errorf("%s sidecar: ok=%v, why %q", wl, ok, why)
+		}
+	}
+}

@@ -26,6 +26,13 @@ func Patchable(f Finding) (ok bool, why string) {
 	default:
 		return false, fmt.Sprintf("verdict %s, so tare does not stand behind a number for it", f.Verdict)
 	}
+	// A virt-launcher pod carries KubeVirt's own containers beside compute:
+	// the console logger, container disks, sidecar hooks. KubeVirt sizes
+	// them; the VM spec has no field for any of them.
+	if (kind == "VirtualMachine" || kind == "VirtualMachineInstance") && f.Container != discover.VMComputeContainer {
+		return false, fmt.Sprintf("%s is a container KubeVirt adds to the VM's virt-launcher pod and sizes itself; "+
+			"the VM spec has no field for it", f.Container)
+	}
 	// A Job's spec.template is immutable: the patch is rejected with "field is
 	// immutable", and writing it into a repo produces a diff that cannot be
 	// applied to the running object either.
