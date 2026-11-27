@@ -1443,6 +1443,22 @@ does not read `guestAtBoot`. `TestVMChangeNotesNameEveryCause`,
 `TestBareVMIHasNoRestartNote`, `TestCeilingRestatedForTheNewGuest`,
 `TestNeedsVCPUsSaysWhatTheRequestIsFor`.
 
+## 65. A large VM read SATURATED on a wait a small one would not
+
+**Looked like:** nothing yet on a cluster; found in review (2026-11-25). A
+16-vCPU VM whose vCPUs each waited 0.4% of the time for a host CPU would read
+0.064 s/s against the 0.03 pressure threshold, `VM_VCPU_DELAY`, "the guest is
+being denied host CPU", and its CPU request held or raised. The same wait per
+vCPU on a 1-vCPU VM read 0.004 and was fine.
+
+**Was actually:** virt-handler exports `kubevirt_vmi_vcpu_delay_seconds_total`
+per vCPU, and the queries summed the vCPUs before comparing with a threshold
+that is a fraction of one CPU, as PSI is. The bigger the VM, the lower the
+per-vCPU wait that tripped it.
+
+**Fixed by:** the mean over vCPUs (`avg by (namespace,name)`), so the delay
+reads on PSI's scale whatever the VM's size. `TestVCPUDelayIsPerVCPU`.
+
 ## Open, and not yet solved
 
 **KubeVirt support has not met a cluster with VMs.** Everything in 57-60 and

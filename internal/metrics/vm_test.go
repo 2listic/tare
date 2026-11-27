@@ -170,3 +170,23 @@ func TestVMSampleCountsAddUpTheNodesSeries(t *testing.T) {
 		t.Errorf("%d sample counts found, want the domain count and the guest coverage", n)
 	}
 }
+
+// virt-handler exports vCPU delay per vCPU, and the pressure threshold it is
+// compared with is a fraction of one CPU. Summed, a 16-vCPU VM at 0.4% wait
+// per vCPU read 0.064 and was SATURATED where the same wait on one vCPU was
+// not: the delay must be the mean per vCPU.
+func TestVCPUDelayIsPerVCPU(t *testing.T) {
+	var n int
+	for _, q := range vmQueries([]string{"vms"}, 7*24*time.Hour) {
+		if q.signal != SigVMVCPUDelay {
+			continue
+		}
+		n++
+		if strings.Contains(q.expr, "sum by") || !strings.Contains(q.expr, "avg by (namespace,name) (rate(kubevirt_vmi_vcpu_delay_seconds_total") {
+			t.Errorf("vCPU delay is not averaged over vCPUs: %s", q.expr)
+		}
+	}
+	if n != 2 {
+		t.Errorf("%d vCPU delay queries, want the mean and the peak", n)
+	}
+}

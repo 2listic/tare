@@ -81,7 +81,8 @@ type VMObservation struct {
 	// vCPU running time, in cores.
 	OverheadCPUP95 float64
 	// VCPUDelayAvg and VCPUDelayMax are the host run-queue wait of the vCPU
-	// threads, seconds per second summed over vCPUs. Sustained is the window
+	// threads, seconds per second per vCPU (the mean over vCPUs), so they
+	// read on the same 0-1 scale as PSI whatever the VM's size. Sustained is the window
 	// mean; the peak is the worst 1m bucket. Same quantity tare-agent's CPU
 	// wait measures for a container.
 	VCPUDelayAvg float64
@@ -180,6 +181,7 @@ func vmQueries(namespaces []string, window time.Duration) []vmQuery {
 	w := durationString(window)
 	const step, peak = "5m", "1m"
 	by := "sum by (namespace,name)"
+	perVCPU := "avg by (namespace,name)"
 	vcpu := func(r string) string {
 		return fmt.Sprintf(`%s (rate(kubevirt_vmi_vcpu_seconds_total{%s}[%s]))`, by, sel(vmRunning), r)
 	}
@@ -191,9 +193,12 @@ func vmQueries(namespaces []string, window time.Duration) []vmQuery {
 		{SigVMOverheadCPU, fmt.Sprintf(`quantile_over_time(0.95, clamp_min(%s (rate(kubevirt_vmi_cpu_usage_seconds_total{%s}[%s])) - %s, 0)[%s:%s])`,
 			by, sel(), step, vcpu(step), w, step),
 			func(o *VMObservation, v float64) { o.OverheadCPUP95 = v }},
-		{SigVMVCPUDelay, fmt.Sprintf(`avg_over_time((%s (rate(kubevirt_vmi_vcpu_delay_seconds_total{%s}[%s])))[%s:%s])`, by, sel(), step, w, step),
+		// Averaged, not summed: the series are per vCPU, and the threshold
+		// they meet is a fraction of one CPU. Summed, a 16-vCPU VM read 16
+		// times the wait of a 1-vCPU VM with the same per-vCPU stall.
+		{SigVMVCPUDelay, fmt.Sprintf(`avg_over_time((%s (rate(kubevirt_vmi_vcpu_delay_seconds_total{%s}[%s])))[%s:%s])`, perVCPU, sel(), step, w, step),
 			func(o *VMObservation, v float64) { o.VCPUDelayAvg = v }},
-		{SigVMVCPUDelay, fmt.Sprintf(`max_over_time((%s (rate(kubevirt_vmi_vcpu_delay_seconds_total{%s}[%s])))[%s:%s])`, by, sel(), peak, w, peak),
+		{SigVMVCPUDelay, fmt.Sprintf(`max_over_time((%s (rate(kubevirt_vmi_vcpu_delay_seconds_total{%s}[%s])))[%s:%s])`, perVCPU, sel(), peak, w, peak),
 			func(o *VMObservation, v float64) { o.VCPUDelayMax = v }},
 		{SigVMMemResident, fmt.Sprintf(`max by (namespace,name) (max_over_time(kubevirt_vmi_memory_resident_bytes{%s}[%s]))`, sel(), w),
 			func(o *VMObservation, v float64) { o.MemResident = v }},

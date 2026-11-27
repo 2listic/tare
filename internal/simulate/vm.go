@@ -21,7 +21,7 @@ type VMDemand struct {
 	// memory report at all.
 	NoGuestStats bool
 	Windows      bool
-	// VCPUDelay is the vCPUs' host run-queue wait, s/s summed over vCPUs.
+	// VCPUDelay is the vCPUs' host run-queue wait, s/s per vCPU (the mean over vCPUs).
 	VCPUDelay float64
 	// GuestLoad is the guest's own 5-minute load at p95; zero means no
 	// qemu-guest-agent and no load reported.

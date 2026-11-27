@@ -215,7 +215,7 @@ func assessSaturation(f *Finding, th Thresholds) starved {
 	if !st.cpu && f.vcpuDelayStalled(th) && wantsCPU {
 		f.Verdict, st.cpu = Saturated, true
 		f.Reasons = append(f.Reasons, measured(VMVCPUDelay, f.VMObs.VCPUDelayAvg, th.PSIWaiting, SecPerSec, fmt.Sprintf(
-			"the VM's vCPUs waited %.3f s/s for a host CPU on average (worst minute %.3f) against a %.3f threshold, "+
+			"the VM's vCPUs each waited %.3f s/s for a host CPU on average (worst minute %.3f) against a %.3f threshold, "+
 				"while using %.0f%% of its allocation: the guest is being denied host CPU",
 			f.VMObs.VCPUDelayAvg, f.VMObs.VCPUDelayMax, th.PSIWaiting, util*100)))
 	}

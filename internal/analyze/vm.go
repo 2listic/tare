@@ -129,7 +129,7 @@ func decideVM(f *Finding, th Thresholds) {
 		f.RecCPULimit = max(f.RecCPULimit, f.CPULimit, f.RecCPU)
 		if !f.Has(VMVCPUDelay) {
 			f.Reasons = append(f.Reasons, measured(VMVCPUDelay, o.VCPUDelayAvg, th.PSIWaiting, SecPerSec, fmt.Sprintf(
-				"the VM's vCPUs waited %.3f s/s for a host CPU on average against a %.3f threshold, so its CPU request is not reduced",
+				"the VM's vCPUs each waited %.3f s/s for a host CPU on average against a %.3f threshold, so its CPU request is not reduced",
 				o.VCPUDelayAvg, th.PSIWaiting)))
 		}
 	}
